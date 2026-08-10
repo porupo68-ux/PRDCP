@@ -1,4 +1,4 @@
-# PRDCP v2
+# PRDCP 
 
 ProducerがResearch Planを作成し、Researcherが証拠を収集し、Deliberationが多角的に分析し、Conclusionが人間の最終選択を確定します。Playwrightは、その確定済みConclusionを変更せず、台本・引用台帳・映像指示・制作ノートへ変換します。OpenRouter APIキーがなくてもMock Providerで5層の全工程を確認できます。
 
