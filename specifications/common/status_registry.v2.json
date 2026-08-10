@@ -1,0 +1,35 @@
+{
+  "registry_name": "PRDCP Status Registry",
+  "registry_version": "2.0.0",
+  "enums": {
+    "quality_gate_decision": [
+      "approved",
+      "approved_with_conditions",
+      "revision_required",
+      "blocked"
+    ],
+    "task_status": [
+      "pending",
+      "in_progress",
+      "completed",
+      "completed_with_limitations",
+      "revision_required",
+      "blocked",
+      "failed"
+    ],
+    "message_metadata_status": [
+      "created",
+      "queued",
+      "in_progress",
+      "completed",
+      "revision_required",
+      "failed",
+      "cancelled"
+    ],
+    "document_status": [
+      "stable",
+      "draft",
+      "deprecated"
+    ]
+  }
+}

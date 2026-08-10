@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from common.role_definitions import RoleDefinitionLoader
+from common.validation import PMPValidator, PayloadValidator
+from config.settings import BASE_DIR
+from conclusion.agents import (
+    ConclusionQualityReviewer,
+    DecisionEvaluator,
+    DecisionIntegrator,
+    PositionGenerator,
+)
+from providers.base import ModelProvider
+
+
+class ConclusionRegistry:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        models: dict[str, str] | None = None,
+        *,
+        rd_loader: RoleDefinitionLoader | None = None,
+    ) -> None:
+        self.provider = provider
+        self.models = models or {}
+        self.rd_loader = rd_loader or RoleDefinitionLoader.from_project(
+            BASE_DIR,
+            access_log_path=Path(BASE_DIR) / "storage" / "data" / "logs" / "rd_access.jsonl",
+        )
+        payload_validator = PayloadValidator()
+        pmp_validator = PMPValidator()
+        agent_types = [
+            PositionGenerator,
+            DecisionEvaluator,
+            DecisionIntegrator,
+            ConclusionQualityReviewer,
+        ]
+        self._agents = {
+            agent_type.agent_id: agent_type(
+                provider,
+                payload_validator,
+                pmp_validator,
+                model=self.models.get(agent_type.agent_id) or "mock",
+                rd_loader=self.rd_loader,
+            )
+            for agent_type in agent_types
+        }
+
+    def get(self, agent_id: str):
+        try:
+            return self._agents[agent_id]
+        except KeyError as exc:
+            raise KeyError(f"Conclusion agent is not registered: {agent_id}") from exc
+
+    @property
+    def agent_ids(self) -> set[str]:
+        return set(self._agents)

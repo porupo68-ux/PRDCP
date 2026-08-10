@@ -1,0 +1,2 @@
+台本内の検証可能主張を上流Source Manifestへ照合し、Citation Manifestと修正版Artifactを作成してください。新しい調査や出典生成を行わず、Unsupported Claimは削除・弱い表現・上流要求のいずれかへ分類してください。
+

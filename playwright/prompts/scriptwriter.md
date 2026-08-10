@@ -1,0 +1,2 @@
+承認済みNarrative Blueprintに従い、日本語の読み上げ可能な台本を段落ID付きで作成してください。新しいEvidenceや数値を作らず、claim_id・evidence_id、不確実性、制限事項を保持してください。
+

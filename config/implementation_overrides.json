@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "excluded_agents": {
+    "playwright.quality_reviewer": {
+      "reason": "Playwright Prototype v1 implementation plan fixes the layer at five agents.",
+      "replacement": [
+        "playwright.manager final gate",
+        "playwright.evidence_citation_editor",
+        "playwright.validator"
+      ]
+    }
+  }
+}

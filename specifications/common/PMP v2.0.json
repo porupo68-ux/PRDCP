@@ -1,0 +1,29 @@
+{
+  "protocol_version": "2.0",
+  "message_id": "",
+  "workflow_id": "",
+  "parent_message_id": null,
+  "sender_agent_id": "",
+  "receiver_agent_id": "",
+  "message_type": "",
+  "objective": "",
+  "payload": {},
+  "constraints": {},
+  "context": {
+    "current_stage": "",
+    "previous_stage": "",
+    "next_stage": ""
+  },
+  "routing": {
+    "revision_target": null,
+    "reply_required": true
+  },
+  "metadata": {
+    "created_at": "",
+    "updated_at": "",
+    "status": "created",
+    "priority": "medium",
+    "retry_count": 0,
+    "notes": ""
+  }
+}

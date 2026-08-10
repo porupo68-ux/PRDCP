@@ -1,0 +1,119 @@
+{
+  "registry_name": "PRDCP Cross-layer Handoff Contracts",
+  "registry_version": "2.0.0",
+  "contracts": {
+    "producer_to_researcher": {
+      "message_type": "research_plan",
+      "sender": "producer.manager",
+      "receiver": "researcher.manager",
+      "required_payload": [
+        "research_plan_id",
+        "topic",
+        "general_opinion",
+        "research_questions",
+        "scope",
+        "constraints"
+      ],
+      "required_ids": [
+        "research_plan_id",
+        "topic_id",
+        "general_opinion_id",
+        "research_question_id"
+      ]
+    },
+    "researcher_to_deliberation": {
+      "message_type": "research_result",
+      "sender": "researcher.manager",
+      "receiver": "deliberation.manager",
+      "required_payload": [
+        "research_report_id",
+        "research_plan_id",
+        "topic",
+        "general_opinion",
+        "research_questions",
+        "research_scope",
+        "evidence_items",
+        "source_metadata",
+        "source_perspectives",
+        "evidence_quality_assessments",
+        "research_limitations",
+        "unresolved_questions"
+      ],
+      "required_ids": [
+        "research_question_id",
+        "evidence_id",
+        "source_id"
+      ]
+    },
+    "deliberation_to_conclusion": {
+      "message_type": "deliberation_result",
+      "sender": "deliberation.manager",
+      "receiver": "conclusion.manager",
+      "required_payload": [
+        "problem_definition",
+        "claim_structure",
+        "key_assumptions",
+        "evidence_relationships",
+        "causal_model",
+        "structural_factors",
+        "stakeholder_structure",
+        "existing_response_evaluation",
+        "counterarguments",
+        "alternative_interpretations",
+        "trade_offs",
+        "uncertainties",
+        "analysis_perspectives",
+        "unresolved_issues",
+        "research_gaps",
+        "source_traceability",
+        "quality_review"
+      ],
+      "required_ids": [
+        "research_question_id",
+        "analysis_id",
+        "evidence_id",
+        "source_id"
+      ]
+    },
+    "conclusion_to_playwright": {
+      "message_type": "conclusion_handoff",
+      "sender": "conclusion.manager",
+      "receiver": "playwright.manager",
+      "required_payload": [
+        "conclusion_id",
+        "topic",
+        "general_opinion",
+        "central_question",
+        "selected_position",
+        "recommendations",
+        "decision_rationale",
+        "supporting_claims",
+        "supporting_analysis",
+        "evidence_links",
+        "evaluation_summary",
+        "implementation_conditions",
+        "expected_benefits",
+        "risks",
+        "trade_offs",
+        "affected_stakeholders",
+        "counterarguments",
+        "uncertainties",
+        "limitations",
+        "unresolved_issues",
+        "prohibited_interpretations",
+        "source_registry_reference",
+        "quality_review",
+        "workflow_metadata"
+      ],
+      "required_ids": [
+        "conclusion_id",
+        "position_id",
+        "claim_id",
+        "analysis_id",
+        "evidence_id",
+        "source_id"
+      ],
+      "human_gate": "user_final_selection"
+    }
+  }
+}

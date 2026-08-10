@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prdcp"
+version = "2.0.0"
+description = "Canonical RD-aware five-layer multi-agent system for evidence-based YouTube production"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8,<3",
+  "discord.py>=2.4,<3",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.12,<1"]
+
+[project.scripts]
+prdcp = "cli_app.commands:entrypoint"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["main", "runtime"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "cli_app*",
+  "common*",
+  "conclusion*",
+  "config*",
+  "deliberation*",
+  "discord_app*",
+  "playwright*",
+  "producer*",
+  "providers*",
+  "researcher*",
+  "role_definitions*",
+  "specifications*",
+  "storage*",
+]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+config = ["*.json"]
+producer = ["prompts/*.md"]
+researcher = ["prompts/*.md"]
+deliberation = ["prompts/*.md"]
+conclusion = ["prompts/*.md"]
+playwright = ["prompts/*.md"]
+role_definitions = ["*.json", "*.md", "*/*.json"]
+specifications = ["common/*.json", "common/*.md"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["storage/data"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

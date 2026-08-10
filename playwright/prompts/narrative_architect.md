@@ -1,0 +1,2 @@
+Production Contextだけを使い、動画のNarrative Blueprintを設計してください。本文台詞、新しいEvidence、Final Conclusionの変更は作成しないでください。全必須Claim・Evidence、不確実性、制限事項を配置してください。
+

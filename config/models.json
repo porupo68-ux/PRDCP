@@ -1,0 +1,126 @@
+{
+  "producer.manager": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_PRODUCER_MANAGER"
+  },
+  "producer.topic_scout": {
+    "display_name": "Perplexity Sonar",
+    "environment_key": "MODEL_PRODUCER_TOPIC_SCOUT"
+  },
+  "producer.topic_selector": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_PRODUCER_TOPIC_SELECTOR"
+  },
+  "producer.general_opinion_analyst": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_PRODUCER_GENERAL_OPINION_ANALYST"
+  },
+  "producer.research_planner": {
+    "display_name": "Perplexity Sonar Pro",
+    "environment_key": "MODEL_PRODUCER_RESEARCH_PLANNER"
+  },
+  "producer.quality_reviewer": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_PRODUCER_QUALITY_REVIEWER"
+  },
+  "researcher.manager": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_RESEARCHER_MANAGER"
+  },
+  "researcher.expert_researcher": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_RESEARCHER_EXPERT"
+  },
+  "researcher.academic_researcher": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_RESEARCHER_ACADEMIC"
+  },
+  "researcher.government_researcher": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_RESEARCHER_GOVERNMENT"
+  },
+  "researcher.news_researcher": {
+    "display_name": "Perplexity Sonar",
+    "environment_key": "MODEL_RESEARCHER_NEWS"
+  },
+  "researcher.public_opinion_researcher": {
+    "display_name": "Perplexity Sonar",
+    "environment_key": "MODEL_RESEARCHER_PUBLIC_OPINION"
+  },
+  "researcher.politician_researcher": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_RESEARCHER_POLITICIAN"
+  },
+  "researcher.industry_researcher": {
+    "display_name": "Perplexity Sonar Deep Research",
+    "environment_key": "MODEL_RESEARCHER_INDUSTRY"
+  },
+  "researcher.quality_reviewer": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_RESEARCHER_QUALITY_REVIEWER"
+  },
+  "deliberation.manager": {
+    "display_name": "Moonshot AI Kimi K3",
+    "environment_key": "MODEL_DELIBERATION_MANAGER"
+  },
+  "deliberation.argument_analyst": {
+    "display_name": "DeepSeek R1",
+    "environment_key": "MODEL_DELIBERATION_ARGUMENT"
+  },
+  "deliberation.causal_structural_analyst": {
+    "display_name": "DeepSeek R1",
+    "environment_key": "MODEL_DELIBERATION_CAUSAL_STRUCTURAL"
+  },
+  "deliberation.stakeholder_response_analyst": {
+    "display_name": "DeepSeek R1",
+    "environment_key": "MODEL_DELIBERATION_STAKEHOLDER_RESPONSE"
+  },
+  "deliberation.counterargument_analyst": {
+    "display_name": "DeepSeek R1",
+    "environment_key": "MODEL_DELIBERATION_COUNTERARGUMENT"
+  },
+  "deliberation.quality_reviewer": {
+    "display_name": "OpenAI GPT-5.5",
+    "environment_key": "MODEL_DELIBERATION_QUALITY_REVIEWER"
+  },
+  "conclusion.manager": {
+    "display_name": "Qwen3.5 Flash",
+    "environment_key": "MODEL_CONCLUSION_MANAGER"
+  },
+  "conclusion.position_generator": {
+    "display_name": "Qwen3.5 Flash",
+    "environment_key": "MODEL_CONCLUSION_POSITION_GENERATOR"
+  },
+  "conclusion.decision_evaluator": {
+    "display_name": "Qwen3.6 35B A3B",
+    "environment_key": "MODEL_CONCLUSION_DECISION_EVALUATOR"
+  },
+  "conclusion.decision_integrator": {
+    "display_name": "Qwen3.6 35B A3B",
+    "environment_key": "MODEL_CONCLUSION_DECISION_INTEGRATOR"
+  },
+  "conclusion.quality_reviewer": {
+    "display_name": "Qwen3.6 35B A3B",
+    "environment_key": "MODEL_CONCLUSION_QUALITY_REVIEWER"
+  },
+  "playwright.manager": {
+    "display_name": "Moonshot AI Kimi K2.5",
+    "environment_key": "MODEL_PLAYWRIGHT_MANAGER"
+  },
+  "playwright.narrative_architect": {
+    "display_name": "Google Gemini Flash Latest",
+    "environment_key": "MODEL_PLAYWRIGHT_NARRATIVE_ARCHITECT"
+  },
+  "playwright.scriptwriter": {
+    "display_name": "Anthropic Claude Sonnet Latest",
+    "environment_key": "MODEL_PLAYWRIGHT_SCRIPTWRITER"
+  },
+  "playwright.evidence_citation_editor": {
+    "display_name": "OpenAI GPT-5 Mini",
+    "environment_key": "MODEL_PLAYWRIGHT_EVIDENCE_CITATION_EDITOR"
+  },
+  "playwright.visual_director": {
+    "display_name": "Z.ai GLM-4.5 Air",
+    "environment_key": "MODEL_PLAYWRIGHT_VISUAL_DIRECTOR"
+  }
+}

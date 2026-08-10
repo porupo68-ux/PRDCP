@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prdcp.local/schema/pmp-v2.0.json",
+  "title": "PRDCP Message Protocol v2.0",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "message_id",
+    "workflow_id",
+    "parent_message_id",
+    "sender_agent_id",
+    "receiver_agent_id",
+    "message_type",
+    "objective",
+    "payload",
+    "constraints",
+    "context",
+    "routing",
+    "metadata"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "2.0"
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_message_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sender_agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+    },
+    "receiver_agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+    },
+    "message_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object"
+    },
+    "constraints": {
+      "type": "object"
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "current_stage",
+        "previous_stage",
+        "next_stage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "current_stage": {
+          "type": "string"
+        },
+        "previous_stage": {
+          "type": "string"
+        },
+        "next_stage": {
+          "type": "string"
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "required": [
+        "revision_target",
+        "reply_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "revision_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "updated_at",
+        "status",
+        "priority",
+        "retry_count",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "priority": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

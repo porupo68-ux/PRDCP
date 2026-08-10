@@ -1,0 +1,13 @@
+.env
+desktop.ini
+__pycache__/
+*.py[cod]
+.pytest_cache/
+storage/data/workflows/**/*.json
+storage/data/workflows/**/*.jsonl
+storage/data/outbox/**/*.json
+storage/data/artifacts/**/*.json
+storage/data/deliveries/**
+storage/data/logs/*
+!storage/data/**/.gitkeep
+archive/

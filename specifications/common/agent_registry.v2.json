@@ -1,0 +1,174 @@
+{
+  "registry_name": "PRDCP Agent Registry",
+  "registry_version": "2.0.0",
+  "id_format": "layer.role",
+  "agents": [
+    {
+      "agent_id": "producer.manager",
+      "display_name": "Producer Manager",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "producer.topic_scout",
+      "display_name": "Topic Scout",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "producer.topic_selector",
+      "display_name": "Topic Selector",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "producer.general_opinion_analyst",
+      "display_name": "General Opinion Analyst",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "producer.research_planner",
+      "display_name": "Research Planner",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "producer.quality_reviewer",
+      "display_name": "Producer Quality Reviewer",
+      "layer_id": "producer"
+    },
+    {
+      "agent_id": "researcher.manager",
+      "display_name": "Research Manager",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.expert_researcher",
+      "display_name": "Expert Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.academic_researcher",
+      "display_name": "Academic Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.government_researcher",
+      "display_name": "Government Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.news_researcher",
+      "display_name": "News Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.public_opinion_researcher",
+      "display_name": "Public Opinion Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.politician_researcher",
+      "display_name": "Politician Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.industry_researcher",
+      "display_name": "Industry Researcher",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "researcher.quality_reviewer",
+      "display_name": "Researcher Quality Reviewer",
+      "layer_id": "researcher"
+    },
+    {
+      "agent_id": "deliberation.manager",
+      "display_name": "Deliberation Manager",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "deliberation.argument_analyst",
+      "display_name": "Argument Analyst",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "deliberation.causal_structural_analyst",
+      "display_name": "Causal & Structural Analyst",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "deliberation.stakeholder_response_analyst",
+      "display_name": "Stakeholder & Response Analyst",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "deliberation.counterargument_analyst",
+      "display_name": "Counterargument Analyst",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "deliberation.quality_reviewer",
+      "display_name": "Deliberation Quality Reviewer",
+      "layer_id": "deliberation"
+    },
+    {
+      "agent_id": "conclusion.manager",
+      "display_name": "Conclusion Manager",
+      "layer_id": "conclusion"
+    },
+    {
+      "agent_id": "conclusion.position_generator",
+      "display_name": "Position Generator",
+      "layer_id": "conclusion"
+    },
+    {
+      "agent_id": "conclusion.decision_evaluator",
+      "display_name": "Decision Evaluator",
+      "layer_id": "conclusion"
+    },
+    {
+      "agent_id": "conclusion.decision_integrator",
+      "display_name": "Decision Integrator",
+      "layer_id": "conclusion"
+    },
+    {
+      "agent_id": "conclusion.quality_reviewer",
+      "display_name": "Conclusion Quality Reviewer",
+      "layer_id": "conclusion"
+    },
+    {
+      "agent_id": "playwright.manager",
+      "display_name": "Playwright Manager",
+      "layer_id": "playwright"
+    },
+    {
+      "agent_id": "playwright.narrative_architect",
+      "display_name": "Narrative Architect",
+      "layer_id": "playwright"
+    },
+    {
+      "agent_id": "playwright.scriptwriter",
+      "display_name": "Scriptwriter",
+      "layer_id": "playwright"
+    },
+    {
+      "agent_id": "playwright.evidence_citation_editor",
+      "display_name": "Evidence & Citation Editor",
+      "layer_id": "playwright"
+    },
+    {
+      "agent_id": "playwright.visual_director",
+      "display_name": "Visual Director",
+      "layer_id": "playwright"
+    },
+    {
+      "agent_id": "playwright.quality_reviewer",
+      "display_name": "Playwright Quality Reviewer",
+      "layer_id": "playwright"
+    }
+  ],
+  "endpoints": [
+    {
+      "endpoint_id": "system.final_output",
+      "display_name": "Final Script Output",
+      "kind": "delivery_endpoint"
+    }
+  ]
+}

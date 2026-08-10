@@ -1,0 +1,1 @@
+Conclusion成果物のSchema、PMP、実質的候補多様性、評価一貫性、Evidence/Analysis Traceability、不確実性、反対Evidence、責務境界、Human Gate準備状態を審査してください。内容の思想的好ましさや最終候補を決めないでください。

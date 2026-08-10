@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0.0",
+  "source_repairs": {
+    "Playwright/Role Definitions/Role Definition - Playwright Manager v1.docx": [
+      "required_conclusion_fields内の欠落カンマを補完",
+      "配列末尾の余分なカンマを除去",
+      "分離していたJSON sibling sectionsをrole_definitionへ統合",
+      "5 Agent Prototype v1に合わせ独立Quality Reviewer依存をManager Final Gateへ置換",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Playwright/Role Definitions/Role Definition - Narrative Architect v1.docx": [
+      "分離していたJSON sibling sectionsをrole_definitionへ統合",
+      "RDLoader用schema metadata、runtime_contract、runtime_boundaryを追加"
+    ],
+    "Playwright/Role Definitions/Role Definition - Scriptwriter v1.docx": [
+      "分離していたJSON sibling sectionsをrole_definitionへ統合",
+      "RDLoader用schema metadata、runtime_contract、runtime_boundaryを追加"
+    ],
+    "Playwright/Role Definitions/Role Definition - Evidence & Citation Editor v1.docx": [
+      "分離していたJSON sibling sectionsをrole_definitionへ統合",
+      "RDLoader用schema metadata、runtime_contract、runtime_boundaryを追加"
+    ],
+    "Playwright/Role Definitions/Role Definition - Visual Director v1.docx": [
+      "分離していたJSON sibling sectionsをrole_definitionへ統合",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Conclusion/Role Definitions/Role Definition - Conclusion Manager v1.docx": [
+      "JSON内の設計コメントを正本データから分離",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Conclusion/Role Definitions/Role Definition - Position Generator v1.docx": [
+      "JSON内の設計コメントを正本データから分離",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Conclusion/Role Definitions/Role Definition - Decision Evaluator v1.docx": [
+      "JSON前の見出しを正本データから分離",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Conclusion/Role Definitions/Role Definition - Decision Integrator v1.docx": [
+      "JSON前の見出しを正本データから分離",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Conclusion/Role Definitions/Role Definition - Conclusion Quality Reviewer v1.docx": [
+      "JSON前の見出しを正本データから分離",
+      "RDLoader用runtime_contractとruntime_boundaryを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - General Opinion Analyst v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - Producer Manager v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - Quality Reviewer v1.docx": [
+      "output_schema直後の欠落カンマを補完",
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - Research Planner v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - Topic Scout v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Producer/Role Definitions/Role Definition - Topic Selector v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Academic Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Expert Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Government Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Industry Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - News Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Politician Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Public Opinion Researcher v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Quality Reviewer v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Researcher/Role Definitions/Role Definition - Researcher Manager v1.docx": [
+      "legacy RDへschema/layer/mission metadataを追加"
+    ],
+    "Deliberation/Role Definitions/Role Definition - Argument Analyst v1.docx": [
+      "欠落していたcompletion_conditions配列キーを復元",
+      "分断されたcross_analysis_alignment_policyをrole_definitionへ統合",
+      "JSONオブジェクト後の説明文を正本から分離"
+    ],
+    "Deliberation/Role Definitions/Role Definition - Causal & Structural Analyst v1.docx": [
+      "JSONオブジェクト後の説明文を正本から分離"
+    ],
+    "Deliberation/Role Definitions/Role Definition - Counterargument Analyst v1.docx": [
+      "破損したschema宣言を復元",
+      "破損したagent_identityのlayer_id/agent_typeを復元"
+    ]
+  }
+}
