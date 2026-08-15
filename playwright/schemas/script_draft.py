@@ -41,6 +41,14 @@ class ScriptSection(BaseModel):
         return self
 
 
+class ScriptUnresolvedItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    issue_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    target_section_id: str | None = None
+
+
 class ScriptDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -52,7 +60,7 @@ class ScriptDraft(BaseModel):
     estimated_character_count: int = Field(ge=1)
     sections: list[ScriptSection] = Field(min_length=1)
     disclosure_summary: list[str] = Field(default_factory=list)
-    unresolved_items: list[dict[str, Any]] = Field(default_factory=list)
+    unresolved_items: list[ScriptUnresolvedItem] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_section_and_paragraph_ids(self) -> "ScriptDraft":
@@ -74,4 +82,3 @@ class ScriptWritingTask(BaseModel):
     production_context: ProductionContext
     narrative_blueprint: NarrativeBlueprint
     revision_context: dict[str, Any] | None = None
-

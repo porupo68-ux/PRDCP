@@ -7,7 +7,7 @@ def argument_analysis(input_data: dict) -> dict:
     evidence_ids = input_data["target_evidence_ids"][:2]
     claim_id = new_id("claim")
     return {
-        "analysis_id": new_id("analysis_argument"),
+        "analysis_id": new_id("argument_analysis"),
         "task_id": input_data["task_id"],
         "central_claims": [
             {
@@ -53,7 +53,7 @@ def argument_analysis(input_data: dict) -> dict:
 def causal_analysis(input_data: dict) -> dict:
     evidence_ids = input_data["target_evidence_ids"][:2]
     return {
-        "analysis_id": new_id("analysis_causal"),
+        "analysis_id": new_id("causal_analysis"),
         "task_id": input_data["task_id"],
         "causal_claims": [
             _causal_item("causal", "定型業務の自動化が業務構成を変える", evidence_ids, "PLAUSIBLE")
@@ -93,7 +93,7 @@ def stakeholder_analysis(input_data: dict) -> dict:
     employer_id = new_id("stakeholder")
     response_id = new_id("response")
     return {
-        "analysis_id": new_id("analysis_stakeholder"),
+        "analysis_id": new_id("stakeholder_analysis"),
         "task_id": input_data["task_id"],
         "stakeholders": [
             {"stakeholder_id": worker_id, "name": "労働者", "role": "影響を受ける主体", "evidence_ids": evidence_ids},
@@ -144,6 +144,16 @@ def initial_integration(input_data: dict) -> dict:
         )
     ) or [report["evidence_items"][0]["evidence_id"]]
     viewpoint_id = new_id("viewpoint")
+    source_by_evidence = {
+        item["evidence_id"]: item["source_id"]
+        for item in report["evidence_items"]
+    }
+    argument_analysis_id = argument.get("analysis_id")
+    fallback_analysis_ids = [
+        analysis["analysis_id"]
+        for analysis in analyses.values()
+        if analysis.get("analysis_id")
+    ]
     return {
         "integration_id": new_id("integration_initial"),
         "problem_definition": {
@@ -161,7 +171,31 @@ def initial_integration(input_data: dict) -> dict:
         "candidate_viewpoints": [
             _viewpoint(viewpoint_id, claims, evidence_ids, "条件依存の変化", "単純な全面代替ではなく職務再構成として捉える")
         ],
-        "traceability_index": {claim.get("claim_id", "claim"): claim.get("evidence_ids", evidence_ids) for claim in claims},
+        "traceability_index": [
+            {
+                "claim_ids": [claim.get("claim_id", "claim_unknown")],
+                "viewpoint_ids": [],
+                "causal_item_ids": [],
+                "integration_change_ids": [],
+                "evidence_ids": claim.get("evidence_ids", evidence_ids),
+                "source_ids": list(
+                    dict.fromkeys(
+                        source_by_evidence[evidence_id]
+                        for evidence_id in claim.get("evidence_ids", evidence_ids)
+                        if evidence_id in source_by_evidence
+                    )
+                ),
+                "analysis_ids": (
+                    [argument_analysis_id]
+                    if argument_analysis_id
+                    else fallback_analysis_ids
+                ),
+                "counterargument_ids": [],
+                "integration_ids": [],
+                "task_ids": [],
+            }
+            for claim in claims
+        ],
         "limitations": list(report.get("research_limitations", [])),
     }
 
@@ -171,7 +205,7 @@ def counterargument_analysis(input_data: dict) -> dict:
     claim_ids = input_data["key_claim_ids"]
     counter_id = new_id("counterargument")
     return {
-        "analysis_id": new_id("analysis_counterargument"),
+        "analysis_id": new_id("counterargument_analysis"),
         "task_id": input_data["task_id"],
         "steelman_arguments": [
             {
@@ -184,11 +218,17 @@ def counterargument_analysis(input_data: dict) -> dict:
         ],
         "counterarguments": [
             {
-                "challenge_id": counter_id,
+                "counterargument_id": counter_id,
                 "target_claim_ids": claim_ids,
                 "argument": "集計された雇用者数だけでは業務内容の劣化や分配影響を捉えられない",
-                "evidence_ids": evidence_ids,
-                "strength": "STRONG",
+                "severity": "major",
+                "impact": "中心主張の適用範囲と分配影響の記述を修正する必要がある",
+                "supporting_evidence_ids": evidence_ids,
+                "required_revision": True,
+                "revision_target_agent_ids": ["deliberation.manager"],
+                "remaining_uncertainty": "導入速度と分配影響の規模は未確定",
+                "research_gap_required": False,
+                "acceptance_conditions": ["最終統合に条件依存性と分配影響を明示する"],
             }
         ],
         "contrary_evidence": [{"evidence_ids": evidence_ids, "summary": "反対方向の観測も含まれる"}],
@@ -204,9 +244,12 @@ def counterargument_analysis(input_data: dict) -> dict:
                 "required_change": "条件依存性と分配影響を明示する",
                 "reason": "強い反論を最終Viewpointに残す必要がある",
                 "source_counterargument_ids": [counter_id],
+                "revision_target_agent_ids": ["deliberation.manager"],
+                "acceptance_conditions": ["最終統合に条件依存性と分配影響を明示する"],
+                "research_gap_required": False,
             }
         ],
-        "remaining_uncertainties": ["導入速度と制度対応速度の比較"],
+        "remaining_uncertainties": ["導入速度と分配影響の規模は未確定"],
     }
 
 
@@ -230,7 +273,8 @@ def final_integration(input_data: dict) -> dict:
     )
     viewpoint["counterarguments"] = [item["argument"] for item in counter["counterarguments"]]
     viewpoint["strongest_objections"] = [counter["counterarguments"][0]["argument"]]
-    source_counter_ids = [counter["counterarguments"][0]["challenge_id"]]
+    source_counter_ids = [counter["counterarguments"][0]["counterargument_id"]]
+    change_id = new_id("change")
     return {
         "integration_id": new_id("integration_final"),
         "previous_integration_id": initial["integration_id"],
@@ -248,13 +292,25 @@ def final_integration(input_data: dict) -> dict:
         "limitations": initial["limitations"],
         "integration_changes": [
             {
-                "change_id": new_id("change"),
+                "change_id": change_id,
                 "target_item_id": counter["required_revisions"][0]["target_item_id"],
                 "change_type": "QUALIFY",
                 "before_summary": "条件依存性の記述が限定的",
                 "after_summary": "導入速度、補完業務、分配影響を明示",
                 "reason": counter["required_revisions"][0]["reason"],
                 "source_counterargument_ids": source_counter_ids,
+            }
+        ],
+        "counterargument_dispositions": [
+            {
+                "counterargument_id": source_counter_ids[0],
+                "resolution": "revised",
+                "rationale": "Counterargumentの指摘を最終Viewpointへ反映した",
+                "revision_target_agent_ids": ["deliberation.manager"],
+                "integration_change_ids": [change_id],
+                "remaining_uncertainty": counter["counterarguments"][0]["remaining_uncertainty"],
+                "research_gap_required": False,
+                "acceptance_conditions": counter["counterarguments"][0]["acceptance_conditions"],
             }
         ],
         "traceability_index": initial["traceability_index"],
@@ -350,6 +406,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             "upstream_revision_requests": [
                 {
                     "revision_request_id": new_id("upstream_revision"),
+                    "target_agent_id": "researcher.manager",
                     "research_question_id": report["research_questions"][0]["research_question_id"],
                     "affected_claim_ids": [],
                     "missing_evidence_description": "因果メカニズムを直接検証する一次Evidence",
@@ -361,6 +418,61 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
                 }
             ],
         }
+    if decision == "mixed_internal_and_upstream":
+        upstream = quality_review(input_data, "upstream_evidence_required")
+        internal_finding_id = new_id("finding")
+        upstream["reason"] = "内部traceability修正後も追加Evidenceが必要"
+        upstream["findings"].append(
+            {
+                "finding_id": internal_finding_id,
+                "severity": "MAJOR",
+                "category": "traceability",
+                "issue": "Argument Analysisの内部mapping修正が必要",
+                "required_action": "Argument Analystを内部revisionする",
+                "affected_agent_ids": ["deliberation.argument_analyst"],
+                "evidence_ids": evidence_ids[:1],
+            }
+        )
+        upstream["revision_targets"] = ["deliberation.argument_analyst"]
+        return upstream
+    if decision in {
+        "mixed_upstream_counterargument",
+        "mixed_upstream_manager",
+        "mixed_upstream_all",
+    }:
+        mixed = quality_review(input_data, "mixed_internal_and_upstream")
+        targets = {
+            "mixed_upstream_counterargument": ["deliberation.counterargument_analyst"],
+            "mixed_upstream_manager": ["deliberation.manager"],
+            "mixed_upstream_all": [
+                "deliberation.argument_analyst",
+                "deliberation.counterargument_analyst",
+                "deliberation.manager",
+            ],
+        }[decision]
+        mixed["revision_targets"] = targets
+        mixed["findings"][-1]["affected_agent_ids"] = targets
+        return mixed
+    if decision == "mixed_real_case":
+        mixed = quality_review(input_data, "mixed_internal_and_upstream")
+        mixed["reason"] = "追加Evidence取得後にStakeholder分析と反論処理の再計算が必要"
+        mixed["findings"][-1]["affected_agent_ids"] = [
+            "deliberation.stakeholder_response_analyst",
+            "deliberation.counterargument_analyst",
+            "deliberation.manager",
+        ]
+        mixed["revision_targets"] = [
+            "deliberation.stakeholder_response_analyst",
+            "deliberation.counterargument_analyst",
+            "deliberation.manager",
+        ]
+        second_request = dict(mixed["upstream_revision_requests"][0])
+        second_request["revision_request_id"] = new_id("upstream_revision")
+        second_request["missing_evidence_description"] = (
+            "Stakeholder固有情報と重要反論を検証する追加Evidence"
+        )
+        mixed["upstream_revision_requests"].append(second_request)
+        return mixed
     if decision == "blocked":
         finding_id = new_id("finding")
         return {

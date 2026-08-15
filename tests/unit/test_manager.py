@@ -16,7 +16,11 @@ class ProducerManagerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         repository = WorkflowRepository(Path(temporary.name))
-        manager = ProducerManager(ProducerRegistry(provider), repository)
+        manager = ProducerManager(
+            ProducerRegistry(provider, demo_safe_mode=False),
+            repository,
+            demo_safe_mode=False,
+        )
         state = asyncio.run(manager.start(user_topic="生成AIは人間の仕事を奪うのか"))
         return state, repository
 
@@ -53,14 +57,15 @@ class ProducerManagerTests(unittest.TestCase):
         provider = MockModelProvider(fail_schemas={"TopicSelectorOutput"})
         state, _repository = self.run_workflow(provider)
         self.assertEqual(state.status, "FAILED")
-        self.assertIn("technical retry", state.error["message"])
+        self.assertIn("unclassified provider error", state.error["message"])
+        self.assertEqual(provider.calls.count("TopicSelectorOutput"), 1)
 
     def test_invalid_agent_response_is_rejected(self):
         provider = MockModelProvider()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         repository = WorkflowRepository(Path(temporary.name))
-        registry = ProducerRegistry(provider)
+        registry = ProducerRegistry(provider, demo_safe_mode=False)
         original_agent = registry.get("producer.topic_scout")
 
         class InvalidResponseAgent:
@@ -71,7 +76,7 @@ class ProducerManagerTests(unittest.TestCase):
                 return PMPMessage.model_validate(data)
 
         registry._agents["producer.topic_scout"] = InvalidResponseAgent()
-        manager = ProducerManager(registry, repository)
+        manager = ProducerManager(registry, repository, demo_safe_mode=False)
         state = asyncio.run(manager.start())
         self.assertEqual(state.status, "FAILED")
         self.assertIn("Parent message ID mismatch", state.error["message"])
@@ -79,4 +84,3 @@ class ProducerManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

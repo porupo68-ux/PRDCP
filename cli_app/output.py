@@ -56,10 +56,14 @@ def format_state_summary(
         lines.append("  failed agents: " + ", ".join(failed))
     revision_count = int(data.get("revision_count") or 0)
     upstream_count = int(data.get("upstream_revision_count") or 0)
-    if revision_count or upstream_count:
+    external_count = int(data.get("external_revision_count") or 0)
+    if revision_count or upstream_count or external_count:
         lines.append(
-            f"  revisions: internal={revision_count}, upstream={upstream_count}"
+            f"  revisions: internal={revision_count}, upstream={upstream_count}, "
+            f"external={external_count}"
         )
+    if data.get("external_revision_status"):
+        lines.append(f"  external checkpoint: {data['external_revision_status']}")
     if data.get("error"):
         lines.append(f"  error: {data['error']}")
 
@@ -93,6 +97,8 @@ def next_action_for(layer: str, data: dict[str, Any]) -> str | None:
         return f"py main.py --researcher {workflow_id}"
     if layer == "researcher" and status == "COMPLETED":
         return f"py main.py --deliberation {workflow_id}"
+    if layer == "researcher" and status == "COMPLETED_REVISION":
+        return f"py main.py --deliberation-resume {workflow_id}"
     if layer == "deliberation" and status == "COMPLETED":
         return f"py main.py --conclusion {workflow_id}"
     if layer == "conclusion" and status == "WAITING_HUMAN_SELECTION":

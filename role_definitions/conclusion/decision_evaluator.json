@@ -1859,8 +1859,7 @@
       "criterion_reasoning_required": true,
       "evaluation_profile_required": true,
       "conditional_comparison_required": true,
-      "max_internal_evaluation_attempts": 3,
-      "timeout_seconds": 600
+      "max_internal_evaluation_attempts": 3
     },
     "_design_notes": {
       "stable_decisions": [
@@ -1947,7 +1946,7 @@
       ],
       "input_schema_id": "conclusion.schemas.decision_evaluation.DecisionEvaluationTask",
       "output_schema_id": "conclusion.schemas.decision_evaluation.DecisionEvaluationResult",
-      "timeout_seconds": 120,
+      "timeout_seconds": 900,
       "technical_retry_limit": 2,
       "revision_limit": null,
       "parallel_execution_allowed": false,

@@ -38,6 +38,13 @@ class NarrativeSection(BaseModel):
     transition_goal: str | None = None
 
 
+class NarrativePlacement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: str = Field(min_length=1)
+    items: list[str] = Field(default_factory=list)
+
+
 class NarrativeBlueprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -50,8 +57,8 @@ class NarrativeBlueprint(BaseModel):
     sections: list[NarrativeSection] = Field(min_length=1)
     must_include_claim_ids: list[str] = Field(min_length=1)
     must_include_evidence_ids: list[str] = Field(min_length=1)
-    uncertainty_placement: list[dict[str, Any]] = Field(default_factory=list)
-    limitation_placement: list[dict[str, Any]] = Field(default_factory=list)
+    uncertainty_placement: list[NarrativePlacement] = Field(default_factory=list)
+    limitation_placement: list[NarrativePlacement] = Field(default_factory=list)
     emotional_arc: list[str] = Field(default_factory=list)
     pacing_notes: list[str] = Field(default_factory=list)
     prohibited_reframings: list[str] = Field(default_factory=list)
@@ -72,4 +79,3 @@ class NarrativeDesignTask(BaseModel):
     target_agent_id: str = Field(default="playwright.narrative_architect")
     production_context: ProductionContext
     revision_context: dict[str, Any] | None = None
-

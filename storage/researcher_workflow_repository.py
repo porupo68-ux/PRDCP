@@ -14,11 +14,13 @@ class ResearcherWorkflowRepository(JsonRepository):
         self.workflows_dir = data_dir / "workflows" / "researcher"
         self.producer_outbox_dir = data_dir / "outbox" / "researcher"
         self.deliberation_outbox_dir = data_dir / "outbox" / "deliberation"
+        self.researcher_revision_inbox_dir = data_dir / "outbox" / "researcher_revision"
         self.reports_dir = data_dir / "artifacts" / "research_reports"
         for directory in (
             self.workflows_dir,
             self.producer_outbox_dir,
             self.deliberation_outbox_dir,
+            self.researcher_revision_inbox_dir,
             self.reports_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -43,6 +45,12 @@ class ResearcherWorkflowRepository(JsonRepository):
         path = self.producer_outbox_dir / f"{workflow_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Producer handoff not found: {workflow_id}")
+        return PMPMessage.model_validate(self.read_json(path))
+
+    def load_revision_request(self, workflow_id: str) -> PMPMessage:
+        path = self.researcher_revision_inbox_dir / f"{workflow_id}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Researcher revision request not found: {workflow_id}")
         return PMPMessage.model_validate(self.read_json(path))
 
     def save_report(self, report: ResearchReport) -> Path:

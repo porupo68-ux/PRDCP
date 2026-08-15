@@ -134,8 +134,7 @@
   ],
   "configuration": {
     "max_questions": 3,
-    "allow_parallel": false,
-    "timeout_seconds": 180
+    "allow_parallel": false
   },
   "notes": [
     "Research Plannerは研究者ではなく設計者である。",
@@ -161,7 +160,7 @@
     ],
     "input_schema_id": "producer.schemas.research_plan.ResearchPlanInput",
     "output_schema_id": "producer.schemas.research_plan.ResearchPlanOutput",
-    "timeout_seconds": 120,
+    "timeout_seconds": 900,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": false,

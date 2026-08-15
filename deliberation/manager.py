@@ -36,7 +36,6 @@ from deliberation.schemas.review import (
     DeliberationQualityReviewOutput,
     DeterministicValidationResult,
     QualityGateDecision,
-    RevisionScope,
 )
 from deliberation.schemas.stakeholder_response_analysis import StakeholderResponseAnalysisResult
 from deliberation.state import (
@@ -69,10 +68,12 @@ class DeliberationManager:
         *,
         max_revisions: int = 2,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
-        self.max_revisions = max_revisions
+        self.demo_safe_mode = demo_safe_mode
+        self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.pmp_validator = PMPValidator()
         self.deterministic_validator = DeliberationValidator()
         self.rd_loader = rd_loader or registry.rd_loader
@@ -98,7 +99,7 @@ class DeliberationManager:
     ) -> DeliberationWorkflowState:
         manager_snapshot = self.rd_loader.load(self.agent_id)
         runtime_config = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
-        if runtime_config.revision_limit is not None:
+        if not self.demo_safe_mode and runtime_config.revision_limit is not None:
             self.max_revisions = runtime_config.revision_limit
         report = self._validate_researcher_handoff(handoff)
         tasks = self._create_analysis_tasks(report)
@@ -160,41 +161,310 @@ class DeliberationManager:
             raise ValueError("Researcherから新しいrevision resultがまだ届いていません")
         report = self._validate_researcher_handoff(handoff, allow_revision=True)
         tasks = self._create_analysis_tasks(report)
+        pending_review = self._pending_revision_review(state)
+        pending_targets = list(state.pending_revision_targets)
         state.researcher_handoff = handoff.model_dump(mode="json")
         state.research_report = report.model_dump(mode="json")
         state.analysis_tasks = [task.model_dump(mode="json") for task in tasks]
-        state.analysis_results = {}
-        state.initial_integration = None
-        state.counterargument_analysis = None
-        state.final_integration = None
-        state.deterministic_validation = None
         state.deliberation_result = None
-        state.review_result = None
-        state.completed_agents = []
         state.failed_agents = []
         state.current_agent_ids = []
-        state.revision_count = 0
         state.error = None
+        state.completed_at = None
+        state.status = WorkflowStatus.RUNNING
         state.message_history.append(handoff)
-        self.repository.save(state)
         await self._emit(progress_callback, "Researcher追加調査結果を受領し、Deliberationを再開します")
-        completed = await self._execute_primary_tasks(
-            state,
-            tasks,
-            is_revision=True,
-            progress_callback=progress_callback,
-        )
-        if completed < 2:
+
+        if self.demo_safe_mode:
             return await self._block(
                 state,
-                "再開後の一次分析が2系統未満のため停止しました",
+                "Demo Safe Mode stopped pending Deliberation revision after Researcher return",
                 progress_callback,
             )
+
+        # Upstream-only revisions still rerun Manager integration so that the
+        # updated report reaches downstream checkpoints without rerunning every
+        # primary analyst.
+        effective_targets = pending_targets or [self.agent_id]
+        self._clear_pending_revision(state)
+        outcome, rerun_initial, rerun_counterargument = await self._start_internal_revision(
+            state,
+            pending_review,
+            targets=effective_targets,
+            progress_callback=progress_callback,
+        )
+        if outcome is not None:
+            return outcome
         return await self._integrate_and_review(
             state,
-            rerun_initial=True,
-            rerun_counterargument=True,
+            rerun_initial=rerun_initial,
+            rerun_counterargument=rerun_counterargument,
             progress_callback=progress_callback,
+        )
+
+    async def recover(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> DeliberationWorkflowState:
+        state = self.repository.load(workflow_id)
+        blocked_review_rerecovery = (
+            state.status == WorkflowStatus.BLOCKED.value
+            and state.review_result is not None
+            and all(
+                checkpoint is not None
+                for checkpoint in (
+                    state.initial_integration,
+                    state.counterargument_analysis,
+                    state.final_integration,
+                    state.deterministic_validation,
+                )
+            )
+        )
+        if state.status == WorkflowStatus.COMPLETED.value:
+            return state
+        if state.status == WorkflowStatus.WAITING_UPSTREAM_REVISION.value:
+            raise ValueError(
+                "Deliberation workflow is waiting for Researcher evidence; use resume() instead"
+            )
+        if state.status == WorkflowStatus.BLOCKED.value and not blocked_review_rerecovery:
+            raise ValueError(
+                "Blocked Deliberation workflows are not eligible for checkpoint recovery"
+            )
+
+        manager_snapshot = self.rd_loader.load(self.agent_id)
+        runtime_config = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
+        if not self.demo_safe_mode and runtime_config.revision_limit is not None:
+            self.max_revisions = runtime_config.revision_limit
+        if manager_snapshot.trace() not in state.role_definition_usage:
+            state.role_definition_usage.append(manager_snapshot.trace())
+
+        try:
+            handoff = PMPMessage.model_validate(state.researcher_handoff)
+            report = self._validate_researcher_handoff(handoff, allow_revision=True)
+            if handoff.workflow_id != state.workflow_id or report.workflow_id != state.workflow_id:
+                raise ValueError("Saved Researcher handoff does not match the workflow ID")
+            tasks = self._recovery_primary_tasks(state, report)
+        except Exception as exc:
+            return await self._fail(
+                state,
+                f"Deliberation recovery could not validate the saved upstream state: {exc}",
+                progress_callback,
+            )
+
+        state.status = WorkflowStatus.RUNNING
+        state.error = None
+        state.completed_at = None
+        state.current_agent_ids = []
+        self.repository.save(state)
+        await self._emit(progress_callback, f"Deliberation checkpoint recovery開始: {workflow_id}")
+
+        valid_primary_ids: set[str] = set()
+        incomplete_tasks: list[DeliberationAnalysisTask] = []
+        downstream_exists = state.initial_integration is not None
+        for task in tasks:
+            payload = state.analysis_results.get(task.target_agent_id)
+            if payload is not None and self._saved_analysis_is_valid(task, payload):
+                valid_primary_ids.add(task.target_agent_id)
+                continue
+            if payload is not None:
+                state.analysis_results.pop(task.target_agent_id, None)
+                if task.target_agent_id in state.completed_agents:
+                    state.completed_agents.remove(task.target_agent_id)
+            tolerated_failure = (
+                payload is None
+                and downstream_exists
+                and task.target_agent_id in state.failed_agents
+            )
+            if not tolerated_failure:
+                incomplete_tasks.append(task)
+
+        if len(valid_primary_ids) >= 2 and downstream_exists:
+            incomplete_tasks = [
+                task
+                for task in incomplete_tasks
+                if task.target_agent_id not in state.failed_agents
+            ]
+
+        if incomplete_tasks:
+            recovery_tasks = [self._make_recovery_task(task) for task in incomplete_tasks]
+            self._replace_analysis_tasks(state, recovery_tasks)
+            self._clear_recovery_checkpoints(state, "initial_integration")
+            self.repository.save(state)
+            await self._emit(
+                progress_callback,
+                "未完了一次分析のみ再実行: "
+                + ", ".join(task.target_agent_id for task in recovery_tasks),
+            )
+            await self._execute_primary_tasks(
+                state,
+                recovery_tasks,
+                is_revision=True,
+                progress_callback=progress_callback,
+            )
+
+        valid_primary_count = sum(
+            1
+            for task in self._recovery_primary_tasks(state, report)
+            if (payload := state.analysis_results.get(task.target_agent_id)) is not None
+            and self._saved_analysis_is_valid(task, payload)
+        )
+        if valid_primary_count == 0:
+            return await self._fail(
+                state,
+                "Checkpoint recovery後も一次分析Agentがすべて未完了です",
+                progress_callback,
+            )
+        if valid_primary_count == 1:
+            return await self._block(
+                state,
+                "Checkpoint recovery後も一次分析が1系統のみのため統合できません",
+                progress_callback,
+            )
+
+        try:
+            if not self._checkpoint_is_current(state, "initial_integration"):
+                raise ValueError("initial integration belongs to an earlier revision")
+            initial = InitialIntegratedAnalysis.model_validate(state.initial_integration)
+        except Exception:
+            self._clear_recovery_checkpoints(state, "initial_integration")
+            self.repository.save(state)
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=True,
+                rerun_counterargument=True,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        try:
+            if not self._checkpoint_is_current(state, "counterargument"):
+                raise ValueError("counterargument belongs to an earlier revision")
+            CounterargumentAnalysisResult.model_validate(state.counterargument_analysis)
+        except Exception:
+            self._clear_recovery_checkpoints(state, "counterargument")
+            self.repository.save(state)
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=False,
+                rerun_counterargument=True,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        try:
+            if not self._checkpoint_is_current(state, "final_integration"):
+                raise ValueError("final integration belongs to an earlier revision")
+            final = FinalIntegratedAnalysis.model_validate(state.final_integration)
+            if final.previous_integration_id != initial.integration_id:
+                raise ValueError(
+                    "final integration does not reference the saved initial integration"
+                )
+        except Exception:
+            self._clear_recovery_checkpoints(state, "final_integration")
+            self.repository.save(state)
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=False,
+                rerun_counterargument=False,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        try:
+            if not self._checkpoint_is_current(state, "deterministic_validation"):
+                raise ValueError("deterministic validation belongs to an earlier revision")
+            DeterministicValidationResult.model_validate(state.deterministic_validation)
+        except Exception:
+            self._clear_recovery_checkpoints(state, "deterministic_validation")
+            self.repository.save(state)
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=False,
+                rerun_counterargument=False,
+                rerun_final=False,
+                rerun_validation=True,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        if state.deliberation_result is not None:
+            try:
+                DeliberationResult.model_validate(state.deliberation_result)
+            except Exception:
+                state.deliberation_result = None
+                self.repository.save(state)
+
+        if blocked_review_rerecovery:
+            self._clear_recovery_checkpoints(state, "quality_review")
+            self.repository.save(state)
+            await self._emit(
+                progress_callback,
+                "旧Quality Reviewを無効化し、Quality Reviewer checkpointから再検証",
+            )
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=False,
+                rerun_counterargument=False,
+                rerun_final=False,
+                rerun_validation=False,
+                refresh_validation_for_review=True,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        try:
+            if not self._checkpoint_is_current(state, "quality_review"):
+                raise ValueError("quality review belongs to an earlier revision")
+            review = DeliberationQualityReviewOutput.model_validate(state.review_result)
+            review_response_id = self._saved_review_response_id(state, review.review_id)
+        except Exception:
+            self._clear_recovery_checkpoints(state, "quality_review")
+            self.repository.save(state)
+            await self._emit(progress_callback, "Quality Reviewer checkpointから再開")
+            return await self._integrate_and_review(
+                state,
+                rerun_initial=False,
+                rerun_counterargument=False,
+                rerun_final=False,
+                rerun_validation=False,
+                refresh_validation_for_review=True,
+                progress_callback=progress_callback,
+                recovery=True,
+            )
+
+        counterargument = CounterargumentAnalysisResult.model_validate(
+            state.counterargument_analysis
+        )
+        validation = DeterministicValidationResult.model_validate(
+            state.deterministic_validation
+        )
+        try:
+            outcome, rerun_initial, rerun_counterargument = await self._apply_review_decision(
+                state,
+                report,
+                final,
+                counterargument,
+                validation,
+                review,
+                review_response_id,
+                progress_callback,
+            )
+        except Exception as exc:
+            return await self._fail(
+                state,
+                f"Deliberation recovery could not continue the saved Quality Review: {exc}",
+                progress_callback,
+            )
+        if outcome is not None:
+            return outcome
+        return await self._integrate_and_review(
+            state,
+            rerun_initial=rerun_initial,
+            rerun_counterargument=rerun_counterargument,
+            progress_callback=progress_callback,
+            recovery=True,
         )
 
     def _validate_researcher_handoff(
@@ -248,10 +518,14 @@ class DeliberationManager:
         if len(set(evidence_ids)) != len(evidence_ids):
             raise ValueError("Research Report evidence_id values must be unique")
         source_ids = {item.source_id for item in report.evidence_items}
-        metadata_ids = {str(item.get("source_id")) for item in report.source_metadata}
+        metadata_ids = {item.source_id for item in report.source_metadata}
         if source_ids - metadata_ids:
             raise ValueError("Research Report has evidence without source_metadata")
-        quality = handoff.payload.get("quality_review") or report.review or {}
+        quality = handoff.payload.get("quality_review") or (
+            report.review.model_dump(mode="json") if report.review else {}
+        )
+        if isinstance(quality, BaseModel):
+            quality = quality.model_dump(mode="json")
         if quality.get("status") not in {"approved", "approved_with_conditions"}:
             raise ValueError("Research Report did not pass the Researcher Quality Gate")
         return report
@@ -261,7 +535,7 @@ class DeliberationManager:
         evidence_ids = [item.evidence_id for item in report.evidence_items]
         question_ids = [item.research_question_id for item in report.research_questions]
         source_type_by_id = {
-            str(item.get("source_id")): str(item.get("source_type", ""))
+            item.source_id: str(item.source_type)
             for item in report.source_metadata
         }
         preferred = {
@@ -311,11 +585,24 @@ class DeliberationManager:
                         "Research Report外の事実を追加しない",
                         "最終結論や政策選択を行わない",
                         "不確実性と反対証拠を保持する",
+                        *(
+                            [
+                                "固有名詞、人数、割合、統計値、政策名はevidence_idとsource_idの両方へ紐づける",
+                                "裏付け不能な具体情報は抽象化するかunknown/unverifiedとresearch gapへ記録する",
+                            ]
+                            if analysis_type == AnalysisType.STAKEHOLDER_RESPONSE
+                            else []
+                        ),
                     ],
                     completion_conditions=[
                         "全主要項目にIDがある",
                         "Evidence参照が追跡可能である",
                         "責務範囲外の判断を行わない",
+                        *(
+                            ["具体情報のverification statusとresearch gapが明示されている"]
+                            if analysis_type == AnalysisType.STAKEHOLDER_RESPONSE
+                            else []
+                        ),
                     ],
                 )
             )
@@ -357,7 +644,15 @@ class DeliberationManager:
                 if error:
                     self._record_failure(state, task.target_agent_id, error, task.task_id)
                 else:
-                    state.analysis_results[task.target_agent_id] = response.payload
+                    normalized_result = self._analysis_schema(
+                        task.target_agent_id
+                    ).model_validate(response.payload)
+                    state.analysis_results[task.target_agent_id] = (
+                        normalized_result.model_dump(mode="json")
+                    )
+                    state.checkpoint_revisions[f"primary:{task.target_agent_id}"] = (
+                        state.revision_count
+                    )
                     if task.target_agent_id not in state.completed_agents:
                         state.completed_agents.append(task.target_agent_id)
                     if task.target_agent_id in state.failed_agents:
@@ -383,6 +678,10 @@ class DeliberationManager:
     ) -> PMPMessage:
         return PMPMessage.create(
             workflow_id=state.workflow_id,
+            parent_message_id=self._latest_parent_message_id(
+                state,
+                prefer_quality_review=is_revision,
+            ),
             sender_agent_id=self.agent_id,
             receiver_agent_id=task.target_agent_id,
             message_type=MessageType.DELIBERATION_TASK_ASSIGNMENT,
@@ -392,6 +691,14 @@ class DeliberationManager:
                 "evidence_bound_analysis": True,
                 "final_conclusion_allowed": False,
                 "source_traceability_required": True,
+                "specific_facts_require_evidence_and_source": (
+                    task.target_agent_id
+                    == "deliberation.stakeholder_response_analyst"
+                ),
+                "unverified_specifics_must_be_abstracted_or_research_gaps": (
+                    task.target_agent_id
+                    == "deliberation.stakeholder_response_analyst"
+                ),
             },
             context=PMPContext(
                 current_stage="deliberation.primary_analysis",
@@ -414,11 +721,6 @@ class DeliberationManager:
         request: PMPMessage,
         response: PMPMessage,
     ) -> str | None:
-        schema_by_agent = {
-            "deliberation.argument_analyst": ArgumentAnalysisResult,
-            "deliberation.causal_structural_analyst": CausalStructuralAnalysisResult,
-            "deliberation.stakeholder_response_analyst": StakeholderResponseAnalysisResult,
-        }
         error = self._validate_response_envelope(
             request,
             response,
@@ -428,15 +730,173 @@ class DeliberationManager:
         if error:
             return error
         try:
-            result = schema_by_agent[task.target_agent_id].model_validate(response.payload)
+            result = self._analysis_schema(task.target_agent_id).model_validate(response.payload)
         except Exception as exc:
             return f"Invalid analysis payload from {task.target_agent_id}: {exc}"
         if result.task_id != task.task_id:
             return f"Task ID mismatch from {task.target_agent_id}"
+        if result.analysis_id == result.task_id:
+            return f"{task.target_agent_id} reused task_id as analysis_id"
         unknown = self._collect_evidence_ids(response.payload) - set(task.target_evidence_ids)
         if unknown:
             return f"{task.target_agent_id} referenced evidence outside its task: {sorted(unknown)}"
         return None
+
+    @staticmethod
+    def _analysis_schema(agent_id: str):
+        return {
+            "deliberation.argument_analyst": ArgumentAnalysisResult,
+            "deliberation.causal_structural_analyst": CausalStructuralAnalysisResult,
+            "deliberation.stakeholder_response_analyst": StakeholderResponseAnalysisResult,
+        }[agent_id]
+
+    def _saved_analysis_is_valid(
+        self,
+        task: DeliberationAnalysisTask,
+        payload: dict[str, Any],
+    ) -> bool:
+        try:
+            result = self._analysis_schema(task.target_agent_id).model_validate(payload)
+        except Exception:
+            return False
+        if result.task_id != task.task_id:
+            return False
+        return not (
+            self._collect_evidence_ids(payload) - set(task.target_evidence_ids)
+        )
+
+    def _recovery_primary_tasks(
+        self,
+        state: DeliberationWorkflowState,
+        report: ResearchReport,
+    ) -> list[DeliberationAnalysisTask]:
+        report_evidence_ids = {item.evidence_id for item in report.evidence_items}
+        tasks_by_agent: dict[str, DeliberationAnalysisTask] = {}
+
+        def consider(raw: dict[str, Any]) -> None:
+            try:
+                task = DeliberationAnalysisTask.model_validate(raw)
+            except Exception:
+                return
+            if task.target_agent_id not in PRIMARY_ANALYST_IDS:
+                return
+            if task.research_report_id != report.research_report_id:
+                return
+            if set(task.target_evidence_ids) - report_evidence_ids:
+                return
+            tasks_by_agent[task.target_agent_id] = task
+
+        for raw in state.analysis_tasks:
+            consider(raw)
+        for message in state.message_history:
+            if (
+                message.sender_agent_id == self.agent_id
+                and message.receiver_agent_id in PRIMARY_ANALYST_IDS
+                and message.message_type == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+            ):
+                consider(message.payload)
+
+        generated = {
+            task.target_agent_id: task for task in self._create_analysis_tasks(report)
+        }
+        return [
+            tasks_by_agent.get(agent_id, generated[agent_id])
+            for agent_id in PRIMARY_ANALYST_IDS
+        ]
+
+    @staticmethod
+    def _make_recovery_task(task: DeliberationAnalysisTask) -> DeliberationAnalysisTask:
+        raw = task.model_dump(mode="json")
+        previous_task_id = task.task_id
+        raw["task_id"] = new_id("delib_task")
+        raw["revision_context"] = {
+            **(task.revision_context or {}),
+            "checkpoint_recovery": True,
+            "previous_task_id": previous_task_id,
+        }
+        return DeliberationAnalysisTask.model_validate(raw)
+
+    @staticmethod
+    def _replace_analysis_tasks(
+        state: DeliberationWorkflowState,
+        replacements: list[DeliberationAnalysisTask],
+    ) -> None:
+        replacement_by_agent = {task.target_agent_id: task for task in replacements}
+        retained: list[dict[str, Any]] = []
+        replaced: set[str] = set()
+        for raw in state.analysis_tasks:
+            agent_id = raw.get("target_agent_id")
+            replacement = replacement_by_agent.get(agent_id)
+            if replacement is not None and agent_id not in replaced:
+                retained.append(replacement.model_dump(mode="json"))
+                replaced.add(agent_id)
+            elif agent_id not in replacement_by_agent:
+                retained.append(raw)
+        retained.extend(
+            task.model_dump(mode="json")
+            for agent_id, task in replacement_by_agent.items()
+            if agent_id not in replaced
+        )
+        state.analysis_tasks = retained
+
+    @staticmethod
+    def _checkpoint_is_current(state: DeliberationWorkflowState, stage: str) -> bool:
+        recorded_revision = state.checkpoint_revisions.get(stage)
+        if recorded_revision is None:
+            return True
+        revision_stage = (
+            "final_integration" if stage == "deterministic_validation" else stage
+        )
+        required_revision = max(
+            (
+                record.iteration
+                for record in state.revision_history
+                if revision_stage in record.rerun_stages
+            ),
+            default=0,
+        )
+        return recorded_revision >= required_revision
+
+    @staticmethod
+    def _clear_recovery_checkpoints(
+        state: DeliberationWorkflowState,
+        from_stage: str,
+    ) -> None:
+        checkpoints = [
+            ("initial_integration", "initial_integration"),
+            ("counterargument", "counterargument_analysis"),
+            ("final_integration", "final_integration"),
+            ("deterministic_validation", "deterministic_validation"),
+            ("quality_review", "review_result"),
+        ]
+        start = next(
+            index for index, (checkpoint, _field) in enumerate(checkpoints)
+            if checkpoint == from_stage
+        )
+        for checkpoint, field in checkpoints[start:]:
+            setattr(state, field, None)
+            state.checkpoint_revisions.pop(checkpoint, None)
+        if from_stage == "quality_review" and state.deliberation_result is not None:
+            state.deliberation_result["quality_review"] = None
+        if start <= 1:
+            if COUNTERARGUMENT_ANALYST_ID in state.completed_agents:
+                state.completed_agents.remove(COUNTERARGUMENT_ANALYST_ID)
+        state.conclusion_sent = False
+
+    @staticmethod
+    def _saved_review_response_id(
+        state: DeliberationWorkflowState,
+        review_id: str,
+    ) -> str:
+        for message in reversed(state.message_history):
+            if (
+                message.sender_agent_id == QUALITY_REVIEWER_ID
+                and message.message_type
+                == MessageType.DELIBERATION_QUALITY_REVIEW_RESULT.value
+                and message.payload.get("review_id") == review_id
+            ):
+                return message.message_id
+        raise ValueError("Saved Quality Review has no matching PMP response")
 
     async def _integrate_and_review(
         self,
@@ -445,6 +905,10 @@ class DeliberationManager:
         rerun_initial: bool,
         rerun_counterargument: bool,
         progress_callback: ProgressCallback | None,
+        rerun_final: bool = True,
+        rerun_validation: bool = True,
+        refresh_validation_for_review: bool = False,
+        recovery: bool = False,
     ) -> DeliberationWorkflowState:
         report = ResearchReport.model_validate(state.research_report)
         while True:
@@ -460,8 +924,11 @@ class DeliberationManager:
                         },
                         output_schema=InitialIntegratedAnalysis,
                         stage="initial_integration",
+                        workflow_id=state.workflow_id,
+                        recovery=recovery,
                     )
                     state.initial_integration = initial.model_dump(mode="json")
+                    state.checkpoint_revisions["initial_integration"] = state.revision_count
                     self.repository.save(state)
                     await self._emit(progress_callback, "Deliberation Manager初回統合完了")
                 else:
@@ -475,6 +942,7 @@ class DeliberationManager:
                         is_revision=state.revision_count > 0,
                     )
                     state.counterargument_analysis = counterargument.model_dump(mode="json")
+                    state.checkpoint_revisions["counterargument"] = state.revision_count
                     if COUNTERARGUMENT_ANALYST_ID not in state.completed_agents:
                         state.completed_agents.append(COUNTERARGUMENT_ANALYST_ID)
                     if COUNTERARGUMENT_ANALYST_ID in state.failed_agents:
@@ -486,30 +954,60 @@ class DeliberationManager:
                         state.counterargument_analysis
                     )
 
-                final = await self.registry.integrate(
-                    input_data={
-                        "research_report": state.research_report,
-                        "primary_analyses": state.analysis_results,
-                        "initial_integration": initial.model_dump(mode="json"),
-                        "counterargument_analysis": counterargument.model_dump(mode="json"),
-                        "previous_final_integration": state.final_integration,
-                        "revision_context": self._latest_revision_context(state),
-                    },
-                    output_schema=FinalIntegratedAnalysis,
-                    stage="final_integration",
+                if rerun_final:
+                    final = await self.registry.integrate(
+                        input_data={
+                            "research_report": state.research_report,
+                            "primary_analyses": state.analysis_results,
+                            "initial_integration": initial.model_dump(mode="json"),
+                            "counterargument_analysis": counterargument.model_dump(mode="json"),
+                            "previous_final_integration": state.final_integration,
+                            "revision_context": self._latest_revision_context(state),
+                        },
+                        output_schema=FinalIntegratedAnalysis,
+                        stage="final_integration",
+                        workflow_id=state.workflow_id,
+                        recovery=recovery,
+                    )
+                    self._validate_final_counterargument_dispositions(
+                        counterargument,
+                        final,
+                    )
+                    state.final_integration = final.model_dump(mode="json")
+                    state.checkpoint_revisions["final_integration"] = state.revision_count
+                else:
+                    final = FinalIntegratedAnalysis.model_validate(state.final_integration)
+
+                primary_for_review, initial, counterargument, final = (
+                    self._prepare_review_artifacts(
+                        state,
+                        report,
+                        initial,
+                        counterargument,
+                        final,
+                    )
                 )
-                state.final_integration = final.model_dump(mode="json")
-                validation = self.deterministic_validator.validate(
-                    report=report,
-                    primary_analyses=state.analysis_results,
-                    initial_integration=initial,
-                    counterargument=counterargument,
-                    final_integration=final,
-                    revision_count=state.revision_count,
-                )
-                state.deterministic_validation = validation.model_dump(mode="json")
-                provisional = self._build_result(state, report, final, counterargument, None)
-                state.deliberation_result = provisional.model_dump(mode="json")
+
+                if rerun_validation or refresh_validation_for_review:
+                    validation = self.deterministic_validator.validate(
+                        report=report,
+                        primary_analyses=primary_for_review,
+                        initial_integration=initial,
+                        counterargument=counterargument,
+                        final_integration=final,
+                        revision_count=state.revision_count,
+                    )
+                    if rerun_validation:
+                        state.deterministic_validation = validation.model_dump(mode="json")
+                        state.checkpoint_revisions["deterministic_validation"] = state.revision_count
+                else:
+                    validation = DeterministicValidationResult.model_validate(
+                        state.deterministic_validation
+                    )
+
+                if rerun_final or rerun_validation or state.deliberation_result is None:
+                    provisional = self._build_result(state, report, final, counterargument, None)
+                    state.deliberation_result = provisional.model_dump(mode="json")
                 self.repository.save(state)
                 await self._emit(progress_callback, "Manager再統合・決定論的検証完了")
                 review, review_response = await self._request_review(
@@ -519,6 +1017,7 @@ class DeliberationManager:
                     counterargument,
                     final,
                     validation,
+                    primary_for_review,
                 )
             except Exception as exc:
                 return await self._fail(
@@ -528,97 +1027,185 @@ class DeliberationManager:
                 )
 
             state.review_result = review.model_dump(mode="json")
+            state.checkpoint_revisions["quality_review"] = state.revision_count
             self.repository.save(state)
+            outcome, rerun_initial, rerun_counterargument = await self._apply_review_decision(
+                state,
+                report,
+                final,
+                counterargument,
+                validation,
+                review,
+                review_response.message_id,
+                progress_callback,
+            )
+            if outcome is not None:
+                return outcome
+            rerun_final = True
+            rerun_validation = True
 
-            if review.status in {
-                QualityGateDecision.APPROVED.value,
-                QualityGateDecision.APPROVED_WITH_CONDITIONS.value,
-            }:
-                if not validation.passed:
-                    return await self._block(
+    async def _apply_review_decision(
+        self,
+        state: DeliberationWorkflowState,
+        report: ResearchReport,
+        final: FinalIntegratedAnalysis,
+        counterargument: CounterargumentAnalysisResult,
+        validation: DeterministicValidationResult,
+        review: DeliberationQualityReviewOutput,
+        review_response_id: str,
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[DeliberationWorkflowState | None, bool, bool]:
+        if review.status in {
+            QualityGateDecision.APPROVED.value,
+            QualityGateDecision.APPROVED_WITH_CONDITIONS.value,
+        }:
+            if not validation.passed:
+                return (
+                    await self._block(
                         state,
                         "決定論的Validatorが失敗しているため、LLM承認を採用できません",
                         progress_callback,
-                    )
-                result = self._build_result(state, report, final, counterargument, review)
-                state.deliberation_result = result.model_dump(mode="json")
-                state.status = WorkflowStatus.APPROVED
-                self.repository.save_result(result)
-                self.repository.save(state)
-                try:
-                    self._send_to_conclusion(state, result, review_response.message_id)
-                except Exception as exc:
-                    return await self._fail(
+                    ),
+                    False,
+                    False,
+                )
+            result = self._build_result(state, report, final, counterargument, review)
+            state.deliberation_result = result.model_dump(mode="json")
+            state.status = WorkflowStatus.APPROVED
+            self.repository.save_result(result)
+            self.repository.save(state)
+            try:
+                self._send_to_conclusion(state, result, review_response_id)
+            except Exception as exc:
+                return (
+                    await self._fail(
                         state,
                         f"Conclusion Outboxへの送信に失敗しました: {exc}",
                         progress_callback,
-                    )
-                state.conclusion_sent = True
-                state.status = WorkflowStatus.COMPLETED
-                state.current_agent_ids = []
-                state.completed_at = utc_now()
-                self.repository.save(state)
-                await self._emit(progress_callback, f"Quality Reviewer: {review.status}")
-                return state
+                    ),
+                    False,
+                    False,
+                )
+            state.conclusion_sent = True
+            state.status = WorkflowStatus.COMPLETED
+            state.current_agent_ids = []
+            state.completed_at = utc_now()
+            state.error = None
+            self.repository.save(state)
+            await self._emit(progress_callback, f"Quality Reviewer: {review.status}")
+            return state, False, False
 
-            if review.status == QualityGateDecision.BLOCKED.value:
-                return await self._block(state, review.reason, progress_callback)
+        if review.status == QualityGateDecision.BLOCKED.value:
+            return await self._block(state, review.reason, progress_callback), False, False
 
-            if review.revision_scope == RevisionScope.RESEARCHER_RETURN.value:
-                return await self._request_upstream_revision(
+        if review.upstream_revision_requests:
+            if (
+                state.awaiting_upstream_revision
+                and state.pending_revision_review_id == review.review_id
+            ):
+                return state, False, False
+            self._store_pending_revision(state, review)
+            return (
+                await self._request_upstream_revision(
                     state,
                     review,
-                    review_response.message_id,
+                    review_response_id,
                     progress_callback,
-                )
-
-            state.revision_count += 1
-            rerun_stages = self._revision_stages(review.revision_targets)
-            state.revision_history.append(
-                DeliberationRevisionRecord(
-                    iteration=state.revision_count,
-                    target_agent_ids=review.revision_targets,
-                    findings=[item.model_dump(mode="json") for item in review.findings],
-                    rerun_stages=rerun_stages,
-                )
+                ),
+                False,
+                False,
             )
-            if state.revision_count >= self.max_revisions:
-                return await self._block(
+
+        if self.demo_safe_mode:
+            return (
+                await self._block(
+                    state,
+                    "Demo Safe Mode stopped automatic internal revision; "
+                    "no Deliberation Agent was re-dispatched",
+                    progress_callback,
+                ),
+                False,
+                False,
+            )
+
+        return await self._start_internal_revision(
+            state,
+            review,
+            targets=list(review.revision_targets),
+            progress_callback=progress_callback,
+        )
+
+    async def _start_internal_revision(
+        self,
+        state: DeliberationWorkflowState,
+        review: DeliberationQualityReviewOutput,
+        *,
+        targets: list[str],
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[DeliberationWorkflowState | None, bool, bool]:
+        state.revision_count += 1
+        rerun_stages = self._revision_stages(targets)
+        state.revision_history.append(
+            DeliberationRevisionRecord(
+                iteration=state.revision_count,
+                target_agent_ids=targets,
+                findings=[item.model_dump(mode="json") for item in review.findings],
+                rerun_stages=rerun_stages,
+            )
+        )
+        # Persist consumption of the pending plan and the single revision count
+        # before any provider call, so a process restart cannot execute it twice.
+        self.repository.save(state)
+        if state.revision_count >= self.max_revisions:
+            return (
+                await self._block(
                     state,
                     f"Quality Reviewerが{self.max_revisions}回revision_requiredを返したため停止しました",
                     progress_callback,
-                )
-            primary_targets = [item for item in review.revision_targets if item in PRIMARY_ANALYST_IDS]
-            if primary_targets:
-                revision_tasks = self._build_revision_tasks(state, primary_targets, review)
-                completed = await self._execute_primary_tasks(
-                    state,
-                    revision_tasks,
-                    is_revision=True,
-                    progress_callback=progress_callback,
-                )
-                if completed != len(revision_tasks):
-                    return await self._fail(
+                ),
+                False,
+                False,
+            )
+        primary_targets = [item for item in targets if item in PRIMARY_ANALYST_IDS]
+        if primary_targets:
+            revision_tasks = self._build_revision_tasks(state, primary_targets, review)
+            completed = await self._execute_primary_tasks(
+                state,
+                revision_tasks,
+                is_revision=True,
+                progress_callback=progress_callback,
+            )
+            if completed != len(revision_tasks):
+                return (
+                    await self._fail(
                         state,
                         "修正対象の一次分析Agentが完了しませんでした",
                         progress_callback,
-                    )
-            rerun_initial = bool(primary_targets or self.agent_id in review.revision_targets)
-            rerun_counterargument = bool(
-                rerun_initial or COUNTERARGUMENT_ANALYST_ID in review.revision_targets
-            )
-            if not rerun_initial and not rerun_counterargument:
-                return await self._fail(
+                    ),
+                    False,
+                    False,
+                )
+        rerun_initial = bool(primary_targets or self.agent_id in targets)
+        rerun_counterargument = bool(
+            rerun_initial or COUNTERARGUMENT_ANALYST_ID in targets
+        )
+        if not rerun_initial and not rerun_counterargument:
+            return (
+                await self._fail(
                     state,
                     "revision_requiredを実行可能な依存関係へ解決できませんでした",
                     progress_callback,
-                )
-            await self._emit(
-                progress_callback,
-                "Quality Reviewer: revision_required → "
-                + ", ".join(review.revision_targets)
-                + f"（{state.revision_count}/{self.max_revisions}）",
+                ),
+                False,
+                False,
             )
+        await self._emit(
+            progress_callback,
+            "Quality Reviewer: revision_required → "
+            + ", ".join(targets)
+            + f"（{state.revision_count}/{self.max_revisions}）",
+        )
+        return None, rerun_initial, rerun_counterargument
 
     async def _execute_counterargument(
         self,
@@ -629,9 +1216,8 @@ class DeliberationManager:
         is_revision: bool,
     ) -> CounterargumentAnalysisResult:
         key_claim_ids = [
-            str(item.get("claim_id") or item.get("id"))
+            item.claim_id
             for item in initial.key_claims
-            if item.get("claim_id") or item.get("id")
         ]
         if not key_claim_ids:
             key_claim_ids = [claim.claim_id for claim in ArgumentAnalysisResult.model_validate(
@@ -643,15 +1229,21 @@ class DeliberationManager:
             key_claim_ids=key_claim_ids,
             candidate_viewpoint_ids=[item.viewpoint_id for item in initial.candidate_viewpoints],
             evidence_ids=[item.evidence_id for item in report.evidence_items],
-            agreements=initial.agreements,
-            conflicts=initial.conflicts,
-            unresolved_items=initial.unresolved_items,
+            agreements=[item.model_dump(mode="json") for item in initial.agreements],
+            conflicts=[item.model_dump(mode="json") for item in initial.conflicts],
+            unresolved_items=[
+                item.model_dump(mode="json") for item in initial.unresolved_items
+            ],
             initial_integration=initial.model_dump(mode="json"),
             research_report=report.model_dump(mode="json"),
             revision_context=self._latest_revision_context(state) if is_revision else None,
         )
         request = PMPMessage.create(
             workflow_id=state.workflow_id,
+            parent_message_id=self._latest_message_id(
+                state,
+                sender_agent_ids=PRIMARY_ANALYST_IDS,
+            ),
             sender_agent_id=self.agent_id,
             receiver_agent_id=COUNTERARGUMENT_ANALYST_ID,
             message_type=MessageType.DELIBERATION_TASK_ASSIGNMENT,
@@ -695,10 +1287,357 @@ class DeliberationManager:
         result = CounterargumentAnalysisResult.model_validate(response.payload)
         if result.task_id != task.task_id:
             raise ValueError("Counterargument task_id mismatch")
+        if result.analysis_id in {result.task_id, initial.integration_id}:
+            raise ValueError(
+                "Counterargument analysis_id must not reuse task_id or integration_id"
+            )
+        unrouted = result.unrouted_required_counterargument_ids()
+        if unrouted:
+            raise ValueError(
+                "Counterargument required_revision routing omitted blocking IDs: "
+                f"{unrouted}"
+            )
         unknown = self._collect_evidence_ids(response.payload) - set(task.evidence_ids)
         if unknown:
             raise ValueError(f"Counterargument references unknown evidence IDs: {sorted(unknown)}")
         return result
+
+    def _prepare_review_artifacts(
+        self,
+        state: DeliberationWorkflowState,
+        report: ResearchReport,
+        initial: InitialIntegratedAnalysis,
+        counterargument: CounterargumentAnalysisResult,
+        final: FinalIntegratedAnalysis,
+    ) -> tuple[
+        dict[str, dict[str, Any]],
+        InitialIntegratedAnalysis,
+        CounterargumentAnalysisResult,
+        FinalIntegratedAnalysis,
+    ]:
+        """Create an in-memory v2 review view without rewriting saved checkpoints."""
+
+        normalized_primary = {
+            agent_id: self._analysis_schema(agent_id)
+            .model_validate(payload)
+            .model_dump(mode="json")
+            for agent_id, payload in state.analysis_results.items()
+            if agent_id in PRIMARY_ANALYST_IDS
+        }
+        counter_data = counterargument.model_dump(mode="json")
+        counter_data["remaining_uncertainties"] = list(
+            dict.fromkeys(
+                [
+                    *counterargument.remaining_uncertainties,
+                    *(
+                        item.remaining_uncertainty
+                        for item in counterargument.counterarguments
+                        if item.remaining_uncertainty
+                    ),
+                ]
+            )
+        )
+        counterargument = CounterargumentAnalysisResult.model_validate(counter_data)
+
+        source_by_evidence = {
+            item.evidence_id: item.source_id for item in report.evidence_items
+        }
+        initial = self._enrich_traceability_sources(
+            initial,
+            source_by_evidence,
+        )
+        final = self._enrich_traceability_sources(final, source_by_evidence)
+
+        final_data = final.model_dump(mode="json")
+        dispositions = {
+            item["counterargument_id"]: item
+            for item in final_data.get("counterargument_dispositions", [])
+        }
+        changes_by_counterargument: dict[str, list[str]] = {}
+        for change in final.integration_changes:
+            for counterargument_id in change.source_counterargument_ids:
+                changes_by_counterargument.setdefault(counterargument_id, []).append(
+                    change.change_id
+                )
+        for item in counterargument.counterarguments:
+            if not item.required_revision or item.counterargument_id in dispositions:
+                continue
+            change_ids = changes_by_counterargument.get(item.counterargument_id, [])
+            if change_ids:
+                resolution = "revised"
+                rationale = "Legacy integration_changes record this counterargument"
+            elif item.research_gap_required:
+                resolution = "researcher_return"
+                rationale = "Counterargument requires evidence unavailable in Deliberation"
+            else:
+                resolution = "unresolved"
+                rationale = "Legacy checkpoint has no explicit disposition"
+            dispositions[item.counterargument_id] = {
+                "counterargument_id": item.counterargument_id,
+                "resolution": resolution,
+                "rationale": rationale,
+                "revision_target_agent_ids": item.revision_target_agent_ids,
+                "integration_change_ids": change_ids,
+                "remaining_uncertainty": item.remaining_uncertainty
+                or "Legacy counterargument remains unresolved",
+                "research_gap_required": item.research_gap_required,
+                "acceptance_conditions": item.acceptance_conditions,
+            }
+        final_data["counterargument_dispositions"] = list(dispositions.values())
+        final = FinalIntegratedAnalysis.model_validate(final_data)
+        return normalized_primary, initial, counterargument, final
+
+    @staticmethod
+    def _enrich_traceability_sources(
+        artifact: InitialIntegratedAnalysis | FinalIntegratedAnalysis,
+        source_by_evidence: dict[str, str],
+    ) -> InitialIntegratedAnalysis | FinalIntegratedAnalysis:
+        data = artifact.model_dump(mode="json")
+        for entry in data.get("traceability_index", []):
+            entry["source_ids"] = list(
+                dict.fromkeys(
+                    [
+                        *entry.get("source_ids", []),
+                        *(
+                            source_by_evidence[evidence_id]
+                            for evidence_id in entry.get("evidence_ids", [])
+                            if evidence_id in source_by_evidence
+                        ),
+                    ]
+                )
+            )
+        return type(artifact).model_validate(data)
+
+    @staticmethod
+    def _validate_final_counterargument_dispositions(
+        counterargument: CounterargumentAnalysisResult,
+        final: FinalIntegratedAnalysis,
+    ) -> None:
+        disposition_ids = {
+            item.counterargument_id for item in final.counterargument_dispositions
+        }
+        required_ids = {
+            item.counterargument_id
+            for item in counterargument.counterarguments
+            if item.required_revision
+        }
+        missing = sorted(required_ids - disposition_ids)
+        if missing:
+            raise ValueError(
+                "Final integration omitted blocking counterargument dispositions: "
+                f"{missing}"
+            )
+
+    @staticmethod
+    def _latest_message_id(
+        state: DeliberationWorkflowState,
+        *,
+        sender_agent_ids: set[str] | None = None,
+    ) -> str | None:
+        for message in reversed(state.message_history):
+            if sender_agent_ids is None or message.sender_agent_id in sender_agent_ids:
+                return message.message_id
+        return None
+
+    @classmethod
+    def _latest_parent_message_id(
+        cls,
+        state: DeliberationWorkflowState,
+        *,
+        prefer_quality_review: bool,
+    ) -> str | None:
+        if prefer_quality_review:
+            review_id = cls._latest_message_id(
+                state,
+                sender_agent_ids={QUALITY_REVIEWER_ID},
+            )
+            if review_id:
+                return review_id
+        return cls._latest_message_id(
+            state,
+            sender_agent_ids={"researcher.manager"},
+        )
+
+    @staticmethod
+    def _build_pmp_routing_trace(
+        state: DeliberationWorkflowState,
+        review_request: PMPMessage,
+    ) -> list[dict[str, Any]]:
+        messages = [*state.message_history, review_request]
+        response_by_parent = {
+            message.parent_message_id: message
+            for message in state.message_history
+            if message.parent_message_id
+        }
+        quality_review_attempts: dict[str, int] = {}
+        attempt = -1
+        for message in messages:
+            if (
+                message.message_type
+                == MessageType.DELIBERATION_QUALITY_REVIEW_ASSIGNMENT.value
+            ):
+                attempt += 1
+                quality_review_attempts[message.message_id] = attempt
+
+        trace: list[dict[str, Any]] = []
+        last_researcher_message_id: str | None = None
+        last_primary_result_id: str | None = None
+        last_counterargument_result_id: str | None = None
+        last_quality_review_response_id: str | None = None
+        for message in messages:
+            if message.workflow_id != state.workflow_id:
+                continue
+            involved = (
+                message.sender_agent_id.startswith("deliberation.")
+                or message.receiver_agent_id.startswith("deliberation.")
+            )
+            if not involved:
+                continue
+            status = message.metadata.status
+            if hasattr(status, "value"):
+                status = status.value
+            parent_message_id = message.parent_message_id
+            if parent_message_id is None:
+                if (
+                    message.message_type
+                    == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+                    and message.receiver_agent_id in PRIMARY_ANALYST_IDS
+                ):
+                    parent_message_id = last_researcher_message_id
+                elif (
+                    message.message_type
+                    == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+                    and message.receiver_agent_id == COUNTERARGUMENT_ANALYST_ID
+                ):
+                    parent_message_id = last_primary_result_id
+                elif (
+                    message.message_type
+                    == MessageType.DELIBERATION_QUALITY_REVIEW_ASSIGNMENT.value
+                ):
+                    parent_message_id = (
+                        last_quality_review_response_id
+                        or last_counterargument_result_id
+                    )
+
+            paired_response = response_by_parent.get(message.message_id)
+            if paired_response is not None and message.message_id != review_request.message_id:
+                paired_status = paired_response.metadata.status
+                if hasattr(paired_status, "value"):
+                    paired_status = paired_status.value
+                status = "failed" if paired_status == MessageStatus.FAILED.value else "completed"
+
+            retry_count = message.metadata.retry_count
+            stage = message.context.current_stage or str(message.message_type)
+            if message.message_id in quality_review_attempts:
+                retry_count = quality_review_attempts[message.message_id]
+                if message.message_id == review_request.message_id:
+                    status = MessageStatus.QUEUED.value
+                    stage = f"deliberation.quality_review.attempt_{retry_count + 1}.current"
+                elif status == MessageStatus.COMPLETED.value:
+                    status = "superseded"
+                    stage = f"deliberation.quality_review.attempt_{retry_count + 1}.superseded"
+                else:
+                    stage = f"deliberation.quality_review.attempt_{retry_count + 1}.failed"
+            elif parent_message_id in quality_review_attempts:
+                retry_count = quality_review_attempts[parent_message_id]
+                if message.message_type == MessageType.ERROR.value:
+                    status = MessageStatus.FAILED.value
+                    stage = f"deliberation.quality_review.attempt_{retry_count + 1}.failed"
+                else:
+                    status = "superseded"
+                    stage = f"deliberation.quality_review.attempt_{retry_count + 1}.superseded"
+
+            trace.append(
+                {
+                    "workflow_id": message.workflow_id,
+                    "message_id": message.message_id,
+                    "parent_message_id": parent_message_id,
+                    "sender_agent_id": message.sender_agent_id,
+                    "receiver_agent_id": message.receiver_agent_id,
+                    "message_type": str(message.message_type),
+                    "status": str(status),
+                    "revision_target": message.routing.revision_target,
+                    "retry_count": retry_count,
+                    "execution_order": len(trace) + 1,
+                    "stage": stage,
+                }
+            )
+            if message.sender_agent_id == "researcher.manager":
+                last_researcher_message_id = message.message_id
+            if (
+                message.sender_agent_id in PRIMARY_ANALYST_IDS
+                and message.message_type == MessageType.DELIBERATION_TASK_RESULT.value
+            ):
+                last_primary_result_id = message.message_id
+            if (
+                message.sender_agent_id == COUNTERARGUMENT_ANALYST_ID
+                and message.message_type == MessageType.DELIBERATION_TASK_RESULT.value
+            ):
+                last_counterargument_result_id = message.message_id
+            if message.sender_agent_id == QUALITY_REVIEWER_ID:
+                last_quality_review_response_id = message.message_id
+        return trace
+
+    @staticmethod
+    def _build_checkpoint_trace(
+        state: DeliberationWorkflowState,
+        initial: InitialIntegratedAnalysis,
+        counterargument: CounterargumentAnalysisResult,
+        final: FinalIntegratedAnalysis,
+        primary_analyses: dict[str, dict[str, Any]],
+        validation: DeterministicValidationResult,
+        review_request: PMPMessage,
+    ) -> list[dict[str, Any]]:
+        primary_message_ids = [
+            message.message_id
+            for message in state.message_history
+            if message.sender_agent_id in PRIMARY_ANALYST_IDS
+            and message.message_type == MessageType.DELIBERATION_TASK_RESULT.value
+        ]
+        counter_message_ids = [
+            message.message_id
+            for message in state.message_history
+            if message.sender_agent_id == COUNTERARGUMENT_ANALYST_ID
+            and message.message_type == MessageType.DELIBERATION_TASK_RESULT.value
+        ]
+        primary_analysis_ids = [
+            payload.get("analysis_id", "")
+            for agent_id, payload in primary_analyses.items()
+            if agent_id in PRIMARY_ANALYST_IDS and payload.get("analysis_id")
+        ]
+        stages = [
+            ("primary_analyses", primary_analysis_ids, primary_message_ids),
+            ("initial_integration", [initial.integration_id], primary_message_ids),
+            (
+                "counterargument",
+                [counterargument.analysis_id],
+                counter_message_ids,
+            ),
+            ("final_integration", [final.integration_id], counter_message_ids),
+            (
+                "deterministic_validation",
+                [
+                    *validation.validation_targets.analysis_ids,
+                    *validation.validation_targets.integration_ids,
+                ],
+                [],
+            ),
+            ("quality_review_request", [review_request.message_id], [review_request.message_id]),
+        ]
+        return [
+            {
+                "execution_order": index,
+                "stage": stage,
+                "status": "completed" if stage != "quality_review_request" else "queued",
+                "artifact_ids": artifact_ids,
+                "source_message_ids": source_message_ids,
+                "revision_iteration": state.revision_count,
+            }
+            for index, (stage, artifact_ids, source_message_ids) in enumerate(
+                stages,
+                start=1,
+            )
+        ]
 
     async def _request_review(
         self,
@@ -708,26 +1647,27 @@ class DeliberationManager:
         counterargument: CounterargumentAnalysisResult,
         final: FinalIntegratedAnalysis,
         validation: DeterministicValidationResult,
+        primary_analyses: dict[str, dict[str, Any]],
     ) -> tuple[DeliberationQualityReviewOutput, PMPMessage]:
         state.status = WorkflowStatus.REVIEWING
-        review_input = DeliberationQualityReviewInput(
-            research_report=report.model_dump(mode="json"),
-            primary_analyses=state.analysis_results,
-            initial_integration=initial,
-            counterargument_analysis=counterargument,
-            final_integration=final,
-            deterministic_validation=validation,
-            failed_agent_ids=state.failed_agents,
-            limitations=[str(item.get("message", item)) for item in state.limitations],
-            revision_context=self._latest_revision_context(state),
-        )
-        request = PMPMessage.create(
+        review_task_id = new_id("delib_review_task")
+        request_stub = PMPMessage.create(
             workflow_id=state.workflow_id,
+            parent_message_id=(
+                self._latest_message_id(
+                    state,
+                    sender_agent_ids={QUALITY_REVIEWER_ID},
+                )
+                or self._latest_message_id(
+                    state,
+                    sender_agent_ids={COUNTERARGUMENT_ANALYST_ID},
+                )
+            ),
             sender_agent_id=self.agent_id,
             receiver_agent_id=QUALITY_REVIEWER_ID,
             message_type=MessageType.DELIBERATION_QUALITY_REVIEW_ASSIGNMENT,
             objective="Review Deliberation completeness, traceability, boundaries, and Conclusion readiness",
-            payload=review_input.model_dump(mode="json"),
+            payload={"task_id": review_task_id},
             constraints={
                 "do_not_reanalyze": True,
                 "deterministic_findings_cannot_be_ignored": True,
@@ -743,6 +1683,34 @@ class DeliberationManager:
                 extensions={"role_definition": state.role_definition_usage[-1]},
             ),
         )
+        review_input = DeliberationQualityReviewInput(
+            task_id=review_task_id,
+            research_report=report.model_dump(mode="json"),
+            primary_analyses=primary_analyses,
+            initial_integration=initial,
+            counterargument_analysis=counterargument,
+            final_integration=final,
+            deterministic_validation=validation,
+            pmp_routing_trace=self._build_pmp_routing_trace(
+                state,
+                request_stub,
+            ),
+            checkpoint_trace=self._build_checkpoint_trace(
+                state,
+                initial,
+                counterargument,
+                final,
+                primary_analyses,
+                validation,
+                request_stub,
+            ),
+            failed_agent_ids=state.failed_agents,
+            limitations=[str(item.get("message", item)) for item in state.limitations],
+            revision_context=self._latest_revision_context(state),
+        )
+        request_data = request_stub.model_dump(mode="json")
+        request_data["payload"] = review_input.model_dump(mode="json")
+        request = PMPMessage.model_validate(request_data)
         state.current_agent_ids = [QUALITY_REVIEWER_ID]
         state.message_history.append(request)
         self.repository.save(state)
@@ -759,6 +1727,45 @@ class DeliberationManager:
         if error:
             raise ValueError(error)
         return DeliberationQualityReviewOutput.model_validate(response.payload), response
+
+    @staticmethod
+    def _store_pending_revision(
+        state: DeliberationWorkflowState,
+        review: DeliberationQualityReviewOutput,
+    ) -> None:
+        state.pending_revision_targets = list(review.revision_targets)
+        state.pending_revision_finding_ids = [item.finding_id for item in review.findings]
+        state.pending_upstream_revision_request_ids = [
+            item.revision_request_id for item in review.upstream_revision_requests
+        ]
+        state.pending_revision_scope = str(review.revision_scope)
+        state.pending_revision_iteration = state.revision_count + 1
+        state.pending_revision_review_id = review.review_id
+        state.awaiting_upstream_revision = True
+
+    @staticmethod
+    def _clear_pending_revision(state: DeliberationWorkflowState) -> None:
+        state.pending_revision_targets = []
+        state.pending_revision_finding_ids = []
+        state.pending_upstream_revision_request_ids = []
+        state.pending_revision_scope = None
+        state.pending_revision_iteration = None
+        state.pending_revision_review_id = None
+        state.awaiting_upstream_revision = False
+
+    @staticmethod
+    def _pending_revision_review(
+        state: DeliberationWorkflowState,
+    ) -> DeliberationQualityReviewOutput:
+        if state.review_result is None:
+            raise ValueError("Waiting Deliberation workflow has no saved Quality Review")
+        review = DeliberationQualityReviewOutput.model_validate(state.review_result)
+        if (
+            state.pending_revision_review_id is not None
+            and state.pending_revision_review_id != review.review_id
+        ):
+            raise ValueError("Pending revision plan does not match the saved Quality Review")
+        return review
 
     async def _request_upstream_revision(
         self,
@@ -865,7 +1872,7 @@ class DeliberationManager:
         claim_structure = (
             [item.model_dump(mode="json") for item in argument.central_claims]
             if argument
-            else final.key_claims
+            else [item.model_dump(mode="json") for item in final.key_claims]
         )
         key_assumptions = (
             [item.model_dump(mode="json") for item in argument.premises]
@@ -878,9 +1885,13 @@ class DeliberationManager:
                 item.model_dump(mode="json") for item in argument.evidence_mappings
             )
         if causal:
-            evidence_relationships.extend(causal.evidence_mappings)
+            evidence_relationships.extend(
+                item.model_dump(mode="json") for item in causal.evidence_mappings
+            )
         if stakeholder:
-            evidence_relationships.extend(stakeholder.evidence_mappings)
+            evidence_relationships.extend(
+                item.model_dump(mode="json") for item in stakeholder.evidence_mappings
+            )
         source_traceability = [
             {
                 "evidence_id": item.evidence_id,
@@ -919,7 +1930,9 @@ class DeliberationManager:
             ]
         else:
             structural_factors = [
-                item
+                item.model_dump(mode="json")
+                if isinstance(item, BaseModel)
+                else item
                 if isinstance(item, dict)
                 else {
                     "factor_id": new_id("structural_factor"),
@@ -927,7 +1940,7 @@ class DeliberationManager:
                     "evidence_ids": [],
                     "status": "UNVERIFIED_DUE_TO_PARTIAL_FAILURE",
                 }
-                for item in final.causal_structure.get("structural_factors", [])
+                for item in final.causal_structure.structural_factors
             ]
             if not structural_factors:
                 structural_factors = [
@@ -949,25 +1962,34 @@ class DeliberationManager:
             research_plan_id=report.research_plan_id,
             topic=report.topic,
             general_opinion=report.general_opinion,
-            problem_definition=final.problem_definition,
+            problem_definition=final.problem_definition.model_dump(mode="json"),
             claim_structure=claim_structure,
             key_assumptions=key_assumptions,
             evidence_relationships=evidence_relationships,
-            causal_model=final.causal_structure,
+            causal_model=final.causal_structure.model_dump(mode="json"),
             structural_factors=structural_factors,
-            stakeholder_structure=final.stakeholder_structure,
-            existing_response_evaluation=final.existing_response_assessment,
+            stakeholder_structure=final.stakeholder_structure.model_dump(mode="json"),
+            existing_response_evaluation=[
+                item.model_dump(mode="json")
+                for item in final.existing_response_assessment
+            ],
             counterarguments=[item.model_dump(mode="json") for item in counterargument.counterarguments],
-            alternative_interpretations=counterargument.alternative_interpretations,
-            trade_offs=final.tradeoffs,
+            alternative_interpretations=[
+                item.model_dump(mode="json")
+                for item in counterargument.alternative_interpretations
+            ],
+            trade_offs=[item.model_dump(mode="json") for item in final.tradeoffs],
             uncertainties=list(
                 dict.fromkeys(final.uncertainties + counterargument.remaining_uncertainties)
             ),
             analysis_perspectives=final.major_viewpoints,
-            unresolved_issues=final.unresolved_questions,
+            unresolved_issues=[
+                item.model_dump(mode="json") for item in final.unresolved_questions
+            ],
             research_gaps=[item.model_dump(mode="json") for item in report.evidence_gaps],
             source_traceability=source_traceability,
             analysis_traceability=analysis_traceability,
+            claim_traceability=final.traceability_index,
             limitations=list(dict.fromkeys(limitation_strings)),
             quality_review=review.model_dump(mode="json") if review else None,
         )
@@ -1022,6 +2044,7 @@ class DeliberationManager:
             "unresolved_issues",
             "research_gaps",
             "source_traceability",
+            "claim_traceability",
             "quality_review",
         }
         missing = sorted(required - payload.keys())
@@ -1035,6 +2058,8 @@ class DeliberationManager:
         for item in payload.get("analysis_traceability", []):
             if not item.get("analysis_id"):
                 raise ValueError("analysis_traceability requires analysis_id")
+        if not payload.get("claim_traceability"):
+            raise ValueError("claim_traceability is required for Conclusion handoff")
 
     def _validate_response_envelope(
         self,
@@ -1090,9 +2115,24 @@ class DeliberationManager:
     def _revision_stages(targets: list[str]) -> list[str]:
         stages: list[str] = []
         if any(target in PRIMARY_ANALYST_IDS or target == "deliberation.manager" for target in targets):
-            stages.extend(["initial_integration", "counterargument", "final_integration", "quality_review"])
+            stages.extend(
+                [
+                    "initial_integration",
+                    "counterargument",
+                    "final_integration",
+                    "deterministic_validation",
+                    "quality_review",
+                ]
+            )
         elif COUNTERARGUMENT_ANALYST_ID in targets:
-            stages.extend(["counterargument", "final_integration", "quality_review"])
+            stages.extend(
+                [
+                    "counterargument",
+                    "final_integration",
+                    "deterministic_validation",
+                    "quality_review",
+                ]
+            )
         return stages
 
     async def _block(

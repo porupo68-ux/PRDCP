@@ -148,8 +148,7 @@
     "PMP Message Interface"
   ],
   "configuration": {
-    "allow_parallel": false,
-    "timeout_seconds": 120
+    "allow_parallel": false
   },
   "notes": [
     "Quality Reviewerは品質管理者であり研究者ではない。",
@@ -175,7 +174,7 @@
     ],
     "input_schema_id": "producer.schemas.review.QualityReviewInput",
     "output_schema_id": "producer.schemas.review.QualityReviewOutput",
-    "timeout_seconds": 120,
+    "timeout_seconds": 600,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": false,

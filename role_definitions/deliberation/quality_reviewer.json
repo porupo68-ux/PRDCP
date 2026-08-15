@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "deliberation_quality_reviewer_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.1",
     "status": "stable",
     "agent_identity": {
       "agent_id": "deliberation.quality_reviewer",
@@ -109,6 +109,11 @@
         "principle_id": "DQR-P10",
         "name": "independent_validation",
         "rule": "Managerや専門Agentの自己評価ではなく独立した品質検査を行う。"
+      },
+      {
+        "principle_id": "DQR-P11",
+        "name": "repairability_first",
+        "rule": "Repairability First: Findingのseverityだけでblockedを選ばず、既存Workflow Revisionで修復可能なら必ずrevision_requiredとして修正先へRoutingする。blocking findingとWorkflow status=blockedは別概念である。"
       }
     ],
     "responsibilities": {
@@ -832,6 +837,22 @@
       ]
     },
     "quality_gate_policy": {
+      "repairability_first": {
+        "evaluation_order": [
+          "finding_detection",
+          "repairability_assessment",
+          "repair_layer_and_agent_identification",
+          "severity_assessment",
+          "routing_generation",
+          "gate_decision"
+        ],
+        "rules": [
+          "blockingまたはcritical severityだけを理由にstatus=blockedを選ばない",
+          "Specialist再実行、Manager再統合、Counterargument再処理またはResearcher追加調査で修復可能ならstatus=revision_requiredとする",
+          "Evidence不足を主要主張から除外または未検証へ降格することで安全に修復可能な場合もrevision_requiredとする",
+          "Researcher追加調査とDeliberation内部修正の両方が必要ならrevision_scope=researcher_return、internal revision_targets、upstream_revision_requestsを同時に返す"
+        ]
+      },
       "approved": {
         "conditions": [
           "blocking findingが0件である",
@@ -865,23 +886,23 @@
       },
       "blocked": {
         "conditions": [
-          "必須入力が欠落している",
-          "Researcher Evidenceへ追跡できない",
-          "中心分析の大部分がSchema不適合である",
-          "workflow_idまたは主要IDの不整合により成果物を対応付けられない",
-          "追加調査なしに中心問題を分析できない",
+          "必須入力またはCheckpointが欠落し、既存のRecoveryまたはRevision mechanismでも復元不能である",
+          "workflow_idまたは主要IDの破損により成果物を対応付けられず、互換変換でも復元不能である",
           "修正上限に達してもblocking issueが残る",
-          "Deliberation層だけでは解消できない上流問題が存在する"
+          "Producer、Researcher、Deliberationの既存Revision mechanismを利用しても回復不能である",
+          "人間判断なしでは安全に継続できないWorkflow integrityまたは責務境界の破損がある"
         ]
       },
       "decision_precedence": [
-        "blocked",
-        "revision_required",
+        "revision_required_if_repairable",
+        "blocked_only_if_unrecoverable",
         "approved_with_conditions",
         "approved"
       ],
       "rules": [
         "一つでも未解決blocking findingがあればapprovedにしない",
+        "blocking findingがあっても修復可能ならrevision_requiredとする",
+        "実行可能なrevision_targetsまたはupstream_revision_requestsを生成できる場合はblockedにしない",
         "上流入力欠落と下流分析不備を区別する",
         "経験的不確実性が残ることだけを理由にrevision_requiredしない",
         "不確実性が隠されている場合はrevision_required対象とする",
@@ -1178,7 +1199,7 @@
           "証拠間の矛盾を既存metadataだけで解決できない",
           "引用またはsource traceabilityが欠落している"
         ],
-        "routing_rule": "Quality ReviewerはResearcherへ直接送信せず、Deliberation Managerを通じて上流差し戻し候補を提示する。"
+        "routing_rule": "Quality Reviewerはstatus=revision_required、revision_scope=researcher_return、1件以上のupstream_revision_requestsを返す。各requestのtarget_agent_idはresearcher.managerとし、Quality ReviewerはResearcherへ直接送信せずDeliberation Managerを通じて上流差し戻し候補を提示する。内部修正も必要ならrevision_targetsを保持して併記する。"
       },
       "revalidation": {
         "required_inputs": [
@@ -1233,13 +1254,22 @@
         "Counterargument resolutionの未完了"
       ],
       "non_retry_conditions": [
-        "Researcher Evidenceが不足している",
-        "中心Evidenceのsource traceabilityが存在しない",
-        "必須Agent Resultが完全に欠落している",
+        "Researcher Evidence不足はQuality Reviewer自身を同じ入力で再実行しない。ただしWorkflow revisionは許可し、researcher_returnへRoutingする",
+        "中心Evidenceのsource traceability不足はQuality Reviewer自身を同じ入力で再実行しない。ただし修復可能ならresearcher_returnへRoutingする",
+        "必須Agent Resultの欠落はQuality Reviewer自身を同じ入力で再実行しない。ただしRecoveryまたは対象Agent revisionで復元可能ならrevision_requiredとする",
         "同じblocking issueがRevision Limit後も残る",
         "ユーザーまたは上位層の判断が必要な価値対立である",
         "既存情報からConclusion Readinessを判定できない"
       ],
+      "non_retry_scope": "quality_reviewer_self_retry_only",
+      "workflow_revision_policy": {
+        "enabled_when_self_retry_is_not_useful": true,
+        "rules": [
+          "Quality Reviewer self retryが無効でもWorkflow revisionをblocked扱いしない",
+          "Evidenceまたはsource traceability不足はResearcher returnで修復可能ならrevision_requiredとする",
+          "内部修正と追加Evidenceの両方が必要なら両Routeを同時に返す"
+        ]
+      },
       "termination_conditions": [
         "quality_gate_decisionがapprovedになった",
         "quality_gate_decisionがapproved_with_conditionsになった",
@@ -1930,7 +1960,10 @@
         },
         {
           "test_category": "missing_research_evidence",
-          "expected_result": "blocked"
+          "expected_result": "revision_required",
+          "expected_revision_scope": "researcher_return",
+          "minimum_upstream_revision_requests": 1,
+          "expected_upstream_target_agent_id": "researcher.manager"
         },
         {
           "test_category": "schema_violation",
@@ -1938,6 +1971,10 @@
         },
         {
           "test_category": "PMP_workflow_mismatch",
+          "expected_result": "blocked"
+        },
+        {
+          "test_category": "unrecoverable_workflow_integrity",
           "expected_result": "blocked"
         },
         {
@@ -2289,7 +2326,7 @@
       ],
       "input_schema_id": "deliberation.schemas.review.DeliberationQualityReviewInput",
       "output_schema_id": "deliberation.schemas.review.DeliberationQualityReviewOutput",
-      "timeout_seconds": 120,
+      "timeout_seconds": 1800,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,

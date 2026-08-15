@@ -1,5 +1,37 @@
 # PRDCP 
 
+## Execution Modes
+
+Provider（LLM backend）とDemo Safe Mode（自動的な追加呼び出し、retry、revisionの許可範囲）は独立した設定です。CLI指定は、その実行に限って `.env` / 環境変数より優先されます。
+
+```powershell
+# 完全Mock E2E（revision loopを許可）
+py main.py --demo-e2e --provider mock --no-safe-mode
+
+# 安全なMock検証
+py main.py --demo-e2e --provider mock --safe-mode
+
+# 実APIの単発検証（追加呼び出しを抑止）
+py main.py --deliberation-recover <WORKFLOW_ID> --provider openrouter --safe-mode
+
+# 実運用（自動revisionと追加呼び出しを許可）
+py main.py --deliberation-recover <WORKFLOW_ID> --provider openrouter --no-safe-mode
+```
+
+`--provider`、`--safe-mode`、`--no-safe-mode` を省略した場合は、従来どおり `PRDCP_PROVIDER` と `PRDCP_DEMO_SAFE_MODE` が使われます。`--safe-mode` と `--no-safe-mode` は同時指定できません。`--doctor` は現在の実効設定を表示し、OpenRouterかつSafe Mode OFFの場合は警告します。
+
+### Deliberationの複合Revision
+
+Quality ReviewerがResearcher追加調査とDeliberation内部Revisionを同時に要求した場合は、内部Agentを先に再実行しません。内部対象とfindingをpending計画として保存し、Researcher更新を待って `--deliberation-resume <WORKFLOW_ID>` で再開します。再開後は、保存済み対象と依存関係に基づいて必要なPrimary分析、Manager統合、Counterargument、Final統合、決定論的検証、Quality Reviewだけを順に再計算します。
+
+`--deliberation-recover` は通信・Provider・Schema・プロセス中断などの技術障害用です。正常なResearcher return後の継続には `--deliberation-resume` を使用し、両者を混同しません。Demo Safe ModeでもResearcher追加調査のPMP／Outbox、pending internal revision、`WAITING_UPSTREAM_REVISION`への状態遷移は保存しますが、Researcher AgentやDeliberation Agentは自動実行しません。Internal-only RevisionはAgent再実行前に停止します。
+
+Deliberationが発行した追加調査要求は `--researcher-resume <WORKFLOW_ID>` で処理します。Researcherは要求されたResearch Questionと、既存Research Planで許可済みのsource categoryに対応するAgentだけを実行し、旧Evidenceを保持したReportを再統合・Quality Reviewした後、`research_revision_result`を返します。Demo Safe Modeでもこの明示コマンド1回分は実行しますが、Researcher Quality Reviewerがさらにrevisionを要求した場合の自動再dispatchとDeliberationの自動再開は行いません。
+
+外部RevisionがReport再統合などの途中で停止した場合、同じ `--researcher-resume` は保存済みResearch Taskと`agent_results`を照合します。完了済みAgentは再度Providerへ送らず、最後の未完了checkpoint（結果収集、Report統合、Quality Review）から再開します。同一Sourceを複数カテゴリが返した場合も、代表Sourceの`source_type`と型固有metadataは混在させず、共通範囲と`merged_evidence_ids`だけを統合します。
+
+Deliberation Quality GateはRepairability Firstで判定します。blocking findingであっても、Specialist再実行、Manager再統合、Counterargument再処理、Researcher追加Evidence、または未検証主張の除外・降格で修復可能なら`revision_required`です。`blocked`は、既存Revision／Recoveryで復元不能、Revision上限到達、または人間判断なしでは安全に継続できない場合に限定します。
+
 ProducerがResearch Planを作成し、Researcherが証拠を収集し、Deliberationが多角的に分析し、Conclusionが人間の最終選択を確定します。Playwrightは、その確定済みConclusionを変更せず、台本・引用台帳・映像指示・制作ノートへ変換します。OpenRouter APIキーがなくてもMock Providerで5層の全工程を確認できます。
 
 通信・Agent ID・status・クロスレイヤーpayloadは、`specifications/common/`のPMP v2.0を機械可読な正本として実装しています。共通基盤は1か所、Layer固有実装とRDはLayer別、実行時データは`storage/data/`に集約したCanonical Projectです。
@@ -59,12 +91,16 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 - Argument、Causal & Structural、Stakeholder & Responseの3専門Agentを並列実行
 - Deliberation Managerによる初回統合
 - 初回統合後にCounterargument Analystを実行し、変更履歴付きで再統合
-- 最大3つの主要ViewpointとEvidence→Claim→Viewpoint追跡
-- Schema、ID、Evidence、統合系譜を検査する決定論的Validator
-- Deliberation Quality ReviewerによるConclusion Readiness審査
+- task、各種analysis、初回/最終integrationを別名前空間で採番し、Workflow内のID衝突を禁止
+- evidence、source、analysis、claim、counterargument等を型別に保持し、Claim→Analysis→Evidence→Sourceを追跡
+- 実体から一意に導出したmetricsと検証対象集合を相互照合する決定論的Validator
+- 最小限のPMP message経路とcheckpoint履歴を受け取るDeliberation Quality ReviewerによるConclusion Readiness審査
+- Stakeholderの固有名詞・数値をEvidence/Sourceに拘束し、裏付け不足はunknown、unverified、またはresearch gapとして保持
+- blocking counterargumentを修正、棄却、未解決保持、Researcher返送のいずれかへ必ずrouting
 - 対象Agentだけを再実行し、依存する統合工程だけを再実行する最大2回の修正ループ
 - Evidence不足時のResearcher追加調査要求と`WAITING_UPSTREAM_REVISION`再開処理
 - 一次分析の一部失敗を条件付きで継続し、2系統未満では安全停止
+- 旧保存JSONを変更せず読込時互換変換し、完了済み高コストcheckpointを再実行しない障害復旧
 - Deliberation Result artifactとConclusion Outboxへの`deliberation_result`出力
 - Discordからの開始、状態確認、結果表示、再開
 
@@ -152,6 +188,12 @@ Researcherの追加調査結果を受領した後は、待機中Workflowを再�
 
 ```powershell
 py main.py --deliberation-resume <workflow_id>
+```
+
+Deliberationが障害で停止した場合は、保存済みcheckpointを検査し、最後の未完了段階から復旧できます。`--deliberation-resume`とは用途が異なり、Researcherからの追加Evidenceは読み込みません。
+
+```powershell
+py main.py --deliberation-recover <workflow_id>
 ```
 
 Deliberationで作成済みの`workflow_id`からConclusionを起動できます。
@@ -319,6 +361,7 @@ OPENROUTER_API_KEY=<your key>
 各`MODEL_...`には、利用時点でOpenRouterに登録されている実際のmodel IDを指定してください。設計上の表示名と環境変数の対応は`config/models.json`に記録しています。
 
 OpenRouter応答は指定JSON Schemaとして検証されます。Schema不一致や技術エラーのretryは、Quality Reviewerによる成果物修正ループとは別に記録されます。
+Structured Output境界では全objectが閉じた明示Schemaとして送信されます。Pydantic内部のdefaultは維持したままAPI Schemaからのみ除去され、自由形式dict、不正な`$ref` sibling、未解決参照がoutput modelへ追加された場合はAPI呼び出し前の監査で停止します。該当フィールドには用途に合う明示的なPydantic modelを定義してください。
 
 ## 仕様上の正規化
 

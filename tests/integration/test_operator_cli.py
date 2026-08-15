@@ -12,6 +12,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class OperatorCliIntegrationTests(unittest.TestCase):
+    def test_help_forces_utf8_output_on_windows_code_page(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "cp932"
+
+        result = subprocess.run(
+            [sys.executable, "main.py", "--help"],
+            cwd=PROJECT_ROOT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("保存済みcheckpoint", result.stdout)
+
     def test_default_e2e_output_is_concise_and_status_is_inspectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             env = os.environ.copy()

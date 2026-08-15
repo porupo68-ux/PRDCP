@@ -11,6 +11,7 @@ from common.role_definitions.boundary import RoleBoundaryValidator
 from common.role_definitions.extractor import RoleDefinitionExtractor
 from common.role_definitions.loader import RoleDefinitionLoader
 from common.role_definitions.models import RoleDefinitionSnapshot, RoleRuntimeConfig
+from common.structured_outputs import strict_output_schema
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ def prepare_agent_execution(
         role_context=role_context,
         agent_prompt=agent_prompt,
         task_constraints=message.constraints,
-        output_schema=output_schema.model_json_schema(),
+        output_schema=strict_output_schema(output_schema),
         reviewer_context=reviewer_context,
     )
     loader.access_log.record(

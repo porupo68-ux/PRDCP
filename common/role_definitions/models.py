@@ -6,6 +6,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+MIN_AGENT_TIMEOUT_SECONDS = 600
+
+
 class RoleDefinitionSnapshot(BaseModel):
     """Immutable reference to the RD selected at the start of one agent run."""
 
@@ -58,7 +61,7 @@ class RoleRuntimeConfig(BaseModel):
     generated_message_types: list[str] = Field(default_factory=list)
     input_schema_id: str | None = None
     output_schema_id: str | None = None
-    timeout_seconds: int = Field(default=120, gt=0)
+    timeout_seconds: int = Field(ge=MIN_AGENT_TIMEOUT_SECONDS)
     technical_retry_limit: int = Field(default=2, ge=0)
     revision_limit: int | None = Field(default=None, ge=0)
     parallel_execution_allowed: bool = False

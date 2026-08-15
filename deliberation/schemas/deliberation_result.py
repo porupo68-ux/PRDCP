@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from deliberation.schemas.integrated_analysis import Viewpoint
+from deliberation.schemas.integrated_analysis import TraceabilityEntry, Viewpoint
 
 
 class DeliberationResult(BaseModel):
@@ -35,6 +35,7 @@ class DeliberationResult(BaseModel):
     research_gaps: list[dict[str, Any]] = Field(default_factory=list)
     source_traceability: list[dict[str, Any]] = Field(min_length=1)
     analysis_traceability: list[dict[str, Any]] = Field(min_length=1)
+    claim_traceability: list[TraceabilityEntry] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     quality_review: dict[str, Any] | None = None
 

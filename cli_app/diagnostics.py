@@ -20,7 +20,23 @@ class DiagnosticCheck:
 
 
 def run_doctor(settings: Settings) -> list[DiagnosticCheck]:
-    checks: list[DiagnosticCheck] = []
+    checks: list[DiagnosticCheck] = [
+        DiagnosticCheck(
+            "PASS",
+            "Effective Runtime Configuration",
+            f"provider={settings.provider}, "
+            f"demo_safe_mode={str(settings.demo_safe_mode).lower()}",
+        )
+    ]
+    if settings.provider == "openrouter" and not settings.demo_safe_mode:
+        checks.append(
+            DiagnosticCheck(
+                "WARN",
+                "Runtime safety",
+                "OpenRouter + Demo Safe Mode OFF",
+                "Automatic revision and additional provider calls are enabled.",
+            )
+        )
     python_ok = sys.version_info >= (3, 11)
     checks.append(
         DiagnosticCheck(

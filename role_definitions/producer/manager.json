@@ -195,8 +195,7 @@
   "configuration": {
     "max_retry": 3,
     "allow_parallel": false,
-    "abort_on_error": true,
-    "timeout_seconds": 60
+    "abort_on_error": true
   },
   "notes": [
     "Managerは専門家ではない。",
@@ -230,7 +229,7 @@
     ],
     "input_schema_id": null,
     "output_schema_id": null,
-    "timeout_seconds": 120,
+    "timeout_seconds": 600,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": false,

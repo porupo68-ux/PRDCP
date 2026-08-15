@@ -70,10 +70,12 @@ class PlaywrightManager:
         video_format: str = "YouTube解説動画",
         language: str = "ja",
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
-        self.max_revisions = max_revisions
+        self.demo_safe_mode = demo_safe_mode
+        self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.target_duration_seconds = target_duration_seconds
         self.target_audience = target_audience
         self.video_format = video_format
@@ -105,7 +107,7 @@ class PlaywrightManager:
     ) -> PlaywrightWorkflowState:
         manager_snapshot = self.rd_loader.load(self.agent_id)
         runtime = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
-        if runtime.revision_limit is not None:
+        if not self.demo_safe_mode and runtime.revision_limit is not None:
             self.max_revisions = runtime.revision_limit
         self._validate_envelope(handoff)
         payload = handoff.payload
@@ -523,12 +525,24 @@ class PlaywrightManager:
                 "chart_request_count": len(visual.chart_requests),
             },
             limitations_to_disclose=state.limitations,
-            unresolved_production_items=validated_script.unresolved_citation_issues + visual.visual_integrity_warnings,
+            unresolved_production_items=[
+                item.model_dump(mode="json")
+                for item in (
+                    validated_script.unresolved_citation_issues
+                    + visual.visual_integrity_warnings
+                )
+            ],
             traceability_manifest=traceability,
             final_gate_result=gate.model_dump(mode="json"),
         )
 
     async def _request_upstream_revision(self, state, problems, progress_callback):
+        if self.demo_safe_mode:
+            return await self._fail(
+                state,
+                "Demo Safe Mode stopped automatic upstream revision routing",
+                progress_callback,
+            )
         requests = []
         if problems and isinstance(problems[0], dict) and "revision_request_id" in problems[0]:
             requests = problems

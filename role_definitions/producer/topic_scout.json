@@ -118,7 +118,6 @@
     "min_candidates": 3,
     "max_candidates": 10,
     "allow_parallel": true,
-    "timeout_seconds": 120,
     "source_diversity_required": true
   },
   "notes": [
@@ -145,7 +144,7 @@
     ],
     "input_schema_id": "producer.schemas.topic_scout.TopicScoutInput",
     "output_schema_id": "producer.schemas.topic_scout.TopicScoutOutput",
-    "timeout_seconds": 120,
+    "timeout_seconds": 900,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": true,

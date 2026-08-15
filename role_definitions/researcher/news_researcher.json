@@ -118,8 +118,7 @@
     "PMP Message Interface"
   ],
   "configuration": {
-    "allow_parallel": false,
-    "timeout_seconds": 300
+    "allow_parallel": false
   },
   "notes": [
     "News Researcherは報道機関という情報源のみを担当する。",
@@ -150,7 +149,7 @@
     ],
     "input_schema_id": "researcher.schemas.research_task.ResearchTask",
     "output_schema_id": "researcher.schemas.research_result.ResearchResult",
-    "timeout_seconds": 120,
+    "timeout_seconds": 3600,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": true,

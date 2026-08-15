@@ -7,6 +7,8 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from pydantic import TypeAdapter
+
 from common.ids import new_id
 from common.models.pmp import (
     MessageStatus,
@@ -29,12 +31,28 @@ from researcher.schemas.research_report import (
     ObservationType,
     ResearchQuestionCoverage,
     ResearchReport,
+    ResearchReportReview,
 )
 from researcher.schemas.research_result import CoverageStatus, ResearchResult
 from researcher.schemas.research_task import RESEARCH_TARGET_MAP, ResearchTask
+from researcher.schemas.external_revision import (
+    ExternalResearchRevisionPayload,
+    ExternalResearchRevisionRequest,
+    external_revision_context,
+)
 from researcher.schemas.review import ResearchQualityReviewOutput
-from researcher.schemas.source import ResearchSource
-from researcher.state import ResearchRevisionRecord, ResearcherWorkflowState, utc_now
+from researcher.schemas.source import (
+    SOURCE_METADATA_MODELS,
+    ResearchSource,
+    ResearchSourceType,
+)
+from researcher.state import (
+    ExternalResearchRevisionRecord,
+    ExternalRevisionCheckpoint,
+    ResearchRevisionRecord,
+    ResearcherWorkflowState,
+    utc_now,
+)
 from researcher.workflow import DISPLAY_NAMES, QUALITY_REVIEWER_ID
 from storage.researcher_workflow_repository import ResearcherWorkflowRepository
 
@@ -52,10 +70,12 @@ class ResearcherManager:
         *,
         max_revisions: int = 3,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
-        self.max_revisions = max_revisions
+        self.demo_safe_mode = demo_safe_mode
+        self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.pmp_validator = PMPValidator()
         self.rd_loader = rd_loader or registry.rd_loader
 
@@ -74,6 +94,197 @@ class ResearcherManager:
         handoff = self.repository.load_producer_handoff(workflow_id)
         return await self.start_from_message(handoff, progress_callback=progress_callback)
 
+    async def resume(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ResearcherWorkflowState:
+        state = self.repository.load(workflow_id)
+        if state.research_report is None:
+            raise ValueError("Researcher workflow has no saved Research Report")
+        if state.external_revision_reply_sent:
+            raise ValueError("Researcher external revision reply has already been sent")
+
+        request = self.repository.load_revision_request(workflow_id)
+        payload = self._validate_external_revision_request(state, request)
+        request_ids = [item.revision_request_id for item in payload.revision_requests]
+        processed_ids = {
+            request_id
+            for record in state.external_revision_history
+            if record.status in {"completed", "reply_sent"}
+            for request_id in record.revision_request_ids
+        }
+        duplicate_processed = sorted(set(request_ids) & processed_ids)
+        if duplicate_processed:
+            raise ValueError(
+                "External revision request has already been processed: "
+                + ", ".join(duplicate_processed)
+            )
+
+        manager_snapshot = self.rd_loader.load(self.agent_id)
+        if manager_snapshot.trace() not in state.role_definition_usage:
+            state.role_definition_usage.append(manager_snapshot.trace())
+
+        active_record = next(
+            (
+                record
+                for record in reversed(state.external_revision_history)
+                if record.parent_message_id == request.message_id
+                and set(record.revision_request_ids) == set(request_ids)
+                and record.status in {"processing", "failed", "blocked"}
+            ),
+            None,
+        )
+        if active_record is None:
+            revision_tasks = self._build_external_revision_tasks(state, payload)
+            state.external_revision_count += 1
+            state.pending_external_revision_request_ids = request_ids
+            state.pending_revision_parent_message_id = request.message_id
+            state.pending_revision_source_agent_id = request.sender_agent_id
+            active_record = ExternalResearchRevisionRecord(
+                iteration=state.external_revision_count,
+                source_agent_id=request.sender_agent_id,
+                parent_message_id=request.message_id,
+                revision_request_ids=request_ids,
+                target_agent_ids=list(
+                    dict.fromkeys(task.target_agent_id for task in revision_tasks)
+                ),
+                status="processing",
+            )
+            state.external_revision_history.append(active_record)
+            state.research_tasks.extend(
+                task.model_dump(mode="json") for task in revision_tasks
+            )
+            if not any(
+                message.message_id == request.message_id
+                for message in state.message_history
+            ):
+                state.message_history.append(request)
+            state.external_revision_status = ExternalRevisionCheckpoint.REQUEST_RECEIVED
+        else:
+            revision_tasks = self._saved_external_revision_tasks(state, request_ids)
+            if not revision_tasks:
+                raise ValueError(
+                    "External revision history exists but its saved Research Tasks are missing"
+                )
+            active_record.status = "processing"
+        state.error = None
+        state.completed_at = None
+        self.repository.save(state)
+        await self._emit(
+            progress_callback,
+            "Deliberation追加調査要求を受領: "
+            + ", ".join(active_record.target_agent_ids),
+        )
+
+        completed_task_ids = self._completed_research_task_ids(state)
+        incomplete_tasks = [
+            task for task in revision_tasks if task.task_id not in completed_task_ids
+        ]
+        already_completed = len(revision_tasks) - len(incomplete_tasks)
+        if already_completed:
+            await self._emit(
+                progress_callback,
+                "Existing external revision results detected",
+            )
+        if incomplete_tasks:
+            state.external_revision_status = ExternalRevisionCheckpoint.RESEARCH_DISPATCHED
+            self.repository.save(state)
+            newly_completed = await self._execute_tasks(
+                state,
+                incomplete_tasks,
+                is_revision=True,
+                progress_callback=progress_callback,
+            )
+        else:
+            newly_completed = 0
+            await self._emit(
+                progress_callback,
+                f"Provider dispatch skipped: {already_completed}/{len(revision_tasks)} completed",
+            )
+        total_completed = already_completed + newly_completed
+        if total_completed == 0:
+            state.external_revision_history[-1].status = "failed"
+            self.repository.save(state)
+            return await self._fail(
+                state,
+                "Deliberationが指定したResearcher Agentがすべて失敗しました",
+                progress_callback,
+            )
+        if total_completed < len(revision_tasks):
+            state.external_revision_history[-1].status = "failed"
+            self.repository.save(state)
+            return await self._fail(
+                state,
+                "Some external revision Researcher tasks remain incomplete",
+                progress_callback,
+            )
+        state.external_revision_status = (
+            ExternalRevisionCheckpoint.RESEARCH_RESULTS_COLLECTED
+        )
+        self.repository.save(state)
+        return await self._integrate_and_review(
+            state,
+            progress_callback,
+            external_request=request,
+        )
+
+    @staticmethod
+    def _saved_external_revision_tasks(
+        state: ResearcherWorkflowState,
+        request_ids: list[str],
+    ) -> list[ResearchTask]:
+        expected_ids = set(request_ids)
+        return [
+            task
+            for raw_task in state.research_tasks
+            if (
+                context := raw_task.get("revision_context") or {}
+            ).get("revision_request_id") in expected_ids
+            for task in [ResearchTask.model_validate(raw_task)]
+        ]
+
+    @staticmethod
+    def _completed_research_task_ids(state: ResearcherWorkflowState) -> set[str]:
+        return {
+            ResearchResult.model_validate(raw_result).task_id
+            for results in state.agent_results.values()
+            for raw_result in results
+        }
+
+    async def run_task(
+        self,
+        workflow_id: str,
+        task_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ResearcherWorkflowState:
+        state = self.repository.load(workflow_id)
+        task_data = next(
+            (item for item in state.research_tasks if item.get("task_id") == task_id),
+            None,
+        )
+        if task_data is None:
+            available = ", ".join(
+                item.get("task_id", "<missing>") for item in state.research_tasks
+            )
+            raise ValueError(
+                f"Researcher task not found in workflow {workflow_id}: {task_id}. "
+                f"Available task IDs: {available or '<none>'}"
+            )
+
+        task = ResearchTask.model_validate(task_data)
+        state.error = None
+        state.completed_at = None
+        await self._execute_tasks(
+            state,
+            [task],
+            is_revision=False,
+            progress_callback=progress_callback,
+        )
+        return state
+
     async def start_from_message(
         self,
         handoff: PMPMessage,
@@ -82,7 +293,7 @@ class ResearcherManager:
     ) -> ResearcherWorkflowState:
         manager_snapshot = self.rd_loader.load(self.agent_id)
         runtime_config = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
-        if runtime_config.revision_limit is not None:
+        if not self.demo_safe_mode and runtime_config.revision_limit is not None:
             self.max_revisions = runtime_config.revision_limit
         plan = self._validate_producer_handoff(handoff)
         tasks = self._create_research_tasks(plan)
@@ -122,6 +333,90 @@ class ResearcherManager:
         if handoff.message_type != MessageType.RESEARCH_PLAN.value:
             raise ValueError("Producer handoff message_type must be research_plan")
         return ResearchPlan.model_validate(handoff.payload)
+
+    def _validate_external_revision_request(
+        self,
+        state: ResearcherWorkflowState,
+        request: PMPMessage,
+    ) -> ExternalResearchRevisionPayload:
+        self.pmp_validator.validate(request)
+        if request.workflow_id != state.workflow_id:
+            raise ValueError("External revision request workflow ID mismatch")
+        if request.sender_agent_id != "deliberation.manager":
+            raise ValueError("External revision request sender must be deliberation.manager")
+        if request.receiver_agent_id != self.agent_id:
+            raise ValueError("External revision request receiver must be researcher.manager")
+        if request.message_type != MessageType.RESEARCH_REVISION_REQUEST.value:
+            raise ValueError("External revision request has an invalid message_type")
+        if request.constraints.get("preserve_research_plan_scope") is not True:
+            raise ValueError("External revision request must preserve Research Plan scope")
+        payload = ExternalResearchRevisionPayload.model_validate(request.payload)
+        current_report_id = str(state.research_report.get("research_report_id"))
+        if payload.research_report_id != current_report_id:
+            raise ValueError("External revision request Research Report ID mismatch")
+        request_ids = [item.revision_request_id for item in payload.revision_requests]
+        if len(set(request_ids)) != len(request_ids):
+            raise ValueError("External revision request IDs must be unique")
+        plan = ResearchPlan.model_validate(state.research_plan)
+        question_ids = {item.research_question_id for item in plan.research_questions}
+        unknown = sorted(
+            {
+                item.research_question_id
+                for item in payload.revision_requests
+                if item.research_question_id not in question_ids
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "External revision references Research Questions outside the Research Plan: "
+                + ", ".join(unknown)
+            )
+        return payload
+
+    @staticmethod
+    def _build_external_revision_tasks(
+        state: ResearcherWorkflowState,
+        payload: ExternalResearchRevisionPayload,
+    ) -> list[ResearchTask]:
+        plan = ResearchPlan.model_validate(state.research_plan)
+        questions = {item.research_question_id: item for item in plan.research_questions}
+        tasks: list[ResearchTask] = []
+        iteration = state.external_revision_count + 1
+        for revision_request in payload.revision_requests:
+            question = questions[revision_request.research_question_id]
+            allowed = {ResearchTarget(item) for item in question.research_targets}
+            selected = list(
+                dict.fromkeys(
+                    ResearchTarget(item)
+                    for item in revision_request.preferred_source_categories
+                    if ResearchTarget(item) in allowed
+                )
+            )
+            if not selected:
+                raise ValueError(
+                    "External revision preferred source categories are outside the approved "
+                    f"Research Plan for {revision_request.research_question_id}"
+                )
+            for target in selected:
+                tasks.append(
+                    ResearchTask(
+                        task_id=new_id("task"),
+                        research_question_id=question.research_question_id,
+                        target_agent_id=RESEARCH_TARGET_MAP[target],
+                        research_target=target,
+                        question=question.question,
+                        scope=plan.scope,
+                        constraints=plan.constraints,
+                        max_sources=5,
+                        revision_context=external_revision_context(
+                            revision_request,
+                            iteration=iteration,
+                        ),
+                    )
+                )
+        if not tasks:
+            raise ValueError("External revision request did not produce any Researcher tasks")
+        return tasks
 
     @staticmethod
     def _create_research_tasks(plan: ResearchPlan) -> list[ResearchTask]:
@@ -316,9 +611,16 @@ class ResearcherManager:
         self,
         state: ResearcherWorkflowState,
         progress_callback: ProgressCallback | None,
+        *,
+        external_request: PMPMessage | None = None,
     ) -> ResearcherWorkflowState:
         while True:
             state.status = WorkflowStatus.INTEGRATING
+            if external_request is not None:
+                state.external_revision_status = (
+                    ExternalRevisionCheckpoint.REPORT_INTEGRATING
+                )
+                self.repository.save(state)
             report = self._build_report(state)
             state.collected_sources = [source.model_dump(mode="json") for source in report.sources]
             state.research_report = report.model_dump(mode="json")
@@ -330,7 +632,20 @@ class ResearcherManager:
             )
 
             try:
-                review, review_response = await self._request_review(state, report)
+                if external_request is not None:
+                    state.external_revision_status = (
+                        ExternalRevisionCheckpoint.QUALITY_REVIEWING
+                    )
+                    self.repository.save(state)
+                review, review_response = await self._request_review(
+                    state,
+                    report,
+                    external_revision=(
+                        state.external_revision_history[-1]
+                        if external_request is not None
+                        else None
+                    ),
+                )
             except Exception as exc:
                 return await self._fail(
                     state,
@@ -346,7 +661,7 @@ class ResearcherManager:
 
             if review.status in {"approved", "approved_with_conditions"}:
                 approved = review.approved_research_report or report
-                approved.review = review_summary
+                approved.review = ResearchReportReview.model_validate(review_summary)
                 state.research_report = approved.model_dump(mode="json")
                 state.status = WorkflowStatus.APPROVED
                 self.repository.save_report(approved)
@@ -356,22 +671,62 @@ class ResearcherManager:
                     f"Quality Reviewer: {review.status}",
                 )
                 try:
-                    self._send_to_deliberation(state, approved, review_response.message_id)
+                    if external_request is not None:
+                        state.external_revision_history[-1].status = "completed"
+                        reply = self._send_revision_result_to_deliberation(
+                            state,
+                            approved,
+                            external_request,
+                        )
+                        state.external_revision_history[-1].status = "reply_sent"
+                        state.external_revision_history[-1].completed_at = utc_now()
+                        state.external_revision_history[-1].reply_message_id = reply.message_id
+                        state.external_revision_reply_sent = True
+                        state.external_revision_status = (
+                            ExternalRevisionCheckpoint.COMPLETED_REVISION
+                        )
+                        state.pending_external_revision_request_ids = []
+                        state.pending_revision_parent_message_id = None
+                        state.pending_revision_source_agent_id = None
+                    else:
+                        self._send_to_deliberation(
+                            state,
+                            approved,
+                            review_response.message_id,
+                        )
                 except Exception as exc:
+                    if external_request is not None:
+                        state.external_revision_history[-1].status = "failed"
                     return await self._fail(
                         state,
                         f"Deliberation Outboxへの送信に失敗しました: {exc}",
                         progress_callback,
                     )
-                state.deliberation_sent = True
-                state.status = WorkflowStatus.COMPLETED
+                if external_request is None:
+                    state.deliberation_sent = True
+                state.status = (
+                    WorkflowStatus.COMPLETED_REVISION
+                    if external_request is not None
+                    else WorkflowStatus.COMPLETED
+                )
                 state.current_agent_ids = []
                 state.completed_at = utc_now()
                 self.repository.save(state)
                 return state
 
             if review.status == "blocked":
+                if external_request is not None:
+                    state.external_revision_history[-1].status = "blocked"
                 return await self._block(state, review.reason, progress_callback)
+
+            if self.demo_safe_mode:
+                if external_request is not None:
+                    state.external_revision_history[-1].status = "blocked"
+                return await self._block(
+                    state,
+                    "Demo Safe Mode stopped automatic reviewer revision and Manager re-dispatch",
+                    progress_callback,
+                )
 
             state.revision_count += 1
             state.revision_history.append(
@@ -416,6 +771,8 @@ class ResearcherManager:
         self,
         state: ResearcherWorkflowState,
         report: ResearchReport,
+        *,
+        external_revision: ExternalResearchRevisionRecord | None = None,
     ) -> tuple[ResearchQualityReviewOutput, PMPMessage]:
         state.status = WorkflowStatus.REVIEWING
         request = PMPMessage.create(
@@ -428,9 +785,13 @@ class ResearcherManager:
                 "research_plan": state.research_plan,
                 "research_report": report.model_dump(mode="json"),
                 "revision_context": (
-                    state.revision_history[-1].model_dump(mode="json")
-                    if state.revision_history
-                    else None
+                    external_revision.model_dump(mode="json")
+                    if external_revision is not None
+                    else (
+                        state.revision_history[-1].model_dump(mode="json")
+                        if state.revision_history
+                        else None
+                    )
                 ),
             },
             constraints={
@@ -546,6 +907,7 @@ class ResearcherManager:
                     f"{agent_id}: {limitation}" for limitation in result.limitations
                 )
         sources = self._deduplicate_sources(raw_sources)
+        self._validate_source_metadata_contracts(sources)
         question_coverages: list[ResearchQuestionCoverage] = []
         gaps: list[EvidenceGap] = []
         unresolved: list[str] = []
@@ -679,6 +1041,20 @@ class ResearcherManager:
         )
 
     @staticmethod
+    def _validate_source_metadata_contracts(sources: list[ResearchSource]) -> None:
+        for source in sources:
+            source_type = ResearchSourceType(source.source_type)
+            metadata_model = SOURCE_METADATA_MODELS[source_type]
+            try:
+                TypeAdapter(metadata_model).validate_python(
+                    source.source_specific_metadata
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"{source_type.value} source metadata does not match its schema: {exc}"
+                ) from exc
+
+    @staticmethod
     def _build_cross_source_observations(
         coverages: list[ResearchQuestionCoverage],
         sources: list[ResearchSource],
@@ -732,13 +1108,6 @@ class ResearcherManager:
                 )
                 if source.evidence_id not in merged_ids:
                     merged_ids.append(source.evidence_id)
-            duplicate.source_specific_metadata.update(
-                {
-                    key: value
-                    for key, value in source.source_specific_metadata.items()
-                    if key not in duplicate.source_specific_metadata
-                }
-            )
         return unique
 
     @classmethod
@@ -811,6 +1180,49 @@ class ResearcherManager:
         self.pmp_validator.validate(message)
         self.repository.save_deliberation_outbox(message)
         state.message_history.append(message)
+
+    def _send_revision_result_to_deliberation(
+        self,
+        state: ResearcherWorkflowState,
+        report: ResearchReport,
+        original_request: PMPMessage,
+    ) -> PMPMessage:
+        report_payload = report.model_dump(mode="json")
+        payload = {
+            **report_payload,
+            "research_report": report_payload,
+            "resolved_revision_request_ids": list(
+                state.pending_external_revision_request_ids
+            ),
+            "quality_review": state.review_result or {},
+            "known_limitations": report.research_limitations,
+            "unresolved_gaps": [
+                gap.model_dump(mode="json") for gap in report.evidence_gaps
+            ],
+        }
+        self._validate_deliberation_handoff(payload)
+        message = PMPMessage.create(
+            workflow_id=state.workflow_id,
+            parent_message_id=original_request.message_id,
+            sender_agent_id=self.agent_id,
+            receiver_agent_id="deliberation.manager",
+            message_type=MessageType.RESEARCH_REVISION_RESULT,
+            objective="Return updated Research Report for Deliberation revision",
+            payload=payload,
+            context=PMPContext(
+                current_stage="researcher.external_revision",
+                previous_stage="researcher.quality_reviewer",
+                next_stage="deliberation.resume",
+            ),
+            metadata=PMPMetadata(
+                status=MessageStatus.COMPLETED,
+                extensions={"role_definition": state.role_definition_usage[-1]},
+            ),
+        )
+        self.pmp_validator.validate(message)
+        self.repository.save_deliberation_outbox(message)
+        state.message_history.append(message)
+        return message
 
     @staticmethod
     def _validate_deliberation_handoff(payload: dict[str, Any]) -> None:

@@ -10,6 +10,21 @@ from tests.researcher_helpers import valid_source
 
 
 class ResearcherPayloadTests(unittest.TestCase):
+    required_metadata = {
+        "EXPERT": {"expert_name", "field", "affiliation", "statement_context"},
+        "ACADEMIC": {"doi", "peer_reviewed", "journal_name", "study_type"},
+        "GOVERNMENT": {"organization", "country", "document_type"},
+        "NEWS": {"media_name", "article_type"},
+        "PUBLIC_OPINION": {
+            "platform",
+            "engagement_count",
+            "sample_size",
+            "representativeness_warning",
+        },
+        "POLITICIAN": {"politician_name", "party", "position", "statement_type"},
+        "INDUSTRY": {"organization_name", "organization_type", "industry"},
+    }
+
     def test_valid_source_is_accepted(self):
         source = ResearchSource.model_validate(valid_source())
         self.assertEqual(source.source_type, "ACADEMIC")
@@ -47,8 +62,48 @@ class ResearcherPayloadTests(unittest.TestCase):
             ResearchSource.model_validate(valid_source(research_question_ids=[]))
 
     def test_category_metadata_is_required(self):
-        with self.assertRaises(ValidationError):
-            ResearchSource.model_validate(valid_source(source_specific_metadata={}))
+        for category, required_fields in self.required_metadata.items():
+            with self.subTest(category=category):
+                data = valid_source(category)
+                data["source_specific_metadata"].pop(next(iter(required_fields)))
+                with self.assertRaises(ValidationError):
+                    ResearchSource.model_validate(data)
+
+    def test_all_category_metadata_models_accept_valid_payloads(self):
+        for category in self.required_metadata:
+            with self.subTest(category=category):
+                source = ResearchSource.model_validate(valid_source(category))
+                self.assertEqual(source.source_type, category)
+                self.assertIsInstance(source.source_specific_metadata, dict)
+
+    def test_structured_output_schema_contains_category_requirements(self):
+        schema = ResearchResult.model_json_schema()
+        for category, required_fields in self.required_metadata.items():
+            definition_name = "".join(part.title() for part in category.lower().split("_"))
+            definition_name += "Metadata"
+            with self.subTest(category=category):
+                definition = schema["$defs"][definition_name]
+                self.assertTrue(required_fields <= set(definition["required"]))
+                self.assertFalse(definition["additionalProperties"])
+
+    def test_structured_output_schema_correlates_source_type_and_metadata(self):
+        schema = ResearchResult.model_json_schema()
+        source_schema = schema["$defs"]["ResearchSource"]
+        branches = {
+            branch["properties"]["source_type"]["const"]: branch
+            for branch in source_schema["anyOf"]
+        }
+
+        self.assertEqual(set(branches), set(self.required_metadata))
+        for category in self.required_metadata:
+            definition_name = "".join(part.title() for part in category.lower().split("_"))
+            definition_name += "Metadata"
+            with self.subTest(category=category):
+                metadata_schema = branches[category]["properties"][
+                    "source_specific_metadata"
+                ]
+                self.assertEqual(metadata_schema, {"$ref": f"#/$defs/{definition_name}"})
+                self.assertFalse(branches[category]["additionalProperties"])
 
     def test_complete_result_requires_source(self):
         with self.assertRaises(ValidationError):

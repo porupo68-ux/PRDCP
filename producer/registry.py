@@ -20,6 +20,7 @@ class ProducerRegistry:
         models: dict[str, str] | None = None,
         *,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         payload_validator = PayloadValidator()
         pmp_validator = PMPValidator()
@@ -37,6 +38,7 @@ class ProducerRegistry:
                 pmp_validator,
                 model=model_map.get(agent_type.agent_id) or "mock",
                 rd_loader=self.rd_loader,
+                demo_safe_mode=demo_safe_mode,
             )
             for agent_type in agent_types
         }

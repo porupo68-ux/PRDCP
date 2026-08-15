@@ -34,11 +34,13 @@ def make_conclusion_manager(
     provider: MockModelProvider | None = None,
     *,
     max_revisions: int = 2,
+    demo_safe_mode: bool = False,
 ) -> ConclusionManager:
     provider = provider or MockModelProvider()
-    registry = ConclusionRegistry(provider, {})
+    registry = ConclusionRegistry(provider, {}, demo_safe_mode=demo_safe_mode)
     return ConclusionManager(
         registry,
         ConclusionWorkflowRepository(data_dir),
         max_revisions=max_revisions,
+        demo_safe_mode=demo_safe_mode,
     )

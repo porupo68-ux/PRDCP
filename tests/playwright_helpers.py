@@ -38,11 +38,13 @@ def make_playwright_manager(
     provider: MockModelProvider | None = None,
     *,
     max_revisions: int = 2,
+    demo_safe_mode: bool = False,
 ) -> PlaywrightManager:
     provider = provider or MockModelProvider()
-    registry = PlaywrightRegistry(provider, {})
+    registry = PlaywrightRegistry(provider, {}, demo_safe_mode=demo_safe_mode)
     return PlaywrightManager(
         registry,
         PlaywrightWorkflowRepository(data_dir),
         max_revisions=max_revisions,
+        demo_safe_mode=demo_safe_mode,
     )

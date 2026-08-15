@@ -48,12 +48,20 @@ class DeliberationWorkflowState(BaseModel):
     deterministic_validation: dict[str, Any] | None = None
     deliberation_result: dict[str, Any] | None = None
     review_result: dict[str, Any] | None = None
+    checkpoint_revisions: dict[str, int] = Field(default_factory=dict)
     completed_agents: list[str] = Field(default_factory=list)
     failed_agents: list[str] = Field(default_factory=list)
     revision_count: int = Field(default=0, ge=0)
     revision_history: list[DeliberationRevisionRecord] = Field(default_factory=list)
     upstream_revision_count: int = Field(default=0, ge=0)
     upstream_revision_history: list[UpstreamRevisionRecord] = Field(default_factory=list)
+    pending_revision_targets: list[str] = Field(default_factory=list)
+    pending_revision_finding_ids: list[str] = Field(default_factory=list)
+    pending_upstream_revision_request_ids: list[str] = Field(default_factory=list)
+    pending_revision_scope: str | None = None
+    pending_revision_iteration: int | None = Field(default=None, ge=1)
+    pending_revision_review_id: str | None = None
+    awaiting_upstream_revision: bool = False
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
     conclusion_sent: bool = False

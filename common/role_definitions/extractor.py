@@ -97,7 +97,7 @@ class RoleDefinitionExtractor:
             generated_message_types=list(contract.get("generated_message_types") or []),
             input_schema_id=contract.get("input_schema_id"),
             output_schema_id=contract.get("output_schema_id"),
-            timeout_seconds=int(contract.get("timeout_seconds", 120)),
+            timeout_seconds=int(contract["timeout_seconds"]),
             technical_retry_limit=int(contract.get("technical_retry_limit", 2)),
             revision_limit=contract.get("revision_limit"),
             parallel_execution_allowed=bool(contract.get("parallel_execution_allowed", False)),

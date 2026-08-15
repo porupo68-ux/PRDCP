@@ -1924,7 +1924,7 @@
       ],
       "input_schema_id": "playwright.schemas.visual_plan.VisualDirectionTask",
       "output_schema_id": "playwright.schemas.visual_plan.VisualPlan",
-      "timeout_seconds": 180,
+      "timeout_seconds": 1200,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,

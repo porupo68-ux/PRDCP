@@ -63,6 +63,16 @@ class MaintainabilityTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parse_args(["--doctor", "--demo"])
 
+    def test_cli_accepts_deliberation_checkpoint_recovery(self) -> None:
+        args = parse_args(["--deliberation-recover", "workflow-1"])
+        self.assertEqual(args.deliberation_recover, "workflow-1")
+        self.assertIsNone(args.deliberation_resume)
+
+    def test_cli_accepts_researcher_external_revision_resume(self) -> None:
+        args = parse_args(["--researcher-resume", "workflow-1"])
+        self.assertEqual(args.researcher_resume, "workflow-1")
+        self.assertIsNone(args.researcher)
+
     def test_default_summary_hides_large_internal_payloads(self) -> None:
         summary = format_state_summary(
             "conclusion",

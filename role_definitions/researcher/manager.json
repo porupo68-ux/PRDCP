@@ -148,8 +148,7 @@
     "PMP Message Interface"
   ],
   "configuration": {
-    "allow_parallel": true,
-    "timeout_seconds": 300
+    "allow_parallel": true
   },
   "notes": [
     "Research ManagerはResearchを行わない。",
@@ -170,17 +169,18 @@
   "runtime_contract": {
     "accepted_message_types": [
       "research_plan",
-      "research_revision_result"
+      "research_revision_request"
     ],
     "generated_message_types": [
       "task",
       "research_result",
       "research_revision_request",
+      "research_revision_result",
       "error"
     ],
     "input_schema_id": null,
     "output_schema_id": "researcher.schemas.research_report.ResearchReport",
-    "timeout_seconds": 120,
+    "timeout_seconds": 3600,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": true,

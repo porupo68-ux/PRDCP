@@ -108,8 +108,7 @@
   ],
   "configuration": {
     "minimum_sources": 3,
-    "allow_parallel": true,
-    "timeout_seconds": 180
+    "allow_parallel": true
   },
   "notes": [
     "General Opinion Analystは世論分析者であり、研究者ではない。",
@@ -136,7 +135,7 @@
     ],
     "input_schema_id": "producer.schemas.general_opinion.GeneralOpinionInput",
     "output_schema_id": "producer.schemas.general_opinion.GeneralOpinionOutput",
-    "timeout_seconds": 120,
+    "timeout_seconds": 900,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": false,

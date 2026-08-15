@@ -71,6 +71,15 @@ async def resume_deliberation(
     return await manager.resume(workflow_id, progress_callback=progress_callback)
 
 
+async def recover_deliberation(
+    manager: DeliberationManager,
+    *,
+    workflow_id: str,
+    progress_callback=None,
+) -> DeliberationWorkflowState:
+    return await manager.recover(workflow_id, progress_callback=progress_callback)
+
+
 def load_deliberation_status(
     manager: DeliberationManager,
     workflow_id: str,

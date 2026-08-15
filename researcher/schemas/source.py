@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+from typing_extensions import TypedDict
 
 
 class ResearchSourceType(str, Enum):
@@ -64,8 +66,130 @@ REQUIRED_METADATA = {
 }
 
 
+class MetadataExtensions(TypedDict, total=False):
+    merged_evidence_ids: list[str]
+
+
+class ExpertMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    expert_name: str
+    field: str
+    affiliation: str
+    statement_context: str
+
+
+class AcademicMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    doi: str | None
+    peer_reviewed: bool
+    journal_name: str
+    study_type: str
+
+
+class GovernmentMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    organization: str
+    country: str
+    document_type: str
+
+
+class NewsMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    media_name: str
+    article_type: str
+
+
+class PublicOpinionMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    platform: str
+    engagement_count: int
+    sample_size: int | None
+    representativeness_warning: bool
+
+
+class PoliticianMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    politician_name: str
+    party: str | None
+    position: str | None
+    statement_type: str
+
+
+class IndustryMetadata(MetadataExtensions):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    organization_name: str
+    organization_type: str
+    industry: str
+
+
+SourceSpecificMetadata: TypeAlias = (
+    ExpertMetadata
+    | AcademicMetadata
+    | GovernmentMetadata
+    | NewsMetadata
+    | PublicOpinionMetadata
+    | PoliticianMetadata
+    | IndustryMetadata
+)
+
+
+SOURCE_METADATA_MODELS = {
+    ResearchSourceType.EXPERT: ExpertMetadata,
+    ResearchSourceType.ACADEMIC: AcademicMetadata,
+    ResearchSourceType.GOVERNMENT: GovernmentMetadata,
+    ResearchSourceType.NEWS: NewsMetadata,
+    ResearchSourceType.PUBLIC_OPINION: PublicOpinionMetadata,
+    ResearchSourceType.POLITICIAN: PoliticianMetadata,
+    ResearchSourceType.INDUSTRY: IndustryMetadata,
+}
+
+
+def _correlate_source_metadata_schema(schema: dict[str, Any]) -> None:
+    """Expose the source-type/metadata contract to Structured Output validators."""
+
+    title = schema.get("title", "ResearchSource")
+    metadata_options = schema["properties"]["source_specific_metadata"]["anyOf"]
+    metadata_refs = {
+        metadata_model.__name__: deepcopy(
+            next(
+                option
+                for option in metadata_options
+                if metadata_model.__name__ in option.get("$ref", "")
+            )
+        )
+        for metadata_model in SOURCE_METADATA_MODELS.values()
+    }
+    branches: list[dict[str, Any]] = []
+    for source_type, metadata_model in SOURCE_METADATA_MODELS.items():
+        branch = deepcopy(schema)
+        branch.pop("title", None)
+        branch["properties"]["source_type"] = {
+            "const": source_type.value,
+            "title": "Source Type",
+            "type": "string",
+        }
+        branch["properties"]["source_specific_metadata"] = metadata_refs[
+            metadata_model.__name__
+        ]
+        branches.append(branch)
+
+    schema.clear()
+    schema.update({"anyOf": branches, "title": title})
+
+
 class ResearchSource(BaseModel):
-    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        use_enum_values=True,
+        json_schema_extra=_correlate_source_metadata_schema,
+    )
 
     source_id: str = Field(min_length=1)
     evidence_id: str = Field(min_length=1)
@@ -86,7 +210,7 @@ class ResearchSource(BaseModel):
     geographic_scope: list[str] = Field(default_factory=list)
     time_scope: str | None = None
     limitations: list[str] = Field(default_factory=list)
-    source_specific_metadata: dict[str, Any]
+    source_specific_metadata: SourceSpecificMetadata
 
     @field_validator("research_question_ids")
     @classmethod

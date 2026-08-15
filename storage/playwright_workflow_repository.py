@@ -125,10 +125,8 @@ class PlaywrightWorkflowRepository(JsonRepository):
     def _source_markdown(package: FinalScriptPackage) -> str:
         lines = ["# Source List", ""]
         for item in package.citation_manifest.source_list:
-            source_id = item.get("source_id", "unknown")
-            title = item.get("title") or item.get("publisher") or item.get("url") or "Untitled source"
-            url = item.get("url")
-            lines.append(f"- `{source_id}`: [{title}]({url})" if url else f"- `{source_id}`: {title}")
+            source_id = item.source_id
+            lines.append(f"- `{source_id}`: evidence `{item.evidence_id}`")
         return "\n".join(lines).rstrip() + "\n"
 
     @staticmethod
@@ -156,4 +154,3 @@ class PlaywrightWorkflowRepository(JsonRepository):
             + "\n".join(f"- {item}" for item in package.limitations_to_disclose)
             + "\n"
         )
-

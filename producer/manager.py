@@ -36,10 +36,12 @@ class ProducerManager:
         *,
         max_revisions: int = 3,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
-        self.max_revisions = max_revisions
+        self.demo_safe_mode = demo_safe_mode
+        self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.pmp_validator = PMPValidator()
         self.rd_loader = rd_loader or registry.rd_loader
 
@@ -51,7 +53,7 @@ class ProducerManager:
     ) -> ProducerWorkflowState:
         manager_snapshot = self.rd_loader.load(self.agent_id)
         runtime_config = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
-        if runtime_config.revision_limit is not None:
+        if not self.demo_safe_mode and runtime_config.revision_limit is not None:
             self.max_revisions = runtime_config.revision_limit
         workflow_id = new_workflow_id()
         state = ProducerWorkflowState(
@@ -225,6 +227,12 @@ class ProducerManager:
             self.repository.save(state)
             return state
         if status == "revision_required":
+            if self.demo_safe_mode:
+                return await self._fail(
+                    state,
+                    "Demo Safe Mode stopped automatic reviewer revision and Manager re-dispatch",
+                    progress_callback,
+                )
             state.revision_count += 1
             state.revision_history.append(
                 RevisionRecord(

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+DEMO_SAFE_MODE_FALSE_VALUES = {"0", "false", "no", "off"}
+SUPPORTED_PROVIDERS = {"mock", "openrouter"}
+
+
+def demo_safe_mode_from_env() -> bool:
+    value = os.getenv("PRDCP_DEMO_SAFE_MODE", "true").strip().lower()
+    return value not in DEMO_SAFE_MODE_FALSE_VALUES
 
 
 def load_env_file(path: Path | None = None) -> None:
@@ -31,6 +38,7 @@ class Settings:
     data_dir: Path
     log_level: str
     models: dict[str, str]
+    demo_safe_mode: bool = True
     auto_start_researcher: bool = False
     auto_start_deliberation: bool = False
     auto_start_conclusion: bool = False
@@ -54,7 +62,7 @@ class Settings:
         configured_data_dir = os.getenv("PRDCP_DATA_DIR", "").strip()
         data_dir = Path(configured_data_dir) if configured_data_dir else BASE_DIR / "storage" / "data"
         provider = os.getenv("PRDCP_PROVIDER", "mock").strip().lower()
-        if provider not in {"mock", "openrouter"}:
+        if provider not in SUPPORTED_PROVIDERS:
             raise ValueError("PRDCP_PROVIDER must be 'mock' or 'openrouter'")
         return cls(
             provider=provider,
@@ -64,6 +72,7 @@ class Settings:
             data_dir=data_dir,
             log_level=os.getenv("PRDCP_LOG_LEVEL", "INFO").upper(),
             models=models,
+            demo_safe_mode=demo_safe_mode_from_env(),
             auto_start_researcher=os.getenv("PRDCP_AUTO_START_RESEARCHER", "false").strip().lower()
             in {"1", "true", "yes", "on"},
             auto_start_deliberation=os.getenv(
@@ -101,3 +110,22 @@ class Settings:
             rd_strict=os.getenv("PRDCP_RD_STRICT", "true").strip().lower()
             in {"1", "true", "yes", "on"},
         )
+
+
+def apply_runtime_overrides(
+    settings: Settings,
+    *,
+    provider: str | None = None,
+    demo_safe_mode: bool | None = None,
+) -> Settings:
+    """Return one immutable effective configuration after optional CLI overrides."""
+    effective_provider = settings.provider if provider is None else provider.strip().lower()
+    if effective_provider not in SUPPORTED_PROVIDERS:
+        raise ValueError("provider must be 'mock' or 'openrouter'")
+    return replace(
+        settings,
+        provider=effective_provider,
+        demo_safe_mode=(
+            settings.demo_safe_mode if demo_safe_mode is None else demo_safe_mode
+        ),
+    )

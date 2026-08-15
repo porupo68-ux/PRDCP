@@ -1487,7 +1487,7 @@
       ],
       "input_schema_id": "playwright.schemas.narrative_blueprint.NarrativeDesignTask",
       "output_schema_id": "playwright.schemas.narrative_blueprint.NarrativeBlueprint",
-      "timeout_seconds": 180,
+      "timeout_seconds": 1200,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,

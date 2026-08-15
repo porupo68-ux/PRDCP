@@ -13,7 +13,11 @@ from common.role_definitions.exceptions import (
     RoleDefinitionValidationError,
     RoleDefinitionVersionUnsupportedError,
 )
-from common.role_definitions.models import definition_body, definition_identity
+from common.role_definitions.models import (
+    MIN_AGENT_TIMEOUT_SECONDS,
+    definition_body,
+    definition_identity,
+)
 
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
@@ -78,6 +82,22 @@ class RoleDefinitionValidator:
         runtime = body.get("runtime_contract")
         if not isinstance(runtime, dict):
             self._fail(expected_agent_id, "runtime_contract is required")
+        timeout_paths = self._find_key_paths(body, "timeout_seconds")
+        canonical_timeout_path = "runtime_contract.timeout_seconds"
+        if timeout_paths != [canonical_timeout_path]:
+            self._fail(
+                expected_agent_id,
+                "timeout_seconds must appear exactly once at "
+                f"{canonical_timeout_path}; found {timeout_paths or '<none>'}",
+            )
+        timeout_seconds = runtime["timeout_seconds"]
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+            self._fail(expected_agent_id, "runtime timeout_seconds must be an integer")
+        if timeout_seconds < MIN_AGENT_TIMEOUT_SECONDS:
+            self._fail(
+                expected_agent_id,
+                f"runtime timeout_seconds must be at least {MIN_AGENT_TIMEOUT_SECONDS}",
+            )
         accepted = runtime.get("accepted_message_types")
         generated = runtime.get("generated_message_types")
         if not isinstance(accepted, list) or not accepted:
@@ -100,6 +120,21 @@ class RoleDefinitionValidator:
         if isinstance(value, dict):
             return any(RoleDefinitionValidator._has_entries(v) for v in value.values())
         return isinstance(value, str) and bool(value.strip())
+
+    @staticmethod
+    def _find_key_paths(value: Any, target_key: str, prefix: str = "") -> list[str]:
+        paths: list[str] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                path = f"{prefix}.{key}" if prefix else key
+                if key == target_key:
+                    paths.append(path)
+                paths.extend(RoleDefinitionValidator._find_key_paths(child, target_key, path))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                path = f"{prefix}[{index}]"
+                paths.extend(RoleDefinitionValidator._find_key_paths(child, target_key, path))
+        return paths
 
     @staticmethod
     def _validate_schema_reference(agent_id: str, schema_id: Any, source_path: Path) -> None:

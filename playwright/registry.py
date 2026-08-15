@@ -16,6 +16,7 @@ class PlaywrightRegistry:
         models: dict[str, str] | None = None,
         *,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.provider = provider
         self.models = models or {}
@@ -33,6 +34,7 @@ class PlaywrightRegistry:
                 pmp_validator,
                 model=self.models.get(agent_type.agent_id) or "mock",
                 rd_loader=self.rd_loader,
+                demo_safe_mode=demo_safe_mode,
             )
             for agent_type in agent_types
         }
@@ -46,4 +48,3 @@ class PlaywrightRegistry:
     @property
     def agent_ids(self) -> set[str]:
         return set(self._agents)
-

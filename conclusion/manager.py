@@ -68,10 +68,12 @@ class ConclusionManager:
         *,
         max_revisions: int = 2,
         rd_loader: RoleDefinitionLoader | None = None,
+        demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
-        self.max_revisions = max_revisions
+        self.demo_safe_mode = demo_safe_mode
+        self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.rd_loader = rd_loader or registry.rd_loader
         self.pmp_validator = PMPValidator()
         self.deterministic_validator = ConclusionValidator()
@@ -99,7 +101,7 @@ class ConclusionManager:
     ) -> ConclusionWorkflowState:
         manager_snapshot = self.rd_loader.load(self.agent_id)
         runtime = RoleDefinitionExtractor().extract_runtime_config(manager_snapshot)
-        if runtime.revision_limit is not None:
+        if not self.demo_safe_mode and runtime.revision_limit is not None:
             self.max_revisions = runtime.revision_limit
         result = self._validate_deliberation_handoff(handoff)
         context = self._build_decision_context(result)
@@ -364,6 +366,12 @@ class ConclusionManager:
                 return state
             if review.status == QualityGateDecision.BLOCKED.value:
                 return await self._block(state, review.reason, progress_callback)
+            if self.demo_safe_mode:
+                return await self._block(
+                    state,
+                    "Demo Safe Mode stopped automatic reviewer revision and Manager re-dispatch",
+                    progress_callback,
+                )
             if review.revision_scope == RevisionScope.DELIBERATION_RETURN.value:
                 return await self._request_upstream_revision(
                     state,
@@ -618,6 +626,42 @@ class ConclusionManager:
         source_ids = {str(item.get("source_id")) for item in result.source_traceability}
         if not evidence_ids or "None" in evidence_ids or not source_ids or "None" in source_ids:
             raise ValueError("Deliberation traceability must include evidence_id and source_id")
+        if result.claim_traceability:
+            known_analysis_ids = {
+                str(item.get("analysis_id"))
+                for item in result.analysis_traceability
+                if item.get("analysis_id")
+            }
+            source_by_evidence = {
+                str(item.get("evidence_id")): str(item.get("source_id"))
+                for item in result.source_traceability
+                if item.get("evidence_id") and item.get("source_id")
+            }
+            traced_claim_ids: set[str] = set()
+            for entry in result.claim_traceability:
+                if not entry.claim_ids:
+                    continue
+                if not entry.analysis_ids or not entry.evidence_ids or not entry.source_ids:
+                    raise ValueError(
+                        "Claim traceability requires analysis, evidence, and source IDs"
+                    )
+                if set(entry.analysis_ids) - known_analysis_ids:
+                    raise ValueError("Claim traceability references unknown analysis IDs")
+                if set(entry.evidence_ids) - set(source_by_evidence):
+                    raise ValueError("Claim traceability references unknown evidence IDs")
+                expected_sources = {
+                    source_by_evidence[evidence_id]
+                    for evidence_id in entry.evidence_ids
+                }
+                if expected_sources - set(entry.source_ids):
+                    raise ValueError(
+                        "Claim traceability cannot complete evidence to source traversal"
+                    )
+                traced_claim_ids.update(entry.claim_ids)
+            if set(claim_ids) - traced_claim_ids:
+                raise ValueError(
+                    "Every Deliberation claim needs claim -> analysis -> evidence -> source traceability"
+                )
         return result
 
     def _build_decision_context(self, result: DeliberationResult) -> DecisionContext:
@@ -703,12 +747,28 @@ class ConclusionManager:
             problem_summary=self._summary(result.problem_definition),
             deliberation_summary=" / ".join(item.title for item in result.analysis_perspectives),
             options=[item.model_dump(mode="json") for item in generation.position_candidates],
-            comparison_matrix=evaluation.comparison_matrix,
-            primary_recommendation=recommended,
-            alternatives=integration.recommended_options[1:],
-            integrated_option=integration.integrated_option,
-            key_tradeoffs=integration.major_tradeoffs,
-            unresolved_value_conflicts=integration.unresolved_value_conflicts,
+            comparison_matrix=[
+                item.model_dump(mode="json") for item in evaluation.comparison_matrix
+            ],
+            primary_recommendation=(
+                recommended.model_dump(mode="json") if recommended else None
+            ),
+            alternatives=[
+                item.model_dump(mode="json")
+                for item in integration.recommended_options[1:]
+            ],
+            integrated_option=(
+                integration.integrated_option.model_dump(mode="json")
+                if integration.integrated_option
+                else None
+            ),
+            key_tradeoffs=[
+                item.model_dump(mode="json") for item in integration.major_tradeoffs
+            ],
+            unresolved_value_conflicts=[
+                item.model_dump(mode="json")
+                for item in integration.unresolved_value_conflicts
+            ],
             uncertainties=list(dict.fromkeys(context.uncertainties + integration.accepted_uncertainties)),
             limitations=list(dict.fromkeys(context.limitations + integration.limitations)),
             evidence_traceability=result.source_traceability,

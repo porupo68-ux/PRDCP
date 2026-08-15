@@ -1636,7 +1636,7 @@
       ],
       "input_schema_id": "playwright.schemas.production_context.ProductionContext",
       "output_schema_id": "playwright.schemas.final_script_package.FinalScriptPackage",
-      "timeout_seconds": 180,
+      "timeout_seconds": 600,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,

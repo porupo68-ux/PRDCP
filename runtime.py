@@ -24,14 +24,18 @@ from storage import (
 
 
 def build_provider(settings: Settings):
+    reservation_root = settings.data_dir / "provider_call_reservations"
     if settings.provider == "openrouter":
         if not settings.openrouter_api_key:
             raise ValueError("PRDCP_PROVIDER=openrouter requires OPENROUTER_API_KEY")
         return OpenRouterModelProvider(
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
+            reservation_root=reservation_root,
         )
-    return MockModelProvider()
+    if settings.provider == "mock":
+        return MockModelProvider(reservation_root=reservation_root)
+    raise ValueError(f"Unsupported provider: {settings.provider}")
 
 
 def build_role_definition_loader(settings: Settings) -> RoleDefinitionLoader:
@@ -52,9 +56,19 @@ def build_producer_manager(
 ) -> ProducerManager:
     provider = provider or build_provider(settings)
     rd_loader = rd_loader or build_role_definition_loader(settings)
-    registry = ProducerRegistry(provider, settings.models, rd_loader=rd_loader)
+    registry = ProducerRegistry(
+        provider,
+        settings.models,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
     repository = WorkflowRepository(settings.data_dir)
-    return ProducerManager(registry, repository, rd_loader=rd_loader)
+    return ProducerManager(
+        registry,
+        repository,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
 
 
 def build_researcher_manager(
@@ -65,9 +79,19 @@ def build_researcher_manager(
 ) -> ResearcherManager:
     provider = provider or build_provider(settings)
     rd_loader = rd_loader or build_role_definition_loader(settings)
-    registry = ResearcherRegistry(provider, settings.models, rd_loader=rd_loader)
+    registry = ResearcherRegistry(
+        provider,
+        settings.models,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
     repository = ResearcherWorkflowRepository(settings.data_dir)
-    return ResearcherManager(registry, repository, rd_loader=rd_loader)
+    return ResearcherManager(
+        registry,
+        repository,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
 
 
 def build_deliberation_manager(
@@ -78,9 +102,19 @@ def build_deliberation_manager(
 ) -> DeliberationManager:
     provider = provider or build_provider(settings)
     rd_loader = rd_loader or build_role_definition_loader(settings)
-    registry = DeliberationRegistry(provider, settings.models, rd_loader=rd_loader)
+    registry = DeliberationRegistry(
+        provider,
+        settings.models,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
     repository = DeliberationWorkflowRepository(settings.data_dir)
-    return DeliberationManager(registry, repository, rd_loader=rd_loader)
+    return DeliberationManager(
+        registry,
+        repository,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
 
 
 def build_conclusion_manager(
@@ -91,9 +125,19 @@ def build_conclusion_manager(
 ) -> ConclusionManager:
     provider = provider or build_provider(settings)
     rd_loader = rd_loader or build_role_definition_loader(settings)
-    registry = ConclusionRegistry(provider, settings.models, rd_loader=rd_loader)
+    registry = ConclusionRegistry(
+        provider,
+        settings.models,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
     repository = ConclusionWorkflowRepository(settings.data_dir)
-    return ConclusionManager(registry, repository, rd_loader=rd_loader)
+    return ConclusionManager(
+        registry,
+        repository,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
 
 
 def build_playwright_manager(
@@ -104,7 +148,12 @@ def build_playwright_manager(
 ) -> PlaywrightManager:
     provider = provider or build_provider(settings)
     rd_loader = rd_loader or build_role_definition_loader(settings)
-    registry = PlaywrightRegistry(provider, settings.models, rd_loader=rd_loader)
+    registry = PlaywrightRegistry(
+        provider,
+        settings.models,
+        rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
     repository = PlaywrightWorkflowRepository(settings.data_dir)
     return PlaywrightManager(
         registry,
@@ -112,6 +161,7 @@ def build_playwright_manager(
         max_revisions=settings.playwright_max_revisions,
         target_duration_seconds=settings.playwright_target_duration_seconds,
         rd_loader=rd_loader,
+        demo_safe_mode=settings.demo_safe_mode,
     )
 
 

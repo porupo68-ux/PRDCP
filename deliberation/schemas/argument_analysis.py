@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from deliberation.schemas.identifiers import (
+    ARGUMENT_ANALYSIS_PREFIX,
+    canonicalize_analysis_id,
+)
 
 
 class ClaimSupportStatus(str, Enum):
@@ -61,7 +66,10 @@ class ClaimEvidenceMapping(BaseModel):
 class ArgumentAnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
-    analysis_id: str = Field(min_length=1)
+    analysis_id: str = Field(
+        min_length=1,
+        description="Unique argument analysis identifier using argument_analysis_*",
+    )
     task_id: str = Field(min_length=1)
     central_claims: list[Claim] = Field(min_length=1)
     premises: list[Premise] = Field(default_factory=list)
@@ -73,6 +81,15 @@ class ArgumentAnalysisResult(BaseModel):
     exception_conditions: list[str] = Field(default_factory=list)
     scope_conditions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator("analysis_id", mode="before")
+    @classmethod
+    def normalize_analysis_id(cls, value: str) -> str:
+        return canonicalize_analysis_id(
+            value,
+            canonical_prefix=ARGUMENT_ANALYSIS_PREFIX,
+            legacy_prefixes=("arg_analysis_", "analysis_argument_"),
+        )
 
     @model_validator(mode="after")
     def validate_claim_graph(self) -> "ArgumentAnalysisResult":

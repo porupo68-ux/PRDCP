@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
-from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from researcher.schemas.research_result import CoverageStatus
 from researcher.schemas.source import (
@@ -12,6 +12,7 @@ from researcher.schemas.source import (
     ReliabilityLevel,
     ResearchSource,
     ResearchSourceType,
+    SourceSpecificMetadata,
 )
 
 
@@ -74,6 +75,66 @@ class EvidenceQualityAssessment(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class SourceMetadataRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    source_id: str = Field(min_length=1)
+    source_type: ResearchSourceType
+    title: str = Field(min_length=1)
+    source_name: str = Field(min_length=1)
+    url: HttpUrl
+    author_or_organization: str | None = None
+    published_at: datetime | None = None
+    retrieved_at: datetime
+    geographic_scope: list[str] = Field(default_factory=list)
+    time_scope: str | None = None
+    source_specific_metadata: SourceSpecificMetadata
+
+
+class SourceCategoryReferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    EXPERT: list[str] = Field(default_factory=list)
+    ACADEMIC: list[str] = Field(default_factory=list)
+    GOVERNMENT: list[str] = Field(default_factory=list)
+    NEWS: list[str] = Field(default_factory=list)
+    PUBLIC_OPINION: list[str] = Field(default_factory=list)
+    POLITICIAN: list[str] = Field(default_factory=list)
+    INDUSTRY: list[str] = Field(default_factory=list)
+
+
+class SourceCategoryCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    EXPERT: int = Field(default=0, ge=0)
+    ACADEMIC: int = Field(default=0, ge=0)
+    GOVERNMENT: int = Field(default=0, ge=0)
+    NEWS: int = Field(default=0, ge=0)
+    PUBLIC_OPINION: int = Field(default=0, ge=0)
+    POLITICIAN: int = Field(default=0, ge=0)
+    INDUSTRY: int = Field(default=0, ge=0)
+
+
+class ResearchReportReviewFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str = Field(min_length=1)
+    severity: str = Field(min_length=1)
+    research_question_id: str | None = None
+    target_agent_id: str | None = None
+    issue: str = Field(min_length=1)
+    required_action: str = Field(min_length=1)
+
+
+class ResearchReportReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    findings: list[ResearchReportReviewFinding] = Field(default_factory=list)
+    revision_targets: list[str] = Field(default_factory=list)
+
+
 class ResearchReport(BaseModel):
     """Researcher artifact plus the canonical Researcher→Deliberation contract."""
 
@@ -88,16 +149,22 @@ class ResearchReport(BaseModel):
     research_scope: list[str] = Field(min_length=1)
     sources: list[ResearchSource] = Field(default_factory=list)
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
-    source_metadata: list[dict[str, Any]] = Field(default_factory=list)
-    source_perspectives: dict[str, list[str]] = Field(default_factory=dict)
+    source_metadata: list[SourceMetadataRecord] = Field(default_factory=list)
+    source_perspectives: SourceCategoryReferences = Field(
+        default_factory=SourceCategoryReferences
+    )
     evidence_quality_assessments: list[EvidenceQualityAssessment] = Field(default_factory=list)
     research_limitations: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
-    sources_by_category: dict[str, list[str]] = Field(default_factory=dict)
-    source_count_by_category: dict[str, int] = Field(default_factory=dict)
+    sources_by_category: SourceCategoryReferences = Field(
+        default_factory=SourceCategoryReferences
+    )
+    source_count_by_category: SourceCategoryCounts = Field(
+        default_factory=SourceCategoryCounts
+    )
     cross_source_observations: list[CrossSourceObservation] = Field(default_factory=list)
     evidence_gaps: list[EvidenceGap] = Field(default_factory=list)
-    review: dict[str, Any] | None = None
+    review: ResearchReportReview | None = None
 
     @model_validator(mode="after")
     def ids_are_traceable(self) -> "ResearchReport":

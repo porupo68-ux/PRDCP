@@ -145,10 +145,12 @@ def make_manager(
     provider: MockModelProvider | None = None,
     *,
     max_revisions: int = 2,
+    demo_safe_mode: bool = False,
 ) -> DeliberationManager:
     provider = provider or MockModelProvider()
     return DeliberationManager(
-        DeliberationRegistry(provider, {}),
+        DeliberationRegistry(provider, {}, demo_safe_mode=demo_safe_mode),
         DeliberationWorkflowRepository(data_dir),
         max_revisions=max_revisions,
+        demo_safe_mode=demo_safe_mode,
     )

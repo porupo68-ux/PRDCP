@@ -2255,7 +2255,7 @@
       ],
       "input_schema_id": "deliberation.schemas.analysis_task.DeliberationAnalysisTask",
       "output_schema_id": "deliberation.schemas.stakeholder_response_analysis.StakeholderResponseAnalysisResult",
-      "timeout_seconds": 120,
+      "timeout_seconds": 1800,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": true,

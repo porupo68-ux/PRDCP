@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -31,6 +32,8 @@ from playwright.schemas import CitationEditingResult, NarrativeBlueprint, Script
 class MockModelProvider:
     """Deterministic provider used to verify control flow without an API key."""
 
+    provider_id = "mock"
+
     def __init__(
         self,
         *,
@@ -48,7 +51,9 @@ class MockModelProvider:
         fail_agent_ids: set[str] | None = None,
         no_result_agent_ids: set[str] | None = None,
         delay_seconds: float = 0,
+        reservation_root: Path | None = None,
     ) -> None:
+        self.reservation_root = reservation_root
         self.review_decisions = deque(review_decisions or [])
         self.researcher_review_decisions = deque(researcher_review_decisions or [])
         self.deliberation_review_decisions = deque(deliberation_review_decisions or [])
@@ -79,6 +84,7 @@ class MockModelProvider:
         system_prompt: str,
         input_data: dict,
         output_schema: type[BaseModel],
+        timeout_seconds: int | None = None,
     ) -> dict:
         schema_name = output_schema.__name__
         self.calls.append(schema_name)

@@ -878,7 +878,6 @@
       "max_cross_layer_revision_cycles": 2,
       "abort_on_invalid_pmp": true,
       "abort_on_blocking_quality_issue": true,
-      "timeout_seconds": 600,
       "quality_review_required": true,
       "source_traceability_required": true
     },
@@ -961,7 +960,7 @@
       ],
       "input_schema_id": "conclusion.schemas.decision_context.DecisionContext",
       "output_schema_id": "conclusion.schemas.final_conclusion.FinalConclusion",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,

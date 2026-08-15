@@ -7,6 +7,21 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from conclusion.schemas.decision_context import DecisionContext
 
 
+class ProposedAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+
+
+class PositionInformationGap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    information_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    affected_candidate_ids: list[str] = Field(default_factory=list)
+
+
 class PositionCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -17,7 +32,7 @@ class PositionCandidate(BaseModel):
     normative_direction: str = Field(min_length=1)
     target_problem_ids: list[str] = Field(min_length=1)
     target_stakeholder_ids: list[str] = Field(default_factory=list)
-    proposed_actions: list[dict[str, Any]] = Field(min_length=1)
+    proposed_actions: list[ProposedAction] = Field(min_length=1)
     responsible_actors: list[str] = Field(min_length=1)
     mechanism_of_action: str = Field(min_length=1)
     implementation_steps: list[str] = Field(min_length=1)
@@ -59,7 +74,7 @@ class PositionGenerationResult(BaseModel):
     position_candidates: list[PositionCandidate] = Field(min_length=2, max_length=5)
     diversity_dimensions: list[str] = Field(min_length=1)
     generation_notes: list[str] = Field(default_factory=list)
-    missing_information: list[dict[str, Any]] = Field(default_factory=list)
+    missing_information: list[PositionInformationGap] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def unique_candidate_ids(self) -> "PositionGenerationResult":

@@ -110,8 +110,7 @@
   ],
   "configuration": {
     "selection_count": 1,
-    "allow_parallel": false,
-    "timeout_seconds": 120
+    "allow_parallel": false
   },
   "notes": [
     "Topic Selectorは意思決定者であり、Researcherではない。",
@@ -137,7 +136,7 @@
     ],
     "input_schema_id": "producer.schemas.topic_selector.TopicSelectorInput",
     "output_schema_id": "producer.schemas.topic_selector.TopicSelectorOutput",
-    "timeout_seconds": 120,
+    "timeout_seconds": 600,
     "technical_retry_limit": 2,
     "revision_limit": 3,
     "parallel_execution_allowed": false,

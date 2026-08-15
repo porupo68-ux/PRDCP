@@ -1091,8 +1091,7 @@
       "candidate_scoring_enabled": false,
       "source_traceability_required": true,
       "counterevidence_required": true,
-      "uncertainty_disclosure_required": true,
-      "timeout_seconds": 300
+      "uncertainty_disclosure_required": true
     },
     "_design_notes": {
       "stable_decisions": [
@@ -1197,7 +1196,7 @@
       ],
       "input_schema_id": "conclusion.schemas.position_candidate.PositionGenerationTask",
       "output_schema_id": "conclusion.schemas.position_candidate.PositionGenerationResult",
-      "timeout_seconds": 120,
+      "timeout_seconds": 1200,
       "technical_retry_limit": 2,
       "revision_limit": null,
       "parallel_execution_allowed": false,

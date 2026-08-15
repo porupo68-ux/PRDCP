@@ -8,6 +8,7 @@ storage/data/workflows/**/*.jsonl
 storage/data/outbox/**/*.json
 storage/data/artifacts/**/*.json
 storage/data/deliveries/**
+storage/data/provider_call_reservations/**/*.json
 storage/data/logs/*
 !storage/data/**/.gitkeep
 archive/

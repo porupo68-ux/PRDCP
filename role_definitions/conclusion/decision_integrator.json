@@ -1358,8 +1358,7 @@
       "uncertainty_preservation_required": true,
       "alternative_preservation_required": true,
       "safeguard_integration_required_when_risk_present": true,
-      "max_internal_integration_attempts": 3,
-      "timeout_seconds": 600
+      "max_internal_integration_attempts": 3
     },
     "_design_notes": {
       "stable_decisions": [
@@ -1448,7 +1447,7 @@
       ],
       "input_schema_id": "conclusion.schemas.decision_integration.DecisionIntegrationTask",
       "output_schema_id": "conclusion.schemas.decision_integration.DecisionIntegrationResult",
-      "timeout_seconds": 120,
+      "timeout_seconds": 1200,
       "technical_retry_limit": 2,
       "revision_limit": null,
       "parallel_execution_allowed": false,

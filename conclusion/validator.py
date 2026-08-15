@@ -89,7 +89,7 @@ class ConclusionValidator:
                 "Candidates with a blocking issue were treated as viable",
                 sorted(blocking_ids & viable),
             )
-        excluded = {str(item.get("candidate_id")) for item in decision_integration.excluded_candidates}
+        excluded = {item.candidate_id for item in decision_integration.excluded_candidates}
         if set(candidate_ids) != viable | excluded:
             add("integration_coverage", "Integrator did not account for every candidate")
 
@@ -137,7 +137,7 @@ class ConclusionValidator:
         duplicates: list[list[str]] = []
         for candidate in candidates:
             tokens = [candidate.title, candidate.mechanism_of_action]
-            tokens += [str(item.get("action") or item.get("description") or item) for item in candidate.proposed_actions]
+            tokens += [item.action for item in candidate.proposed_actions]
             signature = " ".join("".join(tokens).lower().split())
             prior = signatures.get(signature)
             if prior:

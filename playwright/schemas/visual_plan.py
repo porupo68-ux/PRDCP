@@ -66,6 +66,21 @@ class ChartRequest(BaseModel):
     prohibited_transformations: list[str] = Field(default_factory=list)
 
 
+class SourceDisplayRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule: str = Field(min_length=1)
+
+
+class VisualIntegrityWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    warning_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    paragraph_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+
+
 class VisualPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -74,8 +89,8 @@ class VisualPlan(BaseModel):
     visual_cues: list[VisualCue] = Field(default_factory=list)
     chart_requests: list[ChartRequest] = Field(default_factory=list)
     asset_requirements: list[AssetRequirement] = Field(default_factory=list)
-    source_display_rules: list[dict[str, Any]] = Field(default_factory=list)
-    visual_integrity_warnings: list[dict[str, Any]] = Field(default_factory=list)
+    source_display_rules: list[SourceDisplayRule] = Field(default_factory=list)
+    visual_integrity_warnings: list[VisualIntegrityWarning] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_ids(self) -> "VisualPlan":
@@ -97,4 +112,3 @@ class VisualDirectionTask(BaseModel):
     citation_validated_script: CitationValidatedScript
     citation_manifest: CitationManifest
     revision_context: dict[str, Any] | None = None
-

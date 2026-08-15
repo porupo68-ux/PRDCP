@@ -10,8 +10,8 @@ from cli_app.diagnostics import print_doctor_report, run_doctor
 from cli_app.events import ProgressReporter
 from cli_app.output import load_workflow_states, print_state
 from common.logger import configure_logging
-from config.settings import Settings
-from runtime import build_all_managers, build_managers
+from config.settings import Settings, apply_runtime_overrides
+from runtime import build_all_managers, build_managers, build_researcher_manager
 
 
 async def run_demo(
@@ -61,7 +61,7 @@ async def run_demo(
         return 0 if conclusion_state.status == "WAITING_HUMAN_SELECTION" else 1
 
     selected_id = conclusion_state.position_candidates[0]["position_candidate_id"]
-    print(f"[conclusion] Mock E2E auto-selection: {selected_id}")
+    print(f"[conclusion] E2E auto-selection: {selected_id}")
     conclusion_state = conclusion.select(workflow_id, [selected_id])
     print_state("conclusion", conclusion_state, json_output=json_output)
     if conclusion_state.status != "COMPLETED":
@@ -90,20 +90,56 @@ async def run_saved_researcher(
     return 0 if state.status == "COMPLETED" else 1
 
 
+async def run_saved_researcher_task(
+    settings: Settings,
+    workflow_id: str,
+    task_id: str,
+    *,
+    json_output: bool,
+) -> int:
+    researcher = build_researcher_manager(settings)
+    state = await researcher.run_task(
+        workflow_id,
+        task_id,
+        progress_callback=ProgressReporter("researcher", settings.data_dir, workflow_id),
+    )
+    print_state("researcher", state, json_output=json_output)
+    return 0 if state.status == "RUNNING" else 1
+
+
+async def resume_saved_researcher(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    json_output: bool,
+) -> int:
+    researcher = build_researcher_manager(settings)
+    state = await researcher.resume(
+        workflow_id,
+        progress_callback=ProgressReporter("researcher", settings.data_dir, workflow_id),
+    )
+    print_state("researcher", state, json_output=json_output)
+    return 0 if state.status == "COMPLETED_REVISION" else 1
+
+
 async def run_saved_deliberation(
     settings: Settings,
     workflow_id: str,
     *,
     resume: bool,
     json_output: bool,
+    recover: bool = False,
 ) -> int:
+    if resume and recover:
+        raise ValueError("Deliberation resume and recovery cannot be requested together")
     _producer, _researcher, deliberation = build_managers(settings)
     callback = ProgressReporter("deliberation", settings.data_dir, workflow_id)
-    state = await (
-        deliberation.resume(workflow_id, progress_callback=callback)
-        if resume
-        else deliberation.start(workflow_id, progress_callback=callback)
-    )
+    if recover:
+        state = await deliberation.recover(workflow_id, progress_callback=callback)
+    elif resume:
+        state = await deliberation.resume(workflow_id, progress_callback=callback)
+    else:
+        state = await deliberation.start(workflow_id, progress_callback=callback)
     print_state("deliberation", state, json_output=json_output)
     return 0 if state.status == "COMPLETED" else 1
 
@@ -219,9 +255,36 @@ def dispatch(args: Any, settings: Settings) -> int:
         return print_doctor_report(run_doctor(settings), json_output=args.json_output)
     if args.status:
         return show_status(settings, args.status, json_output=args.json_output)
+    print(
+        f"[runtime] provider={settings.provider} "
+        f"demo_safe_mode={str(settings.demo_safe_mode).lower()}",
+        file=sys.stderr,
+    )
+    if settings.provider == "openrouter" and not settings.demo_safe_mode:
+        print(
+            "[WARNING] OpenRouter + Demo Safe Mode OFF: automatic revision and "
+            "additional provider calls are enabled.",
+            file=sys.stderr,
+        )
     if args.researcher:
         return asyncio.run(
             run_saved_researcher(settings, args.researcher, json_output=args.json_output)
+        )
+    if args.researcher_task:
+        return asyncio.run(
+            run_saved_researcher_task(
+                settings,
+                *args.researcher_task,
+                json_output=args.json_output,
+            )
+        )
+    if args.researcher_resume:
+        return asyncio.run(
+            resume_saved_researcher(
+                settings,
+                args.researcher_resume,
+                json_output=args.json_output,
+            )
         )
     if args.deliberation:
         return asyncio.run(
@@ -238,6 +301,16 @@ def dispatch(args: Any, settings: Settings) -> int:
                 settings,
                 args.deliberation_resume,
                 resume=True,
+                json_output=args.json_output,
+            )
+        )
+    if args.deliberation_recover:
+        return asyncio.run(
+            run_saved_deliberation(
+                settings,
+                args.deliberation_recover,
+                resume=False,
+                recover=True,
                 json_output=args.json_output,
             )
         )
@@ -309,7 +382,11 @@ def dispatch(args: Any, settings: Settings) -> int:
 def entrypoint(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        settings = Settings.from_env()
+        settings = apply_runtime_overrides(
+            Settings.from_env(),
+            provider=args.provider,
+            demo_safe_mode=args.demo_safe_mode,
+        )
         configure_logging(settings.log_level, data_dir=settings.data_dir)
         return dispatch(args, settings)
     except KeyboardInterrupt:

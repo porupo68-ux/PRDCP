@@ -8,6 +8,11 @@ from .research_report import (
     ResearchReport,
 )
 from .research_result import CoverageStatus, ResearchResult
+from .external_revision import (
+    ExternalRequiredResearchScope,
+    ExternalResearchRevisionPayload,
+    ExternalResearchRevisionRequest,
+)
 from .research_task import RESEARCH_TARGET_MAP, RESEARCHER_AGENT_IDS, ResearchTask
 from .review import (
     FindingSeverity,
@@ -32,6 +37,9 @@ __all__ = [
     "EvidenceItem",
     "EvidenceQualityAssessment",
     "EvidenceStance",
+    "ExternalRequiredResearchScope",
+    "ExternalResearchRevisionPayload",
+    "ExternalResearchRevisionRequest",
     "FindingSeverity",
     "ObservationType",
     "RESEARCH_TARGET_MAP",
