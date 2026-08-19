@@ -14,7 +14,7 @@ Manager、Topic Scout、Topic Selector、General Opinion Analyst、Research Plan
 
 ## 4. Workflow
 
-Topic入力→候補生成→選定→世論分析→Research Plan→Final Gateの順に処理します。
+Topic入力→候補生成→選定→世論分析→Research Plan→Final Gateの順に処理します。General Opinion Analystだけは検索とStructured Reasoningを分離し、Retrieval Contextを保存してからReasoningを実行します。
 
 ## 5. Inputs
 
@@ -34,7 +34,7 @@ ResearcherへCanonical PMPの`research_plan`を送信します。
 
 ## 9. Storage
 
-`storage/data/workflows/producer/`とResearcher向けOutboxを使用します。
+`storage/data/workflows/producer/`、`retrieval_contexts/`、Retrieval/Provider Reservation、Researcher向けOutboxを使用します。
 
 ## 10. Discord Operations
 
@@ -47,3 +47,7 @@ ResearcherへCanonical PMPの`research_plan`を送信します。
 ## 12. Testing
 
 Producerのunit testと5 Layer Mock E2Eで検証します。
+
+## 13. Recovery
+
+`--producer-recover`は最初の未完了checkpointから再開します。保存済みRetrieval後のReasoning一時障害は`--producer-provider-retry`、その消費済みretryが旧metadata契約で停止した既知ケースだけは`--producer-output-repair`を使用します。いずれも既存Retrievalを再検索せず、別task identityとReservationで重複送信を防ぎます。

@@ -71,3 +71,7 @@ claim/evidence、Production Contextのevidence→source、Citation Manifestのso
 ある場合はFail Closedです。修復履歴と前後hashは
 `artifacts/playwright_deterministic_repairs/<workflow_id>/`へ保存されます。完了後の同じrecoverはno-opで、
 Deliveryを二重生成しません。
+
+## 15. Provider Failure Recovery
+
+`--playwright-provider-retry`は保存済み一時障害の一回限り再送、`--playwright-capability-repair <workflow_id> <repair_model_id>`はStructured Outputs対応Endpointがない能力不一致を異なるmodelで修復する操作です。どちらもDemo Safe Mode、専用Authorization、別task identity、独立Reservationを必須とします。`require_parameters=true`やstrict schemaを弱めるfallbackは行いません。Conclusion Handoff更新後は`--playwright-resume`を使用し、これらの技術障害経路と分離します。

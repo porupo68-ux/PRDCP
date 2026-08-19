@@ -47,3 +47,9 @@ Deliberationから受信し、Human Selection後にPlaywrightへ送信します�
 ## 12. Testing
 
 候補統合、選択、revision、handoffをunit/integration testで検証します。
+
+## 13. Recovery and Human Selection
+
+`--conclusion-recover`はPosition、Evaluation、Integration、Quality Reviewの保存済みResult PMPを照合し、Result保存後にState更新だけが失敗したcheckpointをProvider 0件で復元します。通信・応答契約の一時障害は`--conclusion-provider-retry`、保存済み`revision_required`の一サイクルは`--conclusion-revise`、元taskと一回retryがともに契約違反になった場合だけ異なるmodelの`--conclusion-contract-repair`を使用します。
+
+Quality Review通過後も`WAITING_HUMAN_SELECTION`で停止し、`--conclusion-select`または`--conclusion-integrate`による明示的人間選択を必須とします。互換性修復に成功したmodel bindingはProvider・Agent・output schema・元modelへ限定してappend-only保存し、将来の一致taskだけに適用します。

@@ -12,3 +12,11 @@ PRDCP全体のテストを一元管理します。
 ```powershell
 py -m unittest discover -s tests -p "test_*.py" -v
 ```
+
+Release相当の検証は次を使用します。
+
+```powershell
+py scripts\verify.py
+```
+
+compile、全unit/integration、31 Role DefinitionのSTRICT読込、Common contract drift、OpenRouterへ送る22 root Structured Output Schemaの再帰監査、5層Mock E2E、6 Deliveryファイルを確認します。実API固有の試験が必要な場合も、Static→Targeted Regression→Integration→Mock/Fault→保存済みcheckpointを使う局所Real callの順に進め、正常なResultとRetrievalを再実行しません。

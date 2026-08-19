@@ -4,9 +4,12 @@ Inter-layer readiness values are canonical lowercase contracts. Deliberation -> 
 
 ## Execution Modes
 
-Provider（LLM backend）とDemo Safe Mode（自動的な追加呼び出し、retry、revisionの許可範囲）は独立した設定です。CLI指定は、その実行に限って `.env` / 環境変数より優先されます。
+Provider（LLM backend）、Retrieval Provider（検索）、Demo Safe Mode（自動的な追加呼び出し、retry、revisionの許可範囲）は独立した設定です。CLI指定は、その実行に限って `.env` / 環境変数より優先されます。ただし、`--provider`が上書きするのはLLM Providerだけで、`PRDCP_RETRIEVAL_PROVIDER`は変更しません。
 
 ```powershell
+# 完全Mockにする場合はRetrievalも明示的にMockへ固定する
+$env:PRDCP_RETRIEVAL_PROVIDER = "mock"
+
 # 完全Mock E2E（revision loopを許可）
 py main.py --demo-e2e --provider mock --no-safe-mode
 
@@ -23,7 +26,7 @@ py main.py --deliberation-provider-retry <WORKFLOW_ID> --provider openrouter --s
 py main.py --deliberation-recover <WORKFLOW_ID> --provider openrouter --no-safe-mode
 ```
 
-`--provider`、`--safe-mode`、`--no-safe-mode` を省略した場合は、従来どおり `PRDCP_PROVIDER` と `PRDCP_DEMO_SAFE_MODE` が使われます。`--safe-mode` と `--no-safe-mode` は同時指定できません。`--doctor` は現在の実効設定を表示し、OpenRouterかつSafe Mode OFFの場合は警告します。OpenRouter利用時は公開Model/Endpoint metadataも読み取り、31 Agentの実効model（環境変数と検証済み互換bindingを反映）が`response_format`と`structured_outputs`を同じ稼働Endpointで扱えるかを監査します。この確認はchat completionを生成しないためAPI生成料金は発生しません。model不存在、非対応、alias解決失敗、metadata取得不能はPASSにせず、`MODEL CAPABILITY PREFLIGHT`をBLOCKEDにします。
+`--provider`、`--safe-mode`、`--no-safe-mode` を省略した場合は、従来どおり `PRDCP_PROVIDER` と `PRDCP_DEMO_SAFE_MODE` が使われます。Retrievalは`PRDCP_RETRIEVAL_PROVIDER`を使用し、未設定時だけ起動時の`PRDCP_PROVIDER`を継承します。したがって、`.env`でRetrievalを`openrouter`に固定した後にCLIだけを`--provider mock`へ変えても、検索はMockになりません。API 0件の検証では両方を`mock`にしてください。`--safe-mode` と `--no-safe-mode` は同時指定できません。`--doctor` は現在の実効設定を表示し、OpenRouterかつSafe Mode OFFの場合は警告します。OpenRouter利用時は公開Model/Endpoint metadataも読み取り、31 Agentの実効model（環境変数と検証済み互換bindingを反映）が`response_format`と`structured_outputs`を同じ稼働Endpointで扱えるかを監査します。この確認はchat completionを生成しないためAPI生成料金は発生しません。model不存在、非対応、alias解決失敗、metadata取得不能はPASSにせず、`MODEL CAPABILITY PREFLIGHT`をBLOCKEDにします。
 
 Cycle 029では、General Opinion Analystと7 Researcher specialistの検索をStructured Reasoningから分離しました。Canonical PMP payloadは変更せず、Search ProviderのURL・title・excerptを`storage/data/retrieval_contexts/<workflow_id>/`へ先に保存し、そのruntime viewだけをReasoning modelへ追加します。検索予約は`retrieval_call_reservations`、LLM予約は従来の`provider_call_reservations`へ分離され、LLM失敗後のRecoveryは保存済みRetrievalを再利用します。Research Resultのsource ID・URL・title・excerptはRetrieval集合へschemaとlocal contractの両方で束縛されます。Research PlannerにはRetrievalを付与しません。`--doctor`は31 Reasoning modelと8 Retrieval-required Agentを別々に監査します。
 
@@ -107,7 +110,8 @@ ProducerがResearch Planを作成し、Researcherが証拠を収集し、Deliber
 
 ```powershell
 py main.py --doctor
-py main.py --demo-e2e --topic "生成AIは人間の仕事を奪うのか"
+$env:PRDCP_RETRIEVAL_PROVIDER = "mock"
+py main.py --demo-e2e --provider mock --topic "生成AIは人間の仕事を奪うのか"
 py main.py --status <表示されたworkflow_id>
 ```
 
@@ -117,6 +121,22 @@ py main.py --status <表示されたworkflow_id>
 - CLIは通常、読みやすい要約だけを表示します。内部状態が必要な場合だけ末尾へ`--json`を付けます。
 
 Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを保証します。実OpenRouterの応答品質と外部サービス可用性は別条件なので、API keyと全model IDを設定後に`--doctor`を再実行してください。
+
+## Operator CLIの使い分け
+
+同じWorkflowを再開する操作でも責務が異なります。まず`py main.py --status <workflow_id>`で保存状態と推奨操作を確認してください。
+
+| 種別 | 用途 | 代表コマンド |
+| --- | --- | --- |
+| Start | 正常な上流Handoffから層を開始 | `--researcher`、`--deliberation`、`--conclusion`、`--playwright` |
+| Resume | 正常な上流Revision結果を受け取って再分析 | `--researcher-resume`、`--deliberation-resume`、`--conclusion-resume`、`--playwright-resume` |
+| Recover | 保存済みcheckpointを照合し、完了済み処理を再利用 | `--producer-recover`、`--researcher-recover`、`--deliberation-recover`、`--conclusion-recover`、`--playwright-recover` |
+| Provider Retry | 課金済みの可能性がある一時障害を、保存済み認可と別task identityで一度だけ再送 | 各層の`--*-provider-retry` |
+| Revision | 保存済みQuality Findingに対する明示的一サイクル | `--researcher-revise`、`--conclusion-revise`、`--playwright-revise` |
+| Contract/Capability Repair | 同一model retryでは直らないProvider契約・能力不一致を、異なる明示modelで一度だけ修復 | `--conclusion-contract-repair`、`--playwright-capability-repair` |
+| Targeted Researcher Repair | 保存済みRetrievalを再利用する旧失敗専用の一回限り修復 | `--researcher-runtime-model-repair`、`--researcher-runtime-output-repair`、`--researcher-runtime-adapter-repair`、`--researcher-runtime-identity-repair`、`--researcher-runtime-provenance-repair` |
+
+`--researcher-retrieval-reconstruct`だけは新しい検索を行うため、Retrieval 0件のRecoveryには使用しません。`--researcher-task <workflow_id> <task_id>`は保存済みroutingで単一Taskを実行する低レベル運用コマンドです。通常運用では`--status`が示す層コマンドを優先してください。全引数は`py main.py --help`、バージョンは`--version`、完全状態は`--json`、開発者向けTracebackは`--verbose`で確認できます。
 
 ## 実装済み
 
@@ -209,27 +229,30 @@ py -m pip install -r requirements.txt
 copy .env.example .env
 ```
 
-最初は`.env`の`PRDCP_PROVIDER=mock`のままで構いません。
+最初は`.env`の`PRDCP_PROVIDER=mock`と`PRDCP_RETRIEVAL_PROVIDER=mock`のままで構いません。
 
 ## 2. APIなしで全工程を確認
 
 Producerだけを実行します。
 
 ```powershell
-py main.py --demo --topic "生成AIは人間の仕事を奪うのか"
+$env:PRDCP_RETRIEVAL_PROVIDER = "mock"
+py main.py --demo --provider mock --topic "生成AIは人間の仕事を奪うのか"
 ```
 
 ProducerからResearcher、Deliberation、Conclusionの品質審査まで連続実行し、人間の選択待ちで停止します。
 
 ```powershell
-py main.py --demo-full --topic "生成AIは人間の仕事を奪うのか"
+py main.py --demo-full --provider mock --topic "生成AIは人間の仕事を奪うのか"
 ```
 
 Mockで最初の候補を自動選択し、ProducerからFinal Script PackageまでE2E実行します。
 
 ```powershell
-py main.py --demo-e2e --topic "生成AIは人間の仕事を奪うのか"
+py main.py --demo-e2e --provider mock --topic "生成AIは人間の仕事を奪うのか"
 ```
+
+この節のコマンドは、同じPowerShellセッションで`PRDCP_RETRIEVAL_PROVIDER=mock`を設定していることを前提にします。これによりLLM・Retrievalともに実API呼び出しは0件です。
 
 Producerで作成済みの`workflow_id`からResearcherだけを手動起動できます。
 
@@ -396,6 +419,14 @@ storage/data/artifacts/citation_manifests/<workflow_id>.json
 storage/data/artifacts/visual_plans/<workflow_id>.json
 storage/data/artifacts/final_script_packages/<workflow_id>.json
 storage/data/outbox/conclusion_revision/<workflow_id>.json
+storage/data/retrieval_contexts/<workflow_id>/
+storage/data/retrieval_call_reservations/
+storage/data/provider_call_reservations/
+storage/data/provider_*_authorizations/
+storage/data/retrieval_reconstruction_authorizations/
+storage/data/provider_model_compatibility/
+storage/data/artifacts/human_evidence_decisions/<workflow_id>/
+storage/data/artifacts/playwright_deterministic_repairs/<workflow_id>/
 storage/data/deliveries/<workflow_id>/final_script_package.json
 storage/data/deliveries/<workflow_id>/script.md
 storage/data/deliveries/<workflow_id>/citation_manifest.json
@@ -428,6 +459,7 @@ Producerコマンド:
 !producer
 !producer_topic 生成AIは人間の仕事を奪うのか
 !producer_status <workflow_id>
+!runtime_models [layer]
 ```
 
 Researcherコマンド:
@@ -491,8 +523,13 @@ PRDCP_AUTO_START_PLAYWRIGHT=true
 
 ```text
 PRDCP_PROVIDER=openrouter
+PRDCP_RETRIEVAL_PROVIDER=openrouter
+OPENROUTER_RETRIEVAL_MODEL=google/gemini-3.7-flash
+OPENROUTER_RETRIEVAL_ENGINE=exa
 OPENROUTER_API_KEY=<your key>
 ```
+
+`PRDCP_PROVIDER`はStructured Reasoning、`PRDCP_RETRIEVAL_PROVIDER`は検索を選択します。本番検索を行う場合は両方を`openrouter`にします。保存済みRetrieval Contextを使うRecoveryでは、ManagerがContext hashとReservationを照合し、不要な再検索を行いません。
 
 各`MODEL_...`には、利用時点でOpenRouterに登録されている実際のmodel IDを指定してください。設計上の表示名と環境変数の対応は`config/models.json`に記録しています。
 
@@ -501,7 +538,7 @@ OpenRouter応答は指定JSON Schemaとして検証されます。Schema不一�
 OpenRouterへ送るDeliberation入力は、保存済みResearch Reportを変更せず、Evidence・Source・Metadata・Qualityの重複表をtrace IDで統合した実行時viewを使用します。Strict JSON Schemaは`response_format`だけを権威ある境界として一度送信し、system promptへ全文を重複埋め込みしません。既知のmodel context上限はProvider reservation作成前にローカル検査されます。Context超過で停止したCounterargument recoveryは、元reservationを保持したまま`*_context_repair_1`という決定的な一回限りの論理taskで再開します。
 
 Counterargument Structured Outputは`required_revision=true/false`を`anyOf`で分離します。trueでは内部Deliberation revision targetとacceptance conditionを必須化し、falseではtarget配列を空にします。Researcher追加調査は架空のDeliberation Agent IDではなく`research_gap_required`で表現します。Provider応答後に判明した旧rawの誤prefix・非内部targetは、保存rawを上書きせず監査記録付きread adapterで再利用します。
-Structured Output境界では全objectが閉じた明示Schemaとして送信されます。Pydantic内部のdefaultは維持したままAPI Schemaからのみ除去され、自由形式dict、不正な`$ref` sibling、未解決参照がoutput modelへ追加された場合はAPI呼び出し前の監査で停止します。該当フィールドには用途に合う明示的なPydantic modelを定義してください。
+Structured Output境界では、root、nested model、array items、`$defs`、`anyOf`/union以下を含む全objectが閉じた明示Schemaとして送信されます。全objectに`additionalProperties: false`を要求し、`properties`を持つobjectでは`required`を全property keyと完全一致させます。Pydantic内部のdefaultは維持したままAPI Schemaからのみ除去され、自由形式dict、不正な`$ref` sibling、未解決参照がoutput modelへ追加された場合はAPI呼び出し前の22 root schema監査で停止します。自由形式payloadへ機械的に`additionalProperties: false`を付けて意味を変えず、Structured Output境界では用途に合う明示的なPydantic modelへ置き換えてください。
 
 ## 仕様上の正規化
 
