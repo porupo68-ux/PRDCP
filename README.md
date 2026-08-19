@@ -3,13 +3,23 @@
 Inter-layer readiness values are canonical lowercase contracts. Deliberation -> Conclusion uses `ready`, `ready_with_conditions`, `not_ready`, or `undetermined`; Conclusion -> Playwright uses `ready`, `ready_with_conditions`, `not_ready`, or `not_applicable`. Legacy uppercase checkpoint values are normalized only while reading and existing storage files are not rewritten.
 ## Quick Concept
 
-PRDCPは、複数のAIエージェントを5つの層に分けた、一般論を検証するマルチエージェントシステムです。1回数百円、場合によっては1日かけて調査・分析・審議を行い、世間で広く共有されている見解を紐解きます。
+PRDCPは、複数のAIエージェントを5つの層に分け、社会で広く共有されている一般論を検証するマルチエージェントシステムです。
 
-##Background
+1回あたり数百円程度、場合によっては1日かけて調査・分析・審議を行い、世間で広く共有されている見解が「なぜそう考えられているのか」を紐解きます。
 
-私は普段から、Opper.aiのAI RoundtableやGoogle AI Studioなどを使い、気になったニュースやネット上の意見など、社会で一般的に受け入れられている知見を検証していました。  
-　しかし、さまざまな意見を集めることはできても、「なぜその見解に至ったのか」まで調査し、多様な情報源から比較・分析するには、大きな作業量が必要でした。  
-　そこで、一般論の発見から情報収集、議論、結論、動画台本の作成までを、複数のAIエージェントで分担・自動化するシステム「PRDCP」を開発しました。
+## Background
+
+私は普段から、Opper.aiのAI RoundtableやGoogle AI Studioなどを使い、気になったニュースやネット上の意見など、社会で一般的に受け入れられている知見を検証していました。
+
+しかし、さまざまな意見を集めることはできても、「なぜその見解に至ったのか」まで調査し、多様な情報源から比較・分析するには、大きな作業量が必要でした。
+
+そこで、一般論の発見から情報収集、審議、結論、動画台本の作成までを、複数のAIエージェントで分担・自動化するシステム「PRDCP」を開発しました。
+
+また、今回はLangGraphやLangChainを使用していません。これは、この作品を通してMASのオーケストレーション構造そのものを体系的に学ぶことを目的としていたためです。
+
+その結果、エージェント間の通信を安定させるPMPという共通プロトコルの設計や、各層にオーケストレーターとなるManager Agentを配置し、処理の進行・検証・再実行を管理することで、システム全体の動作を安定化させる設計を学ぶことができました。
+
+
 ## Execution Modes
 
 Provider（LLM backend）、Retrieval Provider（検索）、Demo Safe Mode（自動的な追加呼び出し、retry、revisionの許可範囲）は独立した設定です。CLI指定は、その実行に限って `.env` / 環境変数より優先されます。ただし、`--provider`が上書きするのはLLM Providerだけで、`PRDCP_RETRIEVAL_PROVIDER`は変更しません。
