@@ -1,9 +1,15 @@
 # PRDCP v2
 
 Inter-layer readiness values are canonical lowercase contracts. Deliberation -> Conclusion uses `ready`, `ready_with_conditions`, `not_ready`, or `undetermined`; Conclusion -> Playwright uses `ready`, `ready_with_conditions`, `not_ready`, or `not_applicable`. Legacy uppercase checkpoint values are normalized only while reading and existing storage files are not rewritten.
-## Project Overview
+## Quick Concept
 
 PRDCPは、複数のAIエージェントを5つの層に分けた、一般論を検証するマルチエージェントシステムです。1回数百円、場合によっては1日かけて調査・分析・審議を行い、世間で広く共有されている見解を紐解きます。
+
+##Background
+
+私は普段から、Opper.aiのAI RoundtableやGoogle AI Studioなどを使い、気になったニュースやネット上の意見など、社会で一般的に受け入れられている知見を検証していました。  
+　しかし、さまざまな意見を集めることはできても、「なぜその見解に至ったのか」まで調査し、多様な情報源から比較・分析するには、大きな作業量が必要でした。  
+　そこで、一般論の発見から情報収集、議論、結論、動画台本の作成までを、複数のAIエージェントで分担・自動化するシステム「PRDCP」を開発しました。
 ## Execution Modes
 
 Provider（LLM backend）、Retrieval Provider（検索）、Demo Safe Mode（自動的な追加呼び出し、retry、revisionの許可範囲）は独立した設定です。CLI指定は、その実行に限って `.env` / 環境変数より優先されます。ただし、`--provider`が上書きするのはLLM Providerだけで、`PRDCP_RETRIEVAL_PROVIDER`は変更しません。
