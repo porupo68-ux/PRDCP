@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "deliberation_manager_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.4",
     "status": "stable",
     "agent_identity": {
       "agent_id": "deliberation.manager",
@@ -47,6 +47,41 @@
         "principle_id": "DM-P06",
         "name": "minimum_sufficient_complexity",
         "rule": "必要以上にAgent、分析視点、再実行を増やさず、目的達成に必要な最小構成を選ぶ。"
+      },
+      {
+        "principle_id": "DM-P07",
+        "name": "upstream_evidence_dependency_closure",
+        "rule": "Researcher ReturnでEvidence集合が変わった場合、旧Evidenceを参照する保存済み分析をstaleと判定し、Quality Findingの明示対象に依存関係上必要な専門Agentを追加する。"
+      },
+      {
+        "principle_id": "DM-P08",
+        "name": "persistent_revision_identity",
+        "rule": "Revision taskをProvider呼び出し前に決定論的IDで保存し、通常運転でもpersistent reservationにより同一taskの重複送信を防止する。"
+      },
+      {
+        "principle_id": "DM-P09",
+        "name": "canonical_cross_schema_item_identity",
+        "rule": "Preserve exact primary-analysis item IDs in integration traceability. Persist locally rejected Manager payloads and revalidate them before any provider contract-repair call."
+      },
+      {
+        "principle_id": "DM-P10",
+        "name": "stage_scoped_integration_change_lineage",
+        "rule": "Initial integration must not reference integration changes. Final integration may reference only change_id values declared in its own integration_changes array."
+      },
+      {
+        "principle_id": "DM-P11",
+        "name": "meaning_preserving_provider_context",
+        "rule": "Use the trace-ID-merged Deliberation Research Context for provider calls without changing the stored Research Report. Final integration consumes the initial integration and Counterargument artifact rather than duplicate full primary payloads."
+      },
+      {
+        "principle_id": "DM-P13",
+        "name": "typed_challenge_counterargument_traceability",
+        "rule": "Keep Steelman challenge_ids and actionable counterargument_ids in separate typed namespaces. A saved checkpoint may move an ID only when it exactly matches a persisted Steelman Challenge; record the move, invalidate downstream validation and review, and make no Manager provider call."
+      },
+      {
+        "principle_id": "DM-P12",
+        "name": "operator_authorized_ambiguous_transport_retry",
+        "rule": "応答途中切断はProvider側で完了済みの可能性があるため自動再送しない。元reservationを保持し、保存済みRetryable failureと結び付いた一回限りのoperator retry taskだけをDemo Safe Modeで許可する。"
       }
     ],
     "responsibilities": {
@@ -683,7 +718,8 @@
         "入力証拠そのものが不足している",
         "Researcherへの追加調査が必要である",
         "テーマ上解消不能な不確実性である",
-        "同じ原因による失敗が上限回数発生している"
+        "同じ原因による失敗が上限回数発生している",
+        "応答途中切断などProvider完了状態が不明な通信障害（自動retry禁止、明示的一回承認のみ）"
       ],
       "termination_conditions": [
         "Quality Reviewerがapprovedと判定した",

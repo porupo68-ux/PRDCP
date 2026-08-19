@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "provider_id": "openrouter",
+  "agent_id": "playwright.visual_director",
+  "output_schema_id": "playwright.schemas.visual_plan.VisualPlan",
+  "incompatible_model_id": "z-ai/glm-4.5-air",
+  "compatible_model_id": "openai/gpt-5-mini",
+  "source_workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "source_authorization_id": "ba8751c1-f4f6-4316-9731-a574df75466c",
+  "source_repair_task_id": "playwright_visual_upstream_0_revision_0_provider_capability_repair_1",
+  "source_result_message_id": "04c5f1a9-6094-4012-a1ee-5531714ea96b",
+  "verification": "pydantic_output_validated",
+  "verified_at": "2026-08-17T05:04:07.384340Z"
+}

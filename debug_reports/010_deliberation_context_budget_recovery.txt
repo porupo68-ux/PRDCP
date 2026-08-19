@@ -1,0 +1,146 @@
+PRDCP CLI E2E Debug Cycle 010 Report
+（ユーザー指定「Cycle 004用」の実行計画。既存debug_reports/004を上書きしないため連番010で保存）
+
+作成日: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Failure Stage: Deliberation Counterargument Analyst / revision 1 recovery
+状態: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS / REAL RETRY COMPLETED
+Real Retry: Counterargument context errorは解消。応答受領後のlocal contract validationで停止し、Cycle 011へ移行
+
+1. 何が起きたか
+
+Cycle 009修復後の実OpenRouter recoveryでは、Initial Integrationを保存checkpointからProvider call 0で復元できた。しかし次のCounterargument AnalystがHTTP 400を返した。OpenRouterの内容は「endpoint maximum context length 64,000 tokensに対し、text input約69,786 tokens」であり、自動retryは0、Final IntegrationとQuality ReviewのProvider callも0だった。
+
+2. なぜ起きたか
+
+直接原因はCounterargument payloadの過大化である。実保存データから再構成した送信候補は次の構成だった。
+
+- system prompt: 18,001文字
+- response_format schema: 6,298文字
+- user input: 146,971文字
+- user input中のResearch Report: 106,908文字
+- user input中のInitial Integration: 29,422文字
+
+Research Reportは、同じEvidence/Sourceの説明をsources、evidence_items、source_metadata、evidence_quality_assessmentsへ重複保持する正規化保存artifactである。保存形式としては正しいが、LLMへそのまま送ると同じ意味が最大4回入る。またagreements/conflicts/unresolved_itemsをInitial Integration内とCounterargument Task直下の両方へ送っていた。
+
+同系統監査では、Final Integration候補が160,274文字、Quality Review候補が226,177文字だった。さらに全22 OpenRouter Structured Output rootで、同じstrict JSON Schemaをsystem promptへ全文埋め込みし、response_formatにも再送していた。Counterargumentだけを削る局所修正では、直後のManagerまたはReviewerで再発し得る設計だった。
+
+3. Cycle計画とv2照合
+
+計画:
+
+1) 保存artifactとProvider実行viewを分離する。
+2) Evidence、Source、Metadata、Qualityをtrace IDで一つの明示型recordへ統合し、意味・URL・引用・信頼度・source固有metadata・limitationsを保持する。
+3) Initial Integrationに内包済みの配列をCounterargument Task直下から除く。
+4) Final IntegrationはInitial IntegrationとCounterargumentを入力権威とし、full primary payloadを再送せずanalysis_id lineageだけを渡す。
+5) Quality Reviewerには全履歴でなく、現行Researcher handoff、現行Primary task pair、現行Counterargument failure/repair、直近Review attemptからなる監査可能なPMP viewを渡す。全履歴はstorageに保持する。
+6) strict schema本体はresponse_formatだけへ一度送る。schema検証・strict=true・全object additionalProperties=falseは維持する。
+7) 既知のDeepSeek R1 64K上限を送信前に検査し、超過時はreservation作成前・HTTP前に停止する。
+8) 保存済みcontext failureを検出した場合だけ、counter_task_revision_1_context_repair_1を一回限り使用する。元reservationは削除しない。
+9) Deliberation Quality Reviewもrevision/recovery単位の決定的task identityにする。
+
+v2照合結果:
+
+- ResearchReport、state、message、checkpoint schemaは変更不要。実行時viewだけ追加可能。
+- PMP保存形式は変更不要。Reviewer payload用trace selectorだけ縮約可能。
+- Provider reservationはagent実行前に行われるため、budget preflightをBaseAgentとManager direct integrationのreservation直前へ置く必要がある。
+- recover()は現在のrevision checkpoint選択を維持できる。resume()、Researcher Return、revision routingは変更不要。
+- strict Structured Output変換は維持し、prompt内の重複コピーだけ除去できる。
+
+4. どう直したか
+
+- DeliberationResearchContext / DeliberationEvidenceContextを追加した。保存ResearchReportを変更せず、evidence_id/source_idで各表をmergeする。
+- 各Evidenceのsummary、relevant_excerpt、URL、published/retrieved time、stance、reliability、directness、primary_source、scope、source固有metadata、limitationsを保持する。
+- source単位とquality単位で同文のlimitationsは一回へ統合し、Report全体だけに存在するlimitationsはglobalとして保持する。
+- CounterargumentTask.research_reportとQualityReviewInput.research_reportを明示型contextへ変更した。
+- Counterargument Task直下のagreements/conflicts/unresolved_itemsを削除した。
+- Final Integration inputのfull primary_analysesをprimary_analysis_idsへ置換した。
+- Quality ReviewのPMP traceを現行routeへ限定し、message_id重複も除去した。
+- PromptBuilderはstrict schema全文をsystem promptへ複製せず、response_format schemaを権威とする短い契約文だけを置くよう変更した。
+- Reviewer target contextは責務、責務境界、禁止事項に限定し、対象Agentのschema/output全文の再掲をやめた。
+- OpenRouterModelProviderにmixed Japanese/ASCIIの保守的input token estimatorとmodel別preflightを追加した。DeepSeek R1は64,000の90%をsafe budgetとする。
+- BaseAgentとDeliberation Manager direct integrationはpreflight成功後にだけreservationを作成する。
+- context overflow済みbase taskから決定的context_repair_1へ進む。二度目も同じIDなのでpersistent reservationが二重callを阻止する。
+- Quality Review taskはdelib_review_task_revision_<n>[_recovery_1]へ決定化した。
+- Manager、Counterargument、Quality ReviewerのPrompt/RDとREADMEへruntime view equivalenceを明記した。
+
+5. 設計上の意味
+
+Storage artifactは監査・再現のため完全で重複を含み得る。一方、Provider execution viewは、同じ意味を一度だけ表すbounded contextである。この二つを分離したことで、context節約のためにEvidenceや実行履歴を削除・書換えずに済む。
+
+Schemaをpromptとresponse_formatへ二重送信することもやめたが、strict Structured Output安全機構は弱めていない。送信されるresponse_format schemaは従来どおり再帰検証済みで、全object nodeのadditionalProperties=falseとproperties==requiredを維持する。
+
+Preflightをreservation前に置いたため、ローカルに確定できるoversize requestが「Providerを呼んでいないのに予約だけ消費する」状態も防止した。
+
+6. 同系統Failure Mode監査
+
+- Counterargument: full Report + Initial + duplicate summary arrays。修正済み。
+- Manager Initial: compact Report + Primaryを使用。保存checkpointは再利用。
+- Manager Final: compact Report + Initial + Counterargument + primary ID lineage。修正済み。
+- Deliberation Quality Review: compact Report +現行PMP route。修正済み。GPT-5.5向け実送信候補はDeepSeek R1の64K endpointとは別modelである。
+- Producer / Researcher / Conclusion / Playwrightを含む全22 Structured Output call: prompt内schema全文の重複を共通層で除去。response_format strict schemaは維持。
+- 自由形式payload: 保存artifactは変更せず、Deliberation境界のResearch Contextを明示型へ置換。source_specific_metadataは既存のsource category別TypedDict unionを再利用した。
+- PMP: full message historyは不変。Reviewer viewだけcurrent routeへ限定。
+- Checkpoint: Initialの保存済みrevision 1 artifactを再利用。新規migrationなし。
+- Outbox: Mock recoveryでConclusion outboxを一時領域へ生成。本番outboxはReal Retryまで未変更。
+
+7. Regression / Mock / Fault結果
+
+- compileall: PASS
+- Targeted tests: 64 PASS
+- Unit full: 293 PASS (227.012s)
+- Integration full: 9 PASS (25.185s)
+- RD STRICT: 31 PASS / Doctor READY
+- 22 OpenRouter root Structured Output recursive audit: PASS（Unit fullに含む）
+- context overflow Fault Injection: HTTP call 0、Provider call 0、reservation JSON 0でFAILED停止
+- unknown Evidence in compact Counterargument Task: local validation reject PASS
+- deterministic Counterargument context repair identity: PASS
+- deterministic Quality Review revision/recovery identity: PASS
+- legacy review parent/retry trace recovery: PASS
+
+実workflow state/messagesだけをread-only copyしたMock Recovery:
+
+- Result: COMPLETED
+- Stored Research Report equality: unchanged
+- Initial Integration provider call: 0
+- Counterargument provider call: 1
+- Final Integration provider call: 1
+- Quality Review provider call: 1
+- Counterargument task: counter_task_revision_1_context_repair_1
+- Quality Review task: delib_review_task_revision_1_recovery_1
+- Counterargument request: 101,665 chars / 45,766 estimated tokens
+- Final request: 112,425 chars / 46,147 estimated tokens
+- Quality Review request: 181,831 chars / 79,397 estimated tokens（GPT-5.5 route）
+- Current-route PMP entries: 20
+
+8. State / PMP / Schema / Checkpoint / Reservation / Outbox自己監査
+
+- 根本原因: 特定済み。HTTP 400だけでなく重複table、重複stage input、重複schemaまで追跡した。
+- 局所patch: 回避済み。共通PromptBuilder、Provider preflight、全Deliberation downstream inputを監査・修正した。
+- 他Layer: 全22 callのschema二重送信を共通修正。保存payload schemaは不変。
+- State: 新しいpersistent fieldなし。保存Reportを書換えない。
+- PMP: 保存history不変。Reviewer送信viewのみ縮約。
+- Schema: strict response_formatを維持。新Research Contextは明示型。
+- Checkpoint: 完了済みInitialを再実行しないことを実workflow cloneで確認。
+- Reservation: 元OpenRouter reservationを保持。repair IDを別予約する。preflight failureは予約前に止まる。
+- Outbox: 本番は未変更。Mockは一時rootのみ。
+- Regression: 追加済み。
+- Recovery/Fault: 実state clone recoveryとcontext overflow injectionを確認済み。
+- Provider call: 改修検証中のReal API callは0。Cycle冒頭の失敗callは1、自動retry 0。
+- 不要なFull E2E: 実施していない。停止checkpointから局所再開する。
+
+9. Provider Cost
+
+- Cycle 010開始時の失敗OpenRouter call: 1（Counterargument HTTP 400、応答生成なし）
+- 実装・Test・Mock中のOpenRouter call: 0
+- Automatic retry: 0
+- API cost: CLI/エラーpayloadに利用額がないため不明
+- 次の許可call: counter_task_revision_1_context_repair_1の明示的一回のみ
+
+10. 明示的一回Real Retry結果
+
+次を一回実行した。
+
+py main.py --deliberation-recover 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --no-safe-mode
+
+Initial Integrationは0 call、Counterargument context repairは1 callだった。64K context errorは再発せず応答を受領したが、analysis_idの誤prefixとrequired_revision=false項目の不正revision targetをlocal Pydantic validationが拒否した。Final/Quality Review callは0、自動retryは0。保存rawを使ったschema-visible contract修復をCycle 011として開始し、Full E2Eは再実行していない。

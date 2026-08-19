@@ -3,10 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deliberation.schemas.counterargument_analysis import CounterargumentAnalysisResult
 from deliberation.schemas.integrated_analysis import FinalIntegratedAnalysis, InitialIntegratedAnalysis
+from deliberation.schemas.research_context import DeliberationResearchContext
 
 
 class QualityGateDecision(str, Enum):
@@ -14,6 +15,15 @@ class QualityGateDecision(str, Enum):
     APPROVED_WITH_CONDITIONS = "approved_with_conditions"
     REVISION_REQUIRED = "revision_required"
     BLOCKED = "blocked"
+
+
+class ConclusionReadiness(str, Enum):
+    """Canonical Deliberation -> Conclusion readiness contract from the RD."""
+
+    READY = "ready"
+    READY_WITH_CONDITIONS = "ready_with_conditions"
+    NOT_READY = "not_ready"
+    UNDETERMINED = "undetermined"
 
 
 class RevisionScope(str, Enum):
@@ -240,7 +250,7 @@ class DeliberationQualityReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: str = Field(min_length=1)
-    research_report: dict[str, Any]
+    research_report: DeliberationResearchContext
     primary_analyses: dict[str, dict[str, Any]]
     initial_integration: InitialIntegratedAnalysis
     counterargument_analysis: CounterargumentAnalysisResult
@@ -258,7 +268,7 @@ class DeliberationQualityReviewOutput(BaseModel):
 
     review_id: str = Field(min_length=1)
     status: QualityGateDecision
-    conclusion_readiness: str = Field(min_length=1)
+    conclusion_readiness: ConclusionReadiness
     reason: str = Field(min_length=1)
     findings: list[QualityFinding] = Field(default_factory=list)
     blocking_finding_ids: list[str] = Field(default_factory=list)
@@ -268,6 +278,13 @@ class DeliberationQualityReviewOutput(BaseModel):
     limitations_to_disclose: list[str] = Field(default_factory=list)
     reviewed_analysis_ids: list[str] = Field(min_length=1)
     reviewed_evidence_ids: list[str] = Field(min_length=1)
+
+    @field_validator("conclusion_readiness", mode="before")
+    @classmethod
+    def normalize_legacy_conclusion_readiness(cls, value: Any) -> Any:
+        """Read legacy uppercase checkpoints without changing the stored JSON."""
+
+        return value.lower() if isinstance(value, str) else value
 
     @model_validator(mode="before")
     @classmethod
@@ -293,15 +310,27 @@ class DeliberationQualityReviewOutput(BaseModel):
 
     @model_validator(mode="after")
     def validate_decision(self) -> "DeliberationQualityReviewOutput":
+        ready_states = {
+            ConclusionReadiness.READY,
+            ConclusionReadiness.READY_WITH_CONDITIONS,
+        }
+        non_ready_states = {
+            ConclusionReadiness.NOT_READY,
+            ConclusionReadiness.UNDETERMINED,
+        }
         if self.status in {
             QualityGateDecision.APPROVED,
             QualityGateDecision.APPROVED_WITH_CONDITIONS,
         }:
+            if self.conclusion_readiness not in ready_states:
+                raise ValueError("approved review must be Conclusion-ready")
             if self.revision_targets or self.upstream_revision_requests:
                 raise ValueError("approved review cannot route revisions")
             if self.revision_scope != RevisionScope.NONE:
                 raise ValueError("approved review must use revision_scope=none")
         elif self.status == QualityGateDecision.REVISION_REQUIRED:
+            if self.conclusion_readiness not in non_ready_states:
+                raise ValueError("revision_required review cannot be Conclusion-ready")
             if not self.findings:
                 raise ValueError("revision_required must include findings")
             if not self.revision_targets and not self.upstream_revision_requests:
@@ -311,6 +340,8 @@ class DeliberationQualityReviewOutput(BaseModel):
             if self.upstream_revision_requests and self.revision_scope != RevisionScope.RESEARCHER_RETURN:
                 raise ValueError("upstream_revision_requests require revision_scope=researcher_return")
         else:
+            if self.conclusion_readiness not in non_ready_states:
+                raise ValueError("blocked review cannot be Conclusion-ready")
             if not self.blocking_finding_ids:
                 raise ValueError("blocked review must identify blocking findings")
             if self.revision_targets or self.upstream_revision_requests:

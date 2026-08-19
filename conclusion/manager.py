@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import re
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Any
+
+from pydantic import BaseModel
 
 from common.ids import new_id
 from common.models.pmp import (
@@ -13,6 +20,17 @@ from common.models.pmp import (
     PMPRouting,
 )
 from common.models.workflow import WorkflowStatus
+from common.provider_contract_repair import (
+    PROVIDER_CONTRACT_REPAIR_SUFFIX,
+    ProviderContractRepairAuthorization,
+    ProviderContractRepairAuthorizationStore,
+)
+from common.provider_model_compatibility import ProviderModelCompatibilityStore
+from common.provider_retry import (
+    OPERATOR_RETRY_SUFFIX,
+    ProviderRetryAuthorization,
+    ProviderRetryAuthorizationStore,
+)
 from common.role_definitions import RoleDefinitionExtractor, RoleDefinitionLoader
 from common.validation import PMPValidator
 from conclusion.registry import ConclusionRegistry
@@ -39,6 +57,7 @@ from conclusion.schemas import (
     default_value_profiles,
 )
 from conclusion.state import (
+    ConclusionManagerRepairRecord,
     ConclusionRevisionRecord,
     ConclusionUpstreamRevisionRecord,
     ConclusionWorkflowState,
@@ -52,6 +71,10 @@ from conclusion.workflow import (
     QUALITY_REVIEWER_ID,
 )
 from deliberation.schemas.deliberation_result import DeliberationResult
+from deliberation.schemas.review import (
+    ConclusionReadiness as DeliberationConclusionReadiness,
+    DeliberationQualityReviewOutput,
+)
 from storage.conclusion_workflow_repository import ConclusionWorkflowRepository
 
 
@@ -67,16 +90,193 @@ class ConclusionManager:
         repository: ConclusionWorkflowRepository,
         *,
         max_revisions: int = 2,
+        max_manager_repairs_per_revision: int = 1,
         rd_loader: RoleDefinitionLoader | None = None,
         demo_safe_mode: bool = True,
     ) -> None:
         self.registry = registry
         self.repository = repository
+        if (
+            getattr(self.registry.provider, "reservation_root", None) is None
+            and not os.getenv("PRDCP_DATA_DIR", "").strip()
+        ):
+            self.registry.provider.reservation_root = (
+                repository.data_dir / "provider_call_reservations"
+            )
         self.demo_safe_mode = demo_safe_mode
-        self.max_revisions = 0 if demo_safe_mode else max_revisions
+        # Safe Mode blocks automatic revision at the decision boundary. Keep the
+        # configured limit so an explicit operator revision can consume exactly
+        # one audited cycle without enabling an automatic loop.
+        self.max_revisions = max_revisions
+        self.max_manager_repairs_per_revision = max_manager_repairs_per_revision
         self.rd_loader = rd_loader or registry.rd_loader
         self.pmp_validator = PMPValidator()
         self.deterministic_validator = ConclusionValidator()
+        self.provider_retry_store = ProviderRetryAuthorizationStore(repository.data_dir)
+        self.provider_contract_repair_store = (
+            ProviderContractRepairAuthorizationStore(repository.data_dir)
+        )
+        self.provider_model_compatibility_store = ProviderModelCompatibilityStore(
+            repository.data_dir
+        )
+
+    def authorize_provider_retry(
+        self,
+        workflow_id: str,
+    ) -> ProviderRetryAuthorization:
+        """Authorize one explicit retry of the latest failed Conclusion task."""
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Operator provider retry is available only while Demo Safe Mode is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Conclusion must be FAILED before an operator provider retry")
+        request, error_response = self._latest_failed_provider_exchange(state)
+        original_task_id = request.payload.get("task_id")
+        if not isinstance(original_task_id, str) or not original_task_id:
+            raise ValueError("Failed Conclusion request has no logical task_id")
+
+        error_class = str(error_response.payload.get("error_class") or "")
+        normalized_error_class = error_class
+        if error_class == "PayloadValidationError" and self._is_legacy_non_finite_root_error(
+            error_response
+        ):
+            normalized_error_class = "ProviderResponseContractError"
+        elif error_class == "PayloadValidationError":
+            if not self._is_persisted_provider_output_validation_error(error_response):
+                raise ValueError(
+                    "Conclusion PayloadValidationError has no auditable Provider output payload"
+                )
+        if normalized_error_class not in {
+            "RetryableAgentError",
+            "ProviderResponseContractError",
+            "PayloadValidationError",
+        }:
+            raise ValueError(
+                "Latest Conclusion failure is not eligible for an explicit Provider retry"
+            )
+
+        agent = self.registry.get(request.receiver_agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            raise ValueError("Conclusion Provider has no stable logical provider ID")
+        return self.provider_retry_store.authorize_once(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            agent_id=request.receiver_agent_id,
+            original_task_id=original_task_id,
+            source_error_message_id=error_response.message_id,
+            source_error_class=normalized_error_class,
+        )
+
+    async def retry_provider_call(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ConclusionWorkflowState:
+        authorization = self.authorize_provider_retry(workflow_id)
+        await self._emit(
+            progress_callback,
+            "Operator one-time provider retry authorized: "
+            + authorization.retry_task_id,
+        )
+        return await self.recover(
+            workflow_id,
+            progress_callback=progress_callback,
+        )
+
+    def authorize_provider_contract_repair(
+        self,
+        workflow_id: str,
+        *,
+        repair_model_id: str,
+    ) -> ProviderContractRepairAuthorization:
+        """Authorize one distinct-model repair after original and retry fail."""
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Provider contract repair is available only while Demo Safe Mode is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Conclusion must be FAILED before a provider contract repair")
+        retry_request, retry_error = self._latest_failed_provider_exchange(state)
+        retry_task_id = retry_request.payload.get("task_id")
+        if not isinstance(retry_task_id, str) or not retry_task_id.endswith(
+            OPERATOR_RETRY_SUFFIX
+        ):
+            raise ValueError(
+                "Provider contract repair requires a failed one-shot operator retry"
+            )
+        if retry_error.payload.get("error_class") != "ProviderResponseContractError":
+            raise ValueError(
+                "Provider contract repair requires a contract-invalid retry response"
+            )
+        original_task_id = retry_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
+        original_exchange = self._failed_provider_exchange_for_task(
+            state,
+            original_task_id,
+        )
+        if original_exchange is None:
+            raise ValueError(
+                "Provider contract repair could not find the original failed exchange"
+            )
+        original_request, original_error = original_exchange
+        original_error_class = str(original_error.payload.get("error_class") or "")
+        if not (
+            original_error_class == "ProviderResponseContractError"
+            or self._is_legacy_non_finite_root_error(original_error)
+        ):
+            raise ValueError(
+                "Provider contract repair requires two contract-invalid responses"
+            )
+        if original_request.receiver_agent_id != retry_request.receiver_agent_id:
+            raise ValueError("Provider contract repair agent identity mismatch")
+
+        agent = self.registry.get(retry_request.receiver_agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            raise ValueError("Conclusion Provider has no stable logical provider ID")
+        failed_model_id = str(retry_error.payload.get("model_id") or "").strip()
+        repair_model_id = repair_model_id.strip()
+        if not failed_model_id:
+            raise ValueError("Failed Conclusion response has no model identity")
+        return self.provider_contract_repair_store.authorize_once(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            agent_id=retry_request.receiver_agent_id,
+            original_task_id=original_task_id,
+            retry_task_id=retry_task_id,
+            source_error_message_id=retry_error.message_id,
+            failed_model_id=failed_model_id,
+            repair_model_id=repair_model_id,
+        )
+
+    async def repair_provider_contract(
+        self,
+        workflow_id: str,
+        *,
+        repair_model_id: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ConclusionWorkflowState:
+        authorization = self.authorize_provider_contract_repair(
+            workflow_id,
+            repair_model_id=repair_model_id,
+        )
+        await self._emit(
+            progress_callback,
+            "One-time provider contract repair authorized: "
+            + authorization.repair_task_id
+            + " -> "
+            + authorization.repair_model_id,
+        )
+        return await self.recover(
+            workflow_id,
+            progress_callback=progress_callback,
+        )
 
     async def start(
         self,
@@ -168,6 +368,531 @@ class ConclusionManager:
             progress_callback=progress_callback,
         )
 
+    async def recover(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ConclusionWorkflowState:
+        """Resume from the last valid Conclusion checkpoint without replaying it."""
+
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Conclusion recovery requires a FAILED workflow")
+        promoted_bindings = self._promote_saved_contract_repairs(state)
+        result = self._validate_deliberation_handoff(
+            PMPMessage.model_validate(state.deliberation_handoff)
+        )
+        context = DecisionContext.model_validate(state.decision_context)
+        if result.workflow_id != state.workflow_id or context.workflow_id != state.workflow_id:
+            raise ValueError("Conclusion recovery workflow identity mismatch")
+
+        restored_task_ids = self._restore_saved_stage_responses(state, context)
+
+        rerun_position = not self._saved_model_is_valid(
+            state.position_generation,
+            PositionGenerationResult,
+        )
+        rerun_evaluation = rerun_position or not self._saved_model_is_valid(
+            state.decision_evaluation,
+            DecisionEvaluationResult,
+        )
+        rerun_integration = rerun_evaluation or not self._saved_model_is_valid(
+            state.decision_integration,
+            DecisionIntegrationResult,
+        )
+        review_is_valid = self._saved_model_is_valid(
+            state.review_result,
+            ConclusionQualityReviewOutput,
+        )
+        next_agent = (
+            POSITION_GENERATOR_ID
+            if rerun_position
+            else DECISION_EVALUATOR_ID
+            if rerun_evaluation
+            else DECISION_INTEGRATOR_ID
+            if rerun_integration
+            else QUALITY_REVIEWER_ID
+            if not review_is_valid
+            else None
+        )
+        task_id_overrides: dict[str, str] = {}
+        model_overrides: dict[str, str] = {}
+        if next_agent is None:
+            saved_review_task_id = restored_task_ids.get(QUALITY_REVIEWER_ID)
+            if saved_review_task_id:
+                task_id_overrides[QUALITY_REVIEWER_ID] = saved_review_task_id
+        else:
+            try:
+                request, _error_response = self._latest_failed_provider_exchange(state)
+            except ValueError:
+                request = None
+            if request is not None:
+                if request.receiver_agent_id != next_agent:
+                    if request.receiver_agent_id in restored_task_ids:
+                        # A persisted billed response was repaired and promoted
+                        # without a second Provider call. Continue at its first
+                        # unfinished dependent instead of requiring an unrelated
+                        # retry authorization.
+                        request = None
+                    else:
+                        raise ValueError(
+                            "Saved Conclusion checkpoints do not match the failed Provider stage"
+                        )
+            if request is not None:
+                original_task_id = request.payload.get("task_id")
+                if not isinstance(original_task_id, str) or not original_task_id:
+                    raise ValueError("Failed Conclusion request has no logical task_id")
+                agent = self.registry.get(request.receiver_agent_id)
+                provider_id = getattr(agent.provider, "provider_id", None)
+                if not isinstance(provider_id, str):
+                    raise ValueError("Conclusion Provider has no stable logical provider ID")
+                if original_task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX):
+                    raise ValueError(
+                        "The one-time Conclusion provider contract repair is exhausted"
+                    )
+                if original_task_id.endswith(OPERATOR_RETRY_SUFFIX):
+                    base_task_id = original_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
+                    repair_authorization = (
+                        self.provider_contract_repair_store.for_original_task(
+                            workflow_id=workflow_id,
+                            provider_id=provider_id,
+                            original_task_id=base_task_id,
+                        )
+                    )
+                    if (
+                        repair_authorization is None
+                        or repair_authorization.status != "PENDING"
+                        or repair_authorization.retry_task_id != original_task_id
+                        or repair_authorization.source_error_message_id
+                        != _error_response.message_id
+                    ):
+                        raise ValueError(
+                            "Conclusion recovery found an exhausted contract-invalid retry; "
+                            "explicit provider contract repair authorization is required"
+                        )
+                    if self._has_unanswered_task_request(
+                        state,
+                        next_agent,
+                        repair_authorization.repair_task_id,
+                    ):
+                        raise ValueError(
+                            "Conclusion recovery found an unanswered provider contract "
+                            "repair request; automatic redispatch is blocked"
+                        )
+                    self._clear_from_failed_stage(state, next_agent)
+                    task_id_overrides[next_agent] = (
+                        repair_authorization.repair_task_id
+                    )
+                    model_overrides[next_agent] = (
+                        repair_authorization.repair_model_id
+                    )
+                else:
+                    authorization = self.provider_retry_store.for_original_task(
+                        workflow_id=workflow_id,
+                        provider_id=provider_id,
+                        original_task_id=original_task_id,
+                    )
+                    if authorization is None or authorization.status != "PENDING":
+                        raise ValueError(
+                            "Conclusion recovery found a Provider call without a reusable response; "
+                            "explicit provider retry authorization is required"
+                        )
+                    if self._has_unanswered_task_request(
+                        state,
+                        next_agent,
+                        authorization.retry_task_id,
+                    ):
+                        raise ValueError(
+                            "Conclusion recovery found an unanswered provider retry request; "
+                            "automatic redispatch is blocked"
+                        )
+                    self._clear_from_failed_stage(state, next_agent)
+                    task_id_overrides[next_agent] = authorization.retry_task_id
+            elif self._has_unanswered_stage_request(state, next_agent):
+                raise ValueError(
+                    "Conclusion recovery found an unanswered Provider request; "
+                    "an explicit audited retry path is required"
+                )
+
+        state.error = None
+        state.current_agent_ids = []
+        state.failed_agents = [
+            agent_id
+            for agent_id in state.failed_agents
+            if agent_id != next_agent and agent_id not in restored_task_ids
+        ]
+        manager_snapshot = self.rd_loader.load(self.agent_id)
+        if manager_snapshot.trace() not in state.role_definition_usage:
+            state.role_definition_usage.append(manager_snapshot.trace())
+        self.repository.save(state)
+        await self._emit(
+            progress_callback,
+            "Conclusion checkpoint recovery: reusing completed stages; next stage "
+            + (next_agent or "saved quality decision"),
+        )
+        if promoted_bindings:
+            await self._emit(
+                progress_callback,
+                "Restored verified Provider model compatibility: "
+                + ", ".join(promoted_bindings),
+            )
+        return await self._run_generation_and_review(
+            state,
+            rerun_position=rerun_position,
+            rerun_evaluation=rerun_evaluation,
+            rerun_integration=rerun_integration,
+            task_id_overrides=task_id_overrides,
+            model_overrides=model_overrides,
+            progress_callback=progress_callback,
+        )
+
+    async def revise(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ConclusionWorkflowState:
+        """Run one operator-authorized internal Conclusion revision in Safe Mode."""
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Explicit Conclusion revision is available only while Demo Safe Mode "
+                "is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        self._promote_saved_contract_repairs(state)
+        if state.status != WorkflowStatus.BLOCKED.value:
+            raise ValueError(
+                "Conclusion must be BLOCKED at a saved Quality Review before an "
+                "explicit revision"
+            )
+        if state.review_result is None:
+            raise ValueError("Conclusion has no saved Quality Review decision")
+        review = ConclusionQualityReviewOutput.model_validate(state.review_result)
+        if review.status != QualityGateDecision.REVISION_REQUIRED.value:
+            raise ValueError(
+                "Explicit Conclusion revision requires a revision_required review"
+            )
+        if review.revision_scope == RevisionScope.DELIBERATION_RETURN.value:
+            raise ValueError(
+                "Deliberation return must use the Conclusion upstream resume path"
+            )
+        if not review.revision_targets:
+            raise ValueError("Explicit Conclusion revision has no internal targets")
+
+        effective_targets, routing_finding = self._resolve_explicit_revision_targets(
+            state,
+            review,
+        )
+        manager_repair = self._manager_package_repair_plan(
+            state,
+            review,
+            effective_targets=effective_targets,
+        )
+        if manager_repair is not None:
+            current_repairs = [
+                record
+                for record in state.manager_repair_history
+                if record.upstream_revision_count == state.upstream_revision_count
+                and record.revision_count == state.revision_count
+            ]
+            if len(current_repairs) >= self.max_manager_repairs_per_revision:
+                return await self._block(
+                    state,
+                    "The bounded Conclusion Manager package repair is exhausted",
+                    progress_callback,
+                )
+            repair_iteration = len(state.manager_repair_history) + 1
+            review_task_id = (
+                f"conclusion_quality_review_upstream_{state.upstream_revision_count}"
+                f"_revision_{state.revision_count}_manager_repair_{repair_iteration}"
+            )
+            state.manager_repair_history.append(
+                ConclusionManagerRepairRecord(
+                    iteration=repair_iteration,
+                    upstream_revision_count=state.upstream_revision_count,
+                    revision_count=state.revision_count,
+                    source_review_id=review.review_id,
+                    source_finding_ids=[item.finding_id for item in review.findings],
+                    repair_kind="alternative_materialization",
+                    added_alternative_candidate_ids=manager_repair[
+                        "added_alternative_candidate_ids"
+                    ],
+                    reviewer_task_id=review_task_id,
+                )
+            )
+            state.conclusion_package = manager_repair["package"].model_dump(mode="json")
+            state.deterministic_validation = manager_repair["validation"].model_dump(
+                mode="json"
+            )
+            state.review_result = None
+            state.completed_agents = [
+                agent_id
+                for agent_id in state.completed_agents
+                if agent_id != QUALITY_REVIEWER_ID
+            ]
+            state.failed_agents = [
+                agent_id
+                for agent_id in state.failed_agents
+                if agent_id != QUALITY_REVIEWER_ID
+            ]
+            state.current_agent_ids = []
+            state.status = WorkflowStatus.REVISING
+            state.error = None
+            state.completed_at = None
+            self.repository.save(state)
+            await self._emit(
+                progress_callback,
+                "Operator-authorized bounded Manager package repair: "
+                + ", ".join(manager_repair["added_alternative_candidate_ids"]),
+            )
+            return await self._run_generation_and_review(
+                state,
+                rerun_position=False,
+                rerun_evaluation=False,
+                rerun_integration=False,
+                task_id_overrides={QUALITY_REVIEWER_ID: review_task_id},
+                progress_callback=progress_callback,
+            )
+        if state.revision_count >= self.max_revisions:
+            return await self._block(
+                state,
+                f"Quality Reviewer revision上限{self.max_revisions}回に達したため停止しました",
+                progress_callback,
+            )
+
+        state.revision_count += 1
+        stages = self._revision_stages(effective_targets)
+        revision_findings = [
+            item.model_dump(mode="json") for item in review.findings
+        ]
+        if routing_finding is not None:
+            revision_findings.append(routing_finding)
+        state.revision_history.append(
+            ConclusionRevisionRecord(
+                iteration=state.revision_count,
+                target_agent_ids=effective_targets,
+                findings=revision_findings,
+                rerun_stages=stages,
+            )
+        )
+
+        rerun_position = POSITION_GENERATOR_ID in effective_targets
+        rerun_evaluation = (
+            rerun_position or DECISION_EVALUATOR_ID in effective_targets
+        )
+        rerun_integration = (
+            rerun_evaluation
+            or DECISION_INTEGRATOR_ID in effective_targets
+            or self.agent_id in effective_targets
+        )
+        if not (rerun_position or rerun_evaluation or rerun_integration):
+            raise ValueError(
+                "revision_required cannot be resolved to an executable dependency plan"
+            )
+
+        first_agent = (
+            POSITION_GENERATOR_ID
+            if rerun_position
+            else DECISION_EVALUATOR_ID
+            if rerun_evaluation
+            else DECISION_INTEGRATOR_ID
+        )
+        # Persist the consumed revision plan and invalidate only its dependency
+        # closure before the first Provider call. Historical PMP results remain
+        # append-only and available for audit.
+        self._clear_from_failed_stage(state, first_agent)
+        state.status = WorkflowStatus.REVISING
+        state.error = None
+        state.completed_at = None
+        self.repository.save(state)
+        await self._emit(
+            progress_callback,
+            "Operator-authorized Conclusion revision → "
+            + ", ".join(effective_targets)
+            + f"（{state.revision_count}/{self.max_revisions}）",
+        )
+        return await self._run_generation_and_review(
+            state,
+            rerun_position=rerun_position,
+            rerun_evaluation=rerun_evaluation,
+            rerun_integration=rerun_integration,
+            progress_callback=progress_callback,
+        )
+
+    def _resolve_explicit_revision_targets(
+        self,
+        state: ConclusionWorkflowState,
+        review: ConclusionQualityReviewOutput,
+    ) -> tuple[list[str], dict[str, Any] | None]:
+        """Narrow a trace-only review to the earliest invalid saved artifact.
+
+        Older checkpoints may have passed a less complete deterministic
+        validator. Revalidation is read-only with respect to the artifacts: it
+        identifies their true producer and avoids replaying valid predecessors.
+        """
+
+        original_targets = [str(item) for item in review.revision_targets]
+        if not review.findings or any(
+            finding.category not in {"traceability", "unsupported_claim"}
+            for finding in review.findings
+        ):
+            return original_targets, None
+        try:
+            context = DecisionContext.model_validate(state.decision_context)
+            generation = PositionGenerationResult.model_validate(
+                state.position_generation
+            )
+            evaluation = DecisionEvaluationResult.model_validate(
+                state.decision_evaluation
+            )
+            integration = DecisionIntegrationResult.model_validate(
+                state.decision_integration
+            )
+            package = ConclusionPackage.model_validate(state.conclusion_package)
+        except Exception:
+            return original_targets, None
+
+        candidate_ids = {
+            item.position_candidate_id for item in generation.position_candidates
+        }
+        artifacts = (
+            (POSITION_GENERATOR_ID, generation),
+            (DECISION_EVALUATOR_ID, evaluation),
+            (DECISION_INTEGRATOR_ID, integration),
+            (self.agent_id, package),
+        )
+        for target, artifact in artifacts:
+            violations = self.deterministic_validator.unknown_reference_ids(
+                decision_context=context,
+                value=artifact,
+                candidate_ids=candidate_ids,
+            )
+            if not violations:
+                continue
+            effective_targets = [target]
+            if effective_targets == original_targets:
+                return effective_targets, None
+            affected_ids = sorted({item["id"] for item in violations})
+            return effective_targets, {
+                "finding_id": (
+                    f"deterministic_reference_routing_revision_"
+                    f"{state.revision_count + 1}"
+                ),
+                "severity": "CRITICAL",
+                "category": "traceability",
+                "issue": (
+                    "Current deterministic reference validation located the "
+                    f"earliest invalid artifact at {target}"
+                ),
+                "required_action": (
+                    "Rerun the earliest invalid producer and its dependency "
+                    "closure without replaying valid predecessors"
+                ),
+                "affected_agent_ids": [target],
+                "affected_candidate_ids": [],
+                "affected_reference_ids": affected_ids,
+                "original_revision_targets": original_targets,
+            }
+        return original_targets, None
+
+    def _manager_package_repair_plan(
+        self,
+        state: ConclusionWorkflowState,
+        review: ConclusionQualityReviewOutput,
+        *,
+        effective_targets: list[str],
+    ) -> dict[str, Any] | None:
+        """Plan the one bounded repair that never reruns a specialist Agent.
+
+        Eligibility is intentionally structural. Reviewer prose is not parsed and
+        no field is invented: the repaired alternatives are derived entirely from
+        saved Integration and Evaluation artifacts. Any unrelated deterministic
+        finding keeps the ordinary revision ceiling in force.
+        """
+
+        if (
+            effective_targets != [self.agent_id]
+            or review.upstream_revision_requests
+            or not review.findings
+            or any(
+                set(finding.affected_agent_ids) - {self.agent_id}
+                for finding in review.findings
+            )
+        ):
+            return None
+        try:
+            context = DecisionContext.model_validate(state.decision_context)
+            generation = PositionGenerationResult.model_validate(
+                state.position_generation
+            )
+            evaluation = DecisionEvaluationResult.model_validate(
+                state.decision_evaluation
+            )
+            integration = DecisionIntegrationResult.model_validate(
+                state.decision_integration
+            )
+            package = ConclusionPackage.model_validate(state.conclusion_package)
+        except Exception:
+            return None
+
+        current_validation = self.deterministic_validator.validate(
+            decision_context=context,
+            position_generation=generation,
+            decision_evaluation=evaluation,
+            decision_integration=integration,
+            conclusion_package=package,
+            human_selection_present=state.human_selection is not None,
+        )
+        repairable_categories = {"alternative_coverage", "alternative_detail"}
+        if (
+            current_validation.passed
+            or not current_validation.findings
+            or any(
+                finding.category not in repairable_categories
+                for finding in current_validation.findings
+            )
+        ):
+            return None
+
+        repaired_package = self._build_package(
+            state,
+            context,
+            generation,
+            evaluation,
+            integration,
+        )
+        repaired_validation = self.deterministic_validator.validate(
+            decision_context=context,
+            position_generation=generation,
+            decision_evaluation=evaluation,
+            decision_integration=integration,
+            conclusion_package=repaired_package,
+            human_selection_present=state.human_selection is not None,
+        )
+        if not repaired_validation.passed:
+            return None
+
+        prior_ids = {
+            str(item.get("candidate_id"))
+            for item in package.alternatives
+            if isinstance(item, dict) and item.get("candidate_id")
+        }
+        repaired_ids = {
+            str(item.get("candidate_id"))
+            for item in repaired_package.alternatives
+            if isinstance(item, dict) and item.get("candidate_id")
+        }
+        added_ids = sorted(repaired_ids - prior_ids)
+        if not added_ids:
+            return None
+        return {
+            "package": repaired_package,
+            "validation": repaired_validation,
+            "added_alternative_candidate_ids": added_ids,
+        }
+
     async def integrate_candidates(
         self,
         workflow_id: str,
@@ -187,6 +912,17 @@ class ConclusionManager:
             raise ValueError(f"Unknown candidate IDs: {sorted(unknown)}")
         state.review_result = None
         self.repository.save(state)
+        integration_identity = json.dumps(
+            {
+                "candidate_ids": sorted(candidate_ids),
+                "user_instruction": user_instruction,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        operation_variant = "human_integration_" + hashlib.sha256(
+            integration_identity.encode("utf-8")
+        ).hexdigest()[:12]
         return await self._run_generation_and_review(
             state,
             rerun_position=False,
@@ -194,6 +930,7 @@ class ConclusionManager:
             rerun_integration=True,
             requested_integration_candidate_ids=candidate_ids,
             user_instruction=user_instruction,
+            operation_variant=operation_variant,
             progress_callback=progress_callback,
         )
 
@@ -270,14 +1007,29 @@ class ConclusionManager:
         rerun_integration: bool,
         requested_integration_candidate_ids: list[str] | None = None,
         user_instruction: str | None = None,
+        operation_variant: str | None = None,
+        task_id_overrides: dict[str, str] | None = None,
+        model_overrides: dict[str, str] | None = None,
         progress_callback: ProgressCallback | None,
     ) -> ConclusionWorkflowState:
+        task_id_overrides = task_id_overrides or {}
+        model_overrides = model_overrides or {}
         while True:
             try:
-                context = DecisionContext.model_validate(state.decision_context)
+                context, _removed_context_references = (
+                    self.deterministic_validator.canonical_decision_context_view(
+                        DecisionContext.model_validate(state.decision_context)
+                    )
+                )
                 if rerun_position:
                     state.status = WorkflowStatus.GENERATING_POSITIONS
-                    generation = await self._generate_positions(state, context)
+                    generation = await self._generate_positions(
+                        state,
+                        context,
+                        task_id=task_id_overrides.get(POSITION_GENERATOR_ID),
+                        operation_variant=operation_variant,
+                        model_override=model_overrides.get(POSITION_GENERATOR_ID),
+                    )
                     state.position_generation = generation.model_dump(mode="json")
                     state.position_candidates = [
                         item.model_dump(mode="json") for item in generation.position_candidates
@@ -287,11 +1039,31 @@ class ConclusionManager:
                 else:
                     generation = PositionGenerationResult.model_validate(state.position_generation)
 
-                framework = self._build_evaluation_framework(context)
-                state.evaluation_framework = framework.model_dump(mode="json")
+                if (
+                    not rerun_position
+                    and not rerun_evaluation
+                    and self._saved_model_is_valid(
+                        state.evaluation_framework,
+                        EvaluationFramework,
+                    )
+                ):
+                    framework = EvaluationFramework.model_validate(
+                        state.evaluation_framework
+                    )
+                else:
+                    framework = self._build_evaluation_framework(context)
+                    state.evaluation_framework = framework.model_dump(mode="json")
                 if rerun_position or rerun_evaluation:
                     state.status = WorkflowStatus.EVALUATING_POSITIONS
-                    evaluation = await self._evaluate_positions(state, context, generation, framework)
+                    evaluation = await self._evaluate_positions(
+                        state,
+                        context,
+                        generation,
+                        framework,
+                        task_id=task_id_overrides.get(DECISION_EVALUATOR_ID),
+                        operation_variant=operation_variant,
+                        model_override=model_overrides.get(DECISION_EVALUATOR_ID),
+                    )
                     state.decision_evaluation = evaluation.model_dump(mode="json")
                     self.repository.save(state)
                     await self._emit(progress_callback, "Decision Evaluator完了")
@@ -307,6 +1079,9 @@ class ConclusionManager:
                         evaluation,
                         requested_candidate_ids=requested_integration_candidate_ids or [],
                         user_instruction=user_instruction,
+                        task_id=task_id_overrides.get(DECISION_INTEGRATOR_ID),
+                        operation_variant=operation_variant,
+                        model_override=model_overrides.get(DECISION_INTEGRATOR_ID),
                     )
                     state.decision_integration = integration.model_dump(mode="json")
                     self.repository.save(state)
@@ -333,6 +1108,9 @@ class ConclusionManager:
                     integration,
                     package,
                     validation,
+                    task_id=task_id_overrides.get(QUALITY_REVIEWER_ID),
+                    operation_variant=operation_variant,
+                    model_override=model_overrides.get(QUALITY_REVIEWER_ID),
                 )
             except Exception as exc:
                 return await self._fail(
@@ -422,9 +1200,18 @@ class ConclusionManager:
         self,
         state: ConclusionWorkflowState,
         context: DecisionContext,
+        *,
+        task_id: str | None = None,
+        operation_variant: str | None = None,
+        model_override: str | None = None,
     ) -> PositionGenerationResult:
         task = PositionGenerationTask(
-            task_id=new_id("position_task"),
+            task_id=task_id
+            or self._logical_task_id(
+                state,
+                POSITION_GENERATOR_ID,
+                operation_variant=operation_variant,
+            ),
             target_agent_id=POSITION_GENERATOR_ID,
             decision_context=context,
             deliberation_result=state.deliberation_result,
@@ -441,6 +1228,7 @@ class ConclusionManager:
             output_schema=PositionGenerationResult,
             previous_stage="deliberation",
             next_stage="conclusion.decision_evaluator",
+            model_override=model_override,
         )
 
     async def _evaluate_positions(
@@ -449,9 +1237,18 @@ class ConclusionManager:
         context: DecisionContext,
         generation: PositionGenerationResult,
         framework: EvaluationFramework,
+        *,
+        task_id: str | None = None,
+        operation_variant: str | None = None,
+        model_override: str | None = None,
     ) -> DecisionEvaluationResult:
         task = DecisionEvaluationTask(
-            task_id=new_id("evaluation_task"),
+            task_id=task_id
+            or self._logical_task_id(
+                state,
+                DECISION_EVALUATOR_ID,
+                operation_variant=operation_variant,
+            ),
             target_agent_id=DECISION_EVALUATOR_ID,
             decision_context=context,
             position_candidates=generation.position_candidates,
@@ -468,6 +1265,7 @@ class ConclusionManager:
             output_schema=DecisionEvaluationResult,
             previous_stage=POSITION_GENERATOR_ID,
             next_stage=DECISION_INTEGRATOR_ID,
+            model_override=model_override,
         )
 
     async def _integrate_decision(
@@ -479,9 +1277,17 @@ class ConclusionManager:
         *,
         requested_candidate_ids: list[str],
         user_instruction: str | None,
+        task_id: str | None = None,
+        operation_variant: str | None = None,
+        model_override: str | None = None,
     ) -> DecisionIntegrationResult:
         task = DecisionIntegrationTask(
-            task_id=new_id("integration_task"),
+            task_id=task_id
+            or self._logical_task_id(
+                state,
+                DECISION_INTEGRATOR_ID,
+                operation_variant=operation_variant,
+            ),
             target_agent_id=DECISION_INTEGRATOR_ID,
             decision_context=context,
             position_candidates=generation.position_candidates,
@@ -500,6 +1306,7 @@ class ConclusionManager:
             output_schema=DecisionIntegrationResult,
             previous_stage=DECISION_EVALUATOR_ID,
             next_stage=QUALITY_REVIEWER_ID,
+            model_override=model_override,
         )
 
     async def _request_review(
@@ -510,9 +1317,19 @@ class ConclusionManager:
         integration: DecisionIntegrationResult,
         package: ConclusionPackage,
         validation: DeterministicValidationResult,
+        *,
+        task_id: str | None = None,
+        operation_variant: str | None = None,
+        model_override: str | None = None,
     ) -> tuple[ConclusionQualityReviewOutput, PMPMessage]:
         state.status = WorkflowStatus.REVIEWING
         review_input = ConclusionQualityReviewInput(
+            task_id=task_id
+            or self._logical_task_id(
+                state,
+                QUALITY_REVIEWER_ID,
+                operation_variant=operation_variant,
+            ),
             position_generation=generation,
             decision_evaluation=evaluation,
             decision_integration=integration,
@@ -520,6 +1337,22 @@ class ConclusionManager:
             deterministic_validation=validation,
             revision_context=self._latest_revision_context(state),
         )
+        saved_exchange = self._saved_stage_result_exchange(
+            state,
+            agent_id=QUALITY_REVIEWER_ID,
+            expected_type=MessageType.CONCLUSION_QUALITY_REVIEW_RESULT,
+            output_schema=ConclusionQualityReviewOutput,
+            task_id=review_input.task_id,
+        )
+        if saved_exchange is not None:
+            saved_review, saved_response = saved_exchange
+            if self._stage_result_matches_state(
+                state,
+                DecisionContext.model_validate(state.decision_context),
+                QUALITY_REVIEWER_ID,
+                saved_review,
+            ):
+                return saved_review, saved_response
         result, response = await self._execute_agent(
             state,
             agent_id=QUALITY_REVIEWER_ID,
@@ -531,6 +1364,7 @@ class ConclusionManager:
             previous_stage=DECISION_INTEGRATOR_ID,
             next_stage=self.agent_id,
             return_response=True,
+            model_override=model_override,
         )
         return result, response
 
@@ -547,6 +1381,7 @@ class ConclusionManager:
         previous_stage: str,
         next_stage: str,
         return_response: bool = False,
+        model_override: str | None = None,
     ):
         request = PMPMessage.create(
             workflow_id=state.workflow_id,
@@ -577,7 +1412,15 @@ class ConclusionManager:
         state.current_agent_ids = [agent_id]
         state.message_history.append(request)
         self.repository.save(state)
-        response = await self.registry.get(agent_id).execute(request)
+        agent = self.registry.get(agent_id)
+        effective_model_override = model_override or self._compatible_model_override(
+            agent_id=agent_id,
+            output_schema=output_schema,
+        )
+        response = await agent.execute(
+            request,
+            model_override=effective_model_override,
+        )
         state.message_history.append(response)
         state.current_agent_ids = []
         error = self._validate_response_envelope(request, response, agent_id, expected_type.value)
@@ -595,7 +1438,114 @@ class ConclusionManager:
         task_id = payload.get("task_id")
         if task_id and getattr(result, "task_id", task_id) != task_id:
             raise ValueError(f"Task ID mismatch from {agent_id}")
+        if (
+            isinstance(task_id, str)
+            and task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX)
+        ):
+            self._record_verified_contract_repair(
+                state,
+                agent_id=agent_id,
+                output_schema=output_schema,
+                result_task_id=task_id,
+                result_message_id=response.message_id,
+            )
         return (result, response) if return_response else result
+
+    @staticmethod
+    def _output_schema_id(output_schema: type[BaseModel]) -> str:
+        return f"{output_schema.__module__}.{output_schema.__qualname__}"
+
+    def _compatible_model_override(
+        self,
+        *,
+        agent_id: str,
+        output_schema: type[BaseModel],
+    ) -> str | None:
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        configured_model_id = getattr(agent, "model", None)
+        if not isinstance(provider_id, str) or not isinstance(
+            configured_model_id,
+            str,
+        ):
+            return None
+        binding = self.provider_model_compatibility_store.resolve(
+            provider_id=provider_id,
+            agent_id=agent_id,
+            output_schema_id=self._output_schema_id(output_schema),
+            configured_model_id=configured_model_id,
+        )
+        return binding.compatible_model_id if binding is not None else None
+
+    def _record_verified_contract_repair(
+        self,
+        state: ConclusionWorkflowState,
+        *,
+        agent_id: str,
+        output_schema: type[BaseModel],
+        result_task_id: str,
+        result_message_id: str,
+    ) -> str:
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            raise ValueError("Provider model compatibility requires a stable provider ID")
+        original_task_id = result_task_id[: -len(PROVIDER_CONTRACT_REPAIR_SUFFIX)]
+        authorization = self.provider_contract_repair_store.for_original_task(
+            workflow_id=state.workflow_id,
+            provider_id=provider_id,
+            original_task_id=original_task_id,
+        )
+        if authorization is None:
+            raise ValueError("Validated contract repair has no saved authorization")
+        binding = self.provider_model_compatibility_store.record_verified_repair(
+            authorization,
+            output_schema_id=self._output_schema_id(output_schema),
+            result_task_id=result_task_id,
+            result_message_id=result_message_id,
+        )
+        return f"{binding.agent_id}: {binding.incompatible_model_id} -> {binding.compatible_model_id}"
+
+    def _promote_saved_contract_repairs(
+        self,
+        state: ConclusionWorkflowState,
+    ) -> list[str]:
+        """Backfill verified bindings from append-only legacy PMP history."""
+
+        responses_by_parent = {
+            message.parent_message_id: message
+            for message in state.message_history
+            if message.parent_message_id is not None
+        }
+        promoted: list[str] = []
+        for request in state.message_history:
+            task_id = request.payload.get("task_id")
+            if (
+                request.sender_agent_id != self.agent_id
+                or not isinstance(task_id, str)
+                or not task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX)
+            ):
+                continue
+            response = responses_by_parent.get(request.message_id)
+            if (
+                response is None
+                or response.sender_agent_id != request.receiver_agent_id
+                or response.receiver_agent_id != self.agent_id
+                or response.message_type == MessageType.ERROR.value
+            ):
+                continue
+            agent = self.registry.get(request.receiver_agent_id)
+            agent.output_schema.model_validate(response.payload)
+            promoted.append(
+                self._record_verified_contract_repair(
+                    state,
+                    agent_id=request.receiver_agent_id,
+                    output_schema=agent.output_schema,
+                    result_task_id=task_id,
+                    result_message_id=response.message_id,
+                )
+            )
+        return list(dict.fromkeys(promoted))
 
     def _validate_deliberation_handoff(self, handoff: PMPMessage) -> DeliberationResult:
         self.pmp_validator.validate(handoff)
@@ -610,12 +1560,28 @@ class ConclusionManager:
         result = DeliberationResult.model_validate({key: payload[key] for key in allowed if key in payload})
         if result.workflow_id != handoff.workflow_id:
             raise ValueError("Deliberation Result workflow_id mismatch")
-        review = result.quality_review or handoff.payload.get("quality_review") or {}
-        if review.get("status") not in {"approved", "approved_with_conditions"}:
+        top_level_review_payload = handoff.payload.get("quality_review")
+        top_level_review = (
+            DeliberationQualityReviewOutput.model_validate(top_level_review_payload)
+            if top_level_review_payload is not None
+            else None
+        )
+        review = result.quality_review or top_level_review
+        if review is None:
+            raise ValueError("Deliberation Result is missing its Quality Review")
+        if result.quality_review is not None and top_level_review is not None:
+            if result.quality_review.model_dump(mode="json") != top_level_review.model_dump(
+                mode="json"
+            ):
+                raise ValueError("Deliberation Quality Review copies do not match")
+        if review.status not in {"approved", "approved_with_conditions"}:
             raise ValueError("Deliberation Result has not passed its Quality Gate")
-        if review.get("conclusion_readiness", "READY") not in {"READY", "READY_WITH_CONDITIONS"}:
+        if review.conclusion_readiness not in {
+            DeliberationConclusionReadiness.READY,
+            DeliberationConclusionReadiness.READY_WITH_CONDITIONS,
+        }:
             raise ValueError("Deliberation Result is not Conclusion-ready")
-        if review.get("blocking_finding_ids"):
+        if review.blocking_finding_ids:
             raise ValueError("Deliberation Result contains blocking findings")
         if not 1 <= len(result.analysis_perspectives) <= 3:
             raise ValueError("Deliberation Result must contain one to three viewpoints")
@@ -688,7 +1654,7 @@ class ConclusionManager:
             for item in result.analysis_traceability
             if item.get("analysis_id")
         )
-        return DecisionContext(
+        context = DecisionContext(
             decision_context_id=new_id("decision_context"),
             workflow_id=result.workflow_id,
             deliberation_result_id=result.deliberation_result_id,
@@ -707,9 +1673,15 @@ class ConclusionManager:
             tradeoffs=result.trade_offs,
             uncertainties=result.uncertainties,
             limitations=result.limitations,
+            human_evidence_decision=result.human_evidence_decision,
+            accepted_evidence_gaps=result.accepted_evidence_gaps,
             evaluation_criteria=DEFAULT_CRITERIA,
             value_profiles=default_value_profiles(),
         )
+        canonical_context, _removed_context_references = (
+            self.deterministic_validator.canonical_decision_context_view(context)
+        )
+        return canonical_context
 
     def _build_evaluation_framework(self, context: DecisionContext) -> EvaluationFramework:
         problem = context.target_problem
@@ -734,6 +1706,11 @@ class ConclusionManager:
     ) -> ConclusionPackage:
         result = DeliberationResult.model_validate(state.deliberation_result)
         recommended = integration.recommended_options[0] if integration.recommended_options else None
+        alternatives = self._build_alternatives(
+            evaluation,
+            integration,
+            primary_candidate_id=recommended.candidate_id if recommended else None,
+        )
         return ConclusionPackage(
             conclusion_package_id=(
                 state.conclusion_package.get("conclusion_package_id")
@@ -753,10 +1730,7 @@ class ConclusionManager:
             primary_recommendation=(
                 recommended.model_dump(mode="json") if recommended else None
             ),
-            alternatives=[
-                item.model_dump(mode="json")
-                for item in integration.recommended_options[1:]
-            ],
+            alternatives=alternatives,
             integrated_option=(
                 integration.integrated_option.model_dump(mode="json")
                 if integration.integrated_option
@@ -777,12 +1751,69 @@ class ConclusionManager:
             quality_review=None,
         )
 
+    @staticmethod
+    def _build_alternatives(
+        evaluation: DecisionEvaluationResult,
+        integration: DecisionIntegrationResult,
+        *,
+        primary_candidate_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Materialize every viable non-primary option from saved Agent outputs."""
+
+        recommendations = {
+            item.candidate_id: item for item in integration.recommended_options
+        }
+        comparisons = {
+            item.candidate_id: item.summary
+            for item in integration.candidate_comparison_summary
+        }
+        alternatives: list[dict[str, Any]] = []
+        for candidate_id in integration.viable_candidates:
+            if candidate_id == primary_candidate_id:
+                continue
+            recommendation = recommendations.get(candidate_id)
+            profile_ids: list[str] = []
+            conditions: list[str] = []
+            for item in evaluation.conditional_advantages:
+                if candidate_id in item.advantaged_candidate_ids:
+                    profile_ids.append(item.profile_id)
+            for item in evaluation.sensitivity_analysis:
+                if candidate_id in item.preferred_candidate_ids:
+                    profile_ids.append(item.profile_id)
+                    conditions.append(item.reason)
+            reason = (
+                recommendation.reason
+                if recommendation is not None
+                else comparisons.get(candidate_id)
+            )
+            if not reason:
+                # The deterministic validator will reject this incomplete
+                # materialization before Quality Review.
+                reason = ""
+            if not conditions and comparisons.get(candidate_id):
+                conditions.append(comparisons[candidate_id])
+            alternatives.append(
+                {
+                    "candidate_id": candidate_id,
+                    "recommendation_type": (
+                        recommendation.recommendation_type
+                        if recommendation is not None
+                        else "conditional_fallback"
+                    ),
+                    "reason": reason,
+                    "applicable_profile_ids": list(dict.fromkeys(profile_ids)),
+                    "applicable_conditions": list(dict.fromkeys(conditions)),
+                }
+            )
+        return alternatives
+
     def _build_final_conclusion(
         self,
         state: ConclusionWorkflowState,
         selection: HumanSelection,
     ) -> FinalConclusion:
         package = ConclusionPackage.model_validate(state.conclusion_package)
+        decision_context = DecisionContext.model_validate(state.decision_context)
         selected_candidates = [
             item for item in state.position_candidates
             if item["position_candidate_id"] in set(selection.selected_candidate_ids)
@@ -825,7 +1856,19 @@ class ConclusionManager:
             accepted_tradeoffs=selection.accepted_tradeoffs or self._merge_lists(sources, "tradeoffs"),
             accepted_risks=self._merge_lists(sources, "risks"),
             uncertainties=package.uncertainties,
-            limitations=list(dict.fromkeys(package.limitations + selection.accepted_limitations)),
+            limitations=list(
+                dict.fromkeys(
+                    package.limitations
+                    + selection.accepted_limitations
+                    + [
+                        "Human-accepted unresolved evidence gap "
+                        f"{item.finding_id}: {item.issue}"
+                        for item in decision_context.accepted_evidence_gaps
+                    ]
+                )
+            ),
+            human_evidence_decision=decision_context.human_evidence_decision,
+            accepted_evidence_gaps=decision_context.accepted_evidence_gaps,
             supporting_claim_ids=claims,
             supporting_analysis_ids=analyses,
             supporting_evidence_ids=evidence,
@@ -859,6 +1902,8 @@ class ConclusionManager:
             "final_conclusion": final_payload,
             "conclusion_package": package_payload,
             "human_selection": selection_payload,
+            "human_evidence_decision": final_payload.get("human_evidence_decision"),
+            "accepted_evidence_gaps": final_payload.get("accepted_evidence_gaps", []),
             "traceability_manifest": traceability_manifest,
             "limitations_to_disclose": list(dict.fromkeys(state.limitations + final.limitations)),
             "conclusion_id": final.final_conclusion_id,
@@ -994,7 +2039,7 @@ class ConclusionManager:
     def _validate_playwright_handoff(payload: dict[str, Any]) -> None:
         required = {
             "final_conclusion", "conclusion_package", "human_selection", "traceability_manifest",
-            "limitations_to_disclose",
+            "human_evidence_decision", "accepted_evidence_gaps", "limitations_to_disclose",
             "conclusion_id", "topic", "general_opinion", "central_question", "selected_position",
             "recommendations", "decision_rationale", "supporting_claims", "supporting_analysis",
             "evidence_links", "evaluation_summary", "implementation_conditions", "expected_benefits",
@@ -1005,6 +2050,21 @@ class ConclusionManager:
         missing = sorted(required - payload.keys())
         if missing:
             raise ValueError(f"Conclusion→Playwright handoff is missing: {', '.join(missing)}")
+        review = ConclusionQualityReviewOutput.model_validate(payload["quality_review"])
+        package_review_payload = payload["conclusion_package"].get("quality_review")
+        if package_review_payload is None:
+            raise ValueError("Conclusion Package is missing its Quality Review")
+        package_review = ConclusionQualityReviewOutput.model_validate(
+            package_review_payload
+        )
+        if review.model_dump(mode="json") != package_review.model_dump(mode="json"):
+            raise ValueError("Conclusion Quality Review copies do not match")
+        if review.status not in {"approved", "approved_with_conditions"}:
+            raise ValueError("Conclusion Result has not passed its Quality Gate")
+        if review.playwright_readiness not in {"ready", "ready_with_conditions"}:
+            raise ValueError("Conclusion Result is not Playwright-ready")
+        if review.blocking_finding_ids:
+            raise ValueError("Conclusion Result contains blocking findings")
         if not payload["supporting_claims"] or not payload["supporting_analysis"] or not payload["evidence_links"]:
             raise ValueError("Playwright handoff must preserve claim, analysis, and evidence traceability")
         for item in payload["evidence_links"]:
@@ -1014,6 +2074,10 @@ class ConclusionManager:
         selection = payload["human_selection"]
         package = payload["conclusion_package"]
         trace = payload["traceability_manifest"]
+        if payload["human_evidence_decision"] != final.get("human_evidence_decision"):
+            raise ValueError("Human Evidence Decision copies do not match")
+        if payload["accepted_evidence_gaps"] != final.get("accepted_evidence_gaps", []):
+            raise ValueError("Accepted Evidence Gap copies do not match")
         if final.get("final_conclusion_id") != payload["conclusion_id"]:
             raise ValueError("Final Conclusion ID does not match the canonical handoff ID")
         if final.get("human_selection_id") != selection.get("selection_id"):
@@ -1028,6 +2092,706 @@ class ConclusionManager:
         ):
             if set(final.get(final_key, [])) - set(trace.get(field, [])):
                 raise ValueError(f"Traceability Manifest is missing {field}")
+
+    @staticmethod
+    def _saved_model_is_valid(payload: dict[str, Any] | None, schema: type[BaseModel]) -> bool:
+        if payload is None:
+            return False
+        try:
+            schema.model_validate(payload)
+        except Exception:
+            return False
+        return True
+
+    def _restore_saved_stage_responses(
+        self,
+        state: ConclusionWorkflowState,
+        context: DecisionContext,
+    ) -> dict[str, str]:
+        """Restore validated result messages that outlived a checkpoint write fault."""
+
+        stages: list[tuple[str, MessageType, type[BaseModel], str]] = [
+            (
+                POSITION_GENERATOR_ID,
+                MessageType.POSITION_GENERATION_RESULT,
+                PositionGenerationResult,
+                "position_generation",
+            ),
+            (
+                DECISION_EVALUATOR_ID,
+                MessageType.DECISION_EVALUATION_RESULT,
+                DecisionEvaluationResult,
+                "decision_evaluation",
+            ),
+            (
+                DECISION_INTEGRATOR_ID,
+                MessageType.DECISION_INTEGRATION_RESULT,
+                DecisionIntegrationResult,
+                "decision_integration",
+            ),
+            (
+                QUALITY_REVIEWER_ID,
+                MessageType.CONCLUSION_QUALITY_REVIEW_RESULT,
+                ConclusionQualityReviewOutput,
+                "review_result",
+            ),
+        ]
+        restored: dict[str, str] = {}
+        for agent_id, expected_type, output_schema, state_field in stages:
+            if self._saved_model_is_valid(getattr(state, state_field), output_schema):
+                continue
+            task_id = self._logical_task_id(state, agent_id)
+            exchange = None
+            for candidate_task_id in reversed(
+                self._recoverable_stage_task_ids(state, agent_id)
+            ):
+                exchange = self._saved_stage_result_exchange(
+                    state,
+                    agent_id=agent_id,
+                    expected_type=expected_type,
+                    output_schema=output_schema,
+                    task_id=candidate_task_id,
+                )
+                if exchange is None:
+                    exchange = self._recover_saved_reference_invalid_stage(
+                        state,
+                        context,
+                        agent_id=agent_id,
+                        expected_type=expected_type,
+                        output_schema=output_schema,
+                        task_id=candidate_task_id,
+                    )
+                if exchange is not None:
+                    task_id = candidate_task_id
+                    break
+            if exchange is None:
+                break
+            stage_result, _response = exchange
+            if not self._stage_result_matches_state(
+                state,
+                context,
+                agent_id,
+                stage_result,
+            ):
+                break
+            if self._stage_reference_violations(
+                state,
+                context,
+                agent_id,
+                stage_result,
+            ):
+                break
+            if agent_id == POSITION_GENERATOR_ID:
+                state.position_generation = stage_result.model_dump(mode="json")
+                state.position_candidates = [
+                    item.model_dump(mode="json")
+                    for item in stage_result.position_candidates
+                ]
+            elif agent_id == DECISION_EVALUATOR_ID:
+                state.decision_evaluation = stage_result.model_dump(mode="json")
+                state.evaluation_framework = stage_result.evaluation_framework.model_dump(
+                    mode="json"
+                )
+            elif agent_id == DECISION_INTEGRATOR_ID:
+                state.decision_integration = stage_result.model_dump(mode="json")
+            else:
+                state.review_result = stage_result.model_dump(mode="json")
+            if agent_id not in state.completed_agents:
+                state.completed_agents.append(agent_id)
+            restored[agent_id] = task_id
+        return restored
+
+    def _recover_saved_reference_invalid_stage(
+        self,
+        state: ConclusionWorkflowState,
+        context: DecisionContext,
+        *,
+        agent_id: str,
+        expected_type: MessageType,
+        output_schema: type[BaseModel],
+        task_id: str,
+    ) -> tuple[BaseModel, PMPMessage] | None:
+        """Promote a billed payload after lossless reference-list filtering.
+
+        Only unknown elements of explicit structured reference arrays may be
+        removed. Scalar references, narrative values, schema-invalid payloads,
+        missing reservations, and payloads that become incomplete are never
+        repaired here and remain eligible only for an explicit audited retry.
+        """
+
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", task_id):
+            return None
+        requests = {
+            message.message_id: message
+            for message in state.message_history
+            if message.sender_agent_id == self.agent_id
+            and message.receiver_agent_id == agent_id
+            and message.payload.get("task_id") == task_id
+        }
+        if not requests:
+            return None
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            return None
+        reservation_path = (
+            self.repository.data_dir
+            / "provider_call_reservations"
+            / provider_id
+            / state.workflow_id
+            / f"{task_id}.json"
+        )
+        try:
+            reservation = json.loads(reservation_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if (
+            reservation.get("workflow_id") != state.workflow_id
+            or reservation.get("task_id") != task_id
+            or reservation.get("agent_id") != agent_id
+        ):
+            return None
+
+        for response in reversed(state.message_history):
+            if (
+                response.sender_agent_id != agent_id
+                or response.receiver_agent_id != self.agent_id
+                or response.message_type != MessageType.ERROR.value
+                or response.parent_message_id not in requests
+                or not self._is_persisted_provider_output_validation_error(response)
+                or reservation.get("model_id") != response.payload.get("model_id")
+            ):
+                continue
+            validation_errors = response.payload.get("validation_errors")
+            if any(
+                not isinstance(item, dict)
+                or item.get("type") != "value_error.reference_integrity"
+                for item in validation_errors
+            ):
+                continue
+            raw = response.payload.get("invalid_payload")
+            try:
+                raw_result = output_schema.model_validate(raw)
+            except Exception:
+                continue
+            violations = self._stage_reference_violations(
+                state,
+                context,
+                agent_id,
+                raw_result,
+            )
+            declared_paths = {
+                str(item.get("loc"))
+                for item in validation_errors
+                if isinstance(item.get("loc"), str)
+            }
+            if not violations or declared_paths != {
+                item["path"] for item in violations
+            }:
+                continue
+            normalized = self._remove_unknown_reference_list_items(raw, violations)
+            if normalized is None:
+                continue
+            try:
+                result = output_schema.model_validate(normalized)
+            except Exception:
+                continue
+            if getattr(result, "task_id", task_id) != task_id:
+                continue
+            if not self._stage_result_matches_state(
+                state,
+                context,
+                agent_id,
+                result,
+            ):
+                continue
+            if self._stage_reference_violations(
+                state,
+                context,
+                agent_id,
+                result,
+            ):
+                continue
+
+            request = requests[response.parent_message_id]
+            recovery_record = {
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "source_error_message_id": response.message_id,
+                "provider_call_reused": False,
+                "compatibility_adapter": "drop_unknown_structured_reference_list_items",
+                "removed_references": violations,
+                "recovered_at": utc_now().isoformat(),
+            }
+            extensions = dict(response.metadata.extensions)
+            extensions["provider_payload_recovery"] = recovery_record
+            recovered_response = PMPMessage.create(
+                workflow_id=state.workflow_id,
+                parent_message_id=request.message_id,
+                sender_agent_id=agent_id,
+                receiver_agent_id=self.agent_id,
+                message_type=expected_type,
+                objective=(
+                    "Recover persisted Provider output after canonical reference "
+                    "list validation"
+                ),
+                payload=result.model_dump(mode="json"),
+                constraints=request.constraints,
+                context=PMPContext(
+                    current_stage=agent_id,
+                    previous_stage=request.context.current_stage,
+                    next_stage=self.agent_id,
+                ),
+                metadata=PMPMetadata(
+                    status=MessageStatus.COMPLETED,
+                    retry_count=response.metadata.retry_count,
+                    notes=(
+                        "Recovered from persisted invalid_payload without a Provider call; "
+                        "removed only unknown structured reference list elements"
+                    ),
+                    extensions=extensions,
+                ),
+            )
+            self.pmp_validator.validate(recovered_response)
+            state.message_history.append(recovered_response)
+            if not any(
+                item.get("source_error_message_id") == response.message_id
+                for item in state.provider_payload_recoveries
+            ):
+                state.provider_payload_recoveries.append(recovery_record)
+            return result, recovered_response
+        return None
+
+    def _stage_reference_violations(
+        self,
+        state: ConclusionWorkflowState,
+        context: DecisionContext,
+        agent_id: str,
+        result: BaseModel,
+    ) -> list[dict[str, str]]:
+        if agent_id == POSITION_GENERATOR_ID:
+            candidate_ids = {
+                item.position_candidate_id
+                for item in getattr(result, "position_candidates", [])
+            }
+        else:
+            candidate_ids = {
+                item.get("position_candidate_id")
+                for item in state.position_candidates
+                if isinstance(item, dict) and item.get("position_candidate_id")
+            }
+        return self.deterministic_validator.unknown_reference_ids(
+            decision_context=context,
+            value=result,
+            candidate_ids=candidate_ids,
+        )
+
+    @staticmethod
+    def _remove_unknown_reference_list_items(
+        raw: Any,
+        violations: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        normalized = deepcopy(raw)
+        grouped: dict[tuple[str | int, ...], list[tuple[int, str]]] = {}
+        for violation in violations:
+            path = violation.get("path")
+            expected = violation.get("id")
+            if not isinstance(path, str) or not isinstance(expected, str):
+                return None
+            parts: list[str | int] = []
+            for match in re.finditer(r"([^.\[\]]+)|\[(\d+)\]", path):
+                name, index = match.groups()
+                parts.append(int(index) if index is not None else name)
+            if not parts or not isinstance(parts[-1], int):
+                return None
+            grouped.setdefault(tuple(parts[:-1]), []).append((parts[-1], expected))
+
+        for parent_path, items in grouped.items():
+            parent: Any = normalized
+            try:
+                for part in parent_path:
+                    parent = parent[part]
+            except (KeyError, IndexError, TypeError):
+                return None
+            if not isinstance(parent, list):
+                return None
+            for index, expected in sorted(items, reverse=True):
+                if index >= len(parent) or parent[index] != expected:
+                    return None
+                parent.pop(index)
+        return normalized
+
+    def _saved_stage_result_exchange(
+        self,
+        state: ConclusionWorkflowState,
+        *,
+        agent_id: str,
+        expected_type: MessageType,
+        output_schema: type[BaseModel],
+        task_id: str,
+    ) -> tuple[BaseModel, PMPMessage] | None:
+        requests = {
+            message.message_id: message
+            for message in state.message_history
+            if message.sender_agent_id == self.agent_id
+            and message.receiver_agent_id == agent_id
+            and message.payload.get("task_id") == task_id
+        }
+        for response in reversed(state.message_history):
+            if (
+                response.sender_agent_id != agent_id
+                or response.receiver_agent_id != self.agent_id
+                or response.message_type != expected_type.value
+                or response.parent_message_id not in requests
+            ):
+                continue
+            request = requests[response.parent_message_id]
+            if self._validate_response_envelope(
+                request,
+                response,
+                agent_id,
+                expected_type.value,
+            ):
+                continue
+            try:
+                result = output_schema.model_validate(response.payload)
+            except Exception:
+                continue
+            result_task_id = getattr(result, "task_id", task_id)
+            if result_task_id != task_id:
+                continue
+            return result, response
+        return None
+
+    @staticmethod
+    def _stage_result_matches_state(
+        state: ConclusionWorkflowState,
+        context: DecisionContext,
+        agent_id: str,
+        result: BaseModel,
+    ) -> bool:
+        if agent_id == POSITION_GENERATOR_ID:
+            return result.decision_context_id == context.decision_context_id
+        if agent_id == DECISION_EVALUATOR_ID:
+            candidate_ids = {
+                item["position_candidate_id"] for item in state.position_candidates
+            }
+            reviewed_ids = {
+                item.candidate_id for item in result.comparison_matrix
+            }
+            return (
+                result.decision_context_id == context.decision_context_id
+                and reviewed_ids == candidate_ids
+            )
+        if agent_id == DECISION_INTEGRATOR_ID:
+            if not state.decision_evaluation:
+                return False
+            return (
+                result.decision_evaluation_result_id
+                == state.decision_evaluation.get("decision_evaluation_result_id")
+            )
+        if not state.position_generation or not state.decision_evaluation or not state.decision_integration:
+            return False
+        return (
+            set(result.reviewed_candidate_ids)
+            == {
+                item["position_candidate_id"] for item in state.position_candidates
+            }
+            and result.reviewed_evaluation_result_id
+            == state.decision_evaluation.get("decision_evaluation_result_id")
+            and result.reviewed_integration_result_id
+            == state.decision_integration.get("decision_integration_result_id")
+        )
+
+    def _has_unanswered_stage_request(
+        self,
+        state: ConclusionWorkflowState,
+        agent_id: str,
+    ) -> bool:
+        task_ids = set(self._recoverable_stage_task_ids(state, agent_id))
+        requests = [
+            message
+            for message in state.message_history
+            if message.sender_agent_id == self.agent_id
+            and message.receiver_agent_id == agent_id
+            and message.payload.get("task_id") in task_ids
+        ]
+        if not requests:
+            return False
+        child_parent_ids = {
+            message.parent_message_id
+            for message in state.message_history
+            if message.parent_message_id is not None
+        }
+        return any(request.message_id not in child_parent_ids for request in requests)
+
+    @staticmethod
+    def _has_unanswered_task_request(
+        state: ConclusionWorkflowState,
+        agent_id: str,
+        task_id: str,
+    ) -> bool:
+        requests = [
+            message
+            for message in state.message_history
+            if message.sender_agent_id == "conclusion.manager"
+            and message.receiver_agent_id == agent_id
+            and message.payload.get("task_id") == task_id
+        ]
+        child_parent_ids = {
+            message.parent_message_id
+            for message in state.message_history
+            if message.parent_message_id is not None
+        }
+        return any(request.message_id not in child_parent_ids for request in requests)
+
+    def _recoverable_stage_task_ids(
+        self,
+        state: ConclusionWorkflowState,
+        agent_id: str,
+    ) -> list[str]:
+        base_task_id = self._logical_task_id(state, agent_id)
+        task_ids = [base_task_id]
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            return task_ids
+        retry = self.provider_retry_store.for_original_task(
+            workflow_id=state.workflow_id,
+            provider_id=provider_id,
+            original_task_id=base_task_id,
+        )
+        if retry is not None:
+            task_ids.append(retry.retry_task_id)
+        repair = self.provider_contract_repair_store.for_original_task(
+            workflow_id=state.workflow_id,
+            provider_id=provider_id,
+            original_task_id=base_task_id,
+        )
+        if repair is not None:
+            task_ids.append(repair.repair_task_id)
+        # Random legacy task IDs predate revision-cycle identity. They may
+        # restore an initial checkpoint, but must never satisfy a later
+        # revision/upstream checkpoint merely because the Decision Context is
+        # unchanged.
+        if state.revision_count or state.upstream_revision_count:
+            return task_ids
+        # Legacy Conclusion checkpoints used random stage task IDs. Only admit
+        # their explicitly authorized retry/repair descendants here; arbitrary
+        # historical stage requests remain ineligible for checkpoint restore.
+        for message in state.message_history:
+            if (
+                message.sender_agent_id != self.agent_id
+                or message.receiver_agent_id != agent_id
+            ):
+                continue
+            task_id = message.payload.get("task_id")
+            if not isinstance(task_id, str):
+                continue
+            if task_id.endswith(OPERATOR_RETRY_SUFFIX):
+                legacy_base = task_id[: -len(OPERATOR_RETRY_SUFFIX)]
+                legacy_retry = self.provider_retry_store.for_original_task(
+                    workflow_id=state.workflow_id,
+                    provider_id=provider_id,
+                    original_task_id=legacy_base,
+                )
+                if legacy_retry is not None and legacy_retry.retry_task_id == task_id:
+                    for candidate in (legacy_base, task_id):
+                        if candidate not in task_ids:
+                            task_ids.append(candidate)
+            elif task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX):
+                legacy_base = task_id[: -len(PROVIDER_CONTRACT_REPAIR_SUFFIX)]
+                legacy_repair = (
+                    self.provider_contract_repair_store.for_original_task(
+                        workflow_id=state.workflow_id,
+                        provider_id=provider_id,
+                        original_task_id=legacy_base,
+                    )
+                )
+                if (
+                    legacy_repair is not None
+                    and legacy_repair.repair_task_id == task_id
+                ):
+                    for candidate in (
+                        legacy_base,
+                        legacy_repair.retry_task_id,
+                        task_id,
+                    ):
+                        if candidate not in task_ids:
+                            task_ids.append(candidate)
+        return task_ids
+
+    @staticmethod
+    def _is_legacy_non_finite_root_error(error_response: PMPMessage) -> bool:
+        message = str(error_response.payload.get("message") or "").lower()
+        return (
+            error_response.payload.get("error_class") == "PayloadValidationError"
+            and error_response.payload.get("validation_field_path") is None
+            and "input_type=float" in message
+            and any(
+                marker in message
+                for marker in ("input_value=inf", "input_value=-inf", "input_value=nan")
+            )
+        )
+
+    @staticmethod
+    def _is_persisted_provider_output_validation_error(
+        error_response: PMPMessage,
+    ) -> bool:
+        """Recognize a billed Provider result that failed local output validation.
+
+        The invalid payload and structured validation errors are required so a
+        generic application-side validation bug cannot authorize a Provider call.
+        Request/error correlation and the original reservation are checked by
+        the caller and ProviderRetryAuthorizationStore respectively.
+        """
+
+        validation_errors = error_response.payload.get("validation_errors")
+        return (
+            error_response.payload.get("error_class") == "PayloadValidationError"
+            and isinstance(error_response.payload.get("invalid_payload"), dict)
+            and isinstance(validation_errors, list)
+            and bool(validation_errors)
+            and isinstance(error_response.payload.get("model_id"), str)
+            and bool(error_response.payload.get("model_id"))
+        )
+
+    @staticmethod
+    def _latest_failed_provider_exchange(
+        state: ConclusionWorkflowState,
+    ) -> tuple[PMPMessage, PMPMessage]:
+        conclusion_agents = {
+            POSITION_GENERATOR_ID,
+            DECISION_EVALUATOR_ID,
+            DECISION_INTEGRATOR_ID,
+            QUALITY_REVIEWER_ID,
+        }
+        for error_response in reversed(state.message_history):
+            if (
+                error_response.message_type != MessageType.ERROR.value
+                or error_response.sender_agent_id not in conclusion_agents
+            ):
+                continue
+            request = next(
+                (
+                    message
+                    for message in reversed(state.message_history)
+                    if message.message_id == error_response.parent_message_id
+                ),
+                None,
+            )
+            if (
+                request is None
+                or request.sender_agent_id != "conclusion.manager"
+                or request.receiver_agent_id != error_response.sender_agent_id
+                or request.payload.get("task_id")
+                != error_response.payload.get("task_id")
+            ):
+                raise ValueError(
+                    "Conclusion Provider failure is not correlated to its saved request"
+                )
+            return request, error_response
+        raise ValueError("No failed Conclusion Provider exchange was found")
+
+    @staticmethod
+    def _failed_provider_exchange_for_task(
+        state: ConclusionWorkflowState,
+        task_id: str,
+    ) -> tuple[PMPMessage, PMPMessage] | None:
+        for error_response in reversed(state.message_history):
+            if (
+                error_response.message_type != MessageType.ERROR.value
+                or error_response.payload.get("task_id") != task_id
+            ):
+                continue
+            request = next(
+                (
+                    message
+                    for message in reversed(state.message_history)
+                    if message.message_id == error_response.parent_message_id
+                ),
+                None,
+            )
+            if (
+                request is None
+                or request.sender_agent_id != "conclusion.manager"
+                or request.receiver_agent_id != error_response.sender_agent_id
+                or request.payload.get("task_id") != task_id
+            ):
+                raise ValueError(
+                    "Conclusion Provider failure is not correlated to its saved request"
+                )
+            return request, error_response
+        return None
+
+    @staticmethod
+    def _clear_from_failed_stage(
+        state: ConclusionWorkflowState,
+        failed_agent_id: str,
+    ) -> None:
+        order = [
+            POSITION_GENERATOR_ID,
+            DECISION_EVALUATOR_ID,
+            DECISION_INTEGRATOR_ID,
+            QUALITY_REVIEWER_ID,
+        ]
+        start = order.index(failed_agent_id)
+        invalidated_agents = set(order[start:])
+        state.completed_agents = [
+            agent_id
+            for agent_id in state.completed_agents
+            if agent_id not in invalidated_agents
+        ]
+        if failed_agent_id == POSITION_GENERATOR_ID:
+            state.position_generation = None
+            state.position_candidates = []
+            state.evaluation_framework = None
+        if failed_agent_id in {POSITION_GENERATOR_ID, DECISION_EVALUATOR_ID}:
+            state.decision_evaluation = None
+        if failed_agent_id in {
+            POSITION_GENERATOR_ID,
+            DECISION_EVALUATOR_ID,
+            DECISION_INTEGRATOR_ID,
+        }:
+            state.decision_integration = None
+        state.conclusion_package = None
+        state.deterministic_validation = None
+        state.review_result = None
+        state.human_selection = None
+        state.final_conclusion = None
+        state.playwright_sent = False
+
+    @staticmethod
+    def _logical_task_id(
+        state: ConclusionWorkflowState,
+        agent_id: str,
+        *,
+        operation_variant: str | None = None,
+    ) -> str:
+        stage_names = {
+            POSITION_GENERATOR_ID: "position_generation",
+            DECISION_EVALUATOR_ID: "decision_evaluation",
+            DECISION_INTEGRATOR_ID: "decision_integration",
+            QUALITY_REVIEWER_ID: "quality_review",
+        }
+        stage_name = stage_names[agent_id]
+        task_id = (
+            f"conclusion_{stage_name}_upstream_{state.upstream_revision_count}"
+            f"_revision_{state.revision_count}"
+        )
+        if operation_variant:
+            task_id += f"_{operation_variant}"
+        current_manager_repairs = [
+            record
+            for record in state.manager_repair_history
+            if record.upstream_revision_count == state.upstream_revision_count
+            and record.revision_count == state.revision_count
+        ]
+        if current_manager_repairs:
+            task_id += f"_manager_repair_{current_manager_repairs[-1].iteration}"
+        return task_id
 
     @staticmethod
     def _revision_stages(targets: list[str]) -> list[str]:

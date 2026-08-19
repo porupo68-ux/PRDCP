@@ -14,6 +14,7 @@
     "research_result",
     "research_revision_request",
     "research_revision_result",
+    "human_evidence_decision",
     "deliberation_task_assignment",
     "deliberation_task_result",
     "deliberation_result",

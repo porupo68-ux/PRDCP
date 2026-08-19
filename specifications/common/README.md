@@ -1,3 +1,5 @@
 # PRDCP v2 Common Specifications
 
 実装時の機械可読な正本です。DOCX内の説明と競合する場合、PMPエンベロープ、Agent ID、Message Type、Status、層間Handoffの各項目についてはこのフォルダのJSONを優先します。
+
+Researcher→Deliberation以降のHandoffは`human_evidence_decision`と`accepted_evidence_gaps`を明示的に保持します。受容されたgapはEvidence IDの代替ではなく、未解決のまま開示・表現強度制御へ伝播するgovernance artifactです。

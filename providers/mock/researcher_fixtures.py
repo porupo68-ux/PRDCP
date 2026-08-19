@@ -29,21 +29,27 @@ def research_result(
     suffix = "revision" if revision else "initial"
     now = datetime.now(timezone.utc)
     details = source_details(category, revision)
+    retrieved_sources = input_data.get("retrieval_context", {}).get("sources", [])
+    retrieved = retrieved_sources[0] if retrieved_sources else None
     source = {
-        "source_id": new_id("source"),
+        "source_id": retrieved["source_id"] if retrieved else new_id("source"),
         "evidence_id": new_id("evidence"),
         "research_question_ids": [rq_id],
         "source_type": category,
-        "title": details["title"],
+        "title": retrieved["title"] if retrieved else details["title"],
         "source_name": details["source_name"],
-        "url": f"https://example.invalid/research/{category_slug}/{rq_id}/{suffix}",
+        "url": (
+            retrieved["url"]
+            if retrieved
+            else f"https://example.invalid/research/{category_slug}/{rq_id}/{suffix}"
+        ),
         "author_or_organization": details["author_or_organization"],
         "published_at": now.isoformat(),
         "retrieved_at": now.isoformat(),
         "summary": (
             f"{input_data['question']}に関連する{category}資料を、結論を付けずに整理したモック要約"
         ),
-        "relevant_excerpt": None,
+        "relevant_excerpt": retrieved["content"] if retrieved else None,
         "stance": details["stance"],
         "reliability": details["reliability"],
         "directness": details["directness"],
@@ -194,6 +200,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             "findings": [
                 {
                     "finding_id": new_id("finding"),
+                    "finding_type": "EVIDENCE_SUFFICIENCY_FINDING",
                     "severity": "MAJOR",
                     "research_question_id": rq_id,
                     "target_agent_id": target_agent,
@@ -212,18 +219,9 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             "revision_targets": [],
             "approved_research_report": None,
         }
+    # A disclosed limitation is not itself a request for more evidence. Concrete
+    # evidence deficiencies use revision_required and a routed specialist target.
     findings = []
-    if decision == "approved_with_conditions":
-        findings.append(
-            {
-                "finding_id": new_id("finding"),
-                "severity": "MINOR",
-                "research_question_id": None,
-                "target_agent_id": None,
-                "issue": "Report contains disclosed limitations or unresolved coverage gaps",
-                "required_action": "Deliberation must retain these limitations in its analysis",
-            }
-        )
     return {
         "status": decision,
         "reason": (

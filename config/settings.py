@@ -9,6 +9,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEMO_SAFE_MODE_FALSE_VALUES = {"0", "false", "no", "off"}
 SUPPORTED_PROVIDERS = {"mock", "openrouter"}
+SUPPORTED_RETRIEVAL_PROVIDERS = {"mock", "openrouter"}
+_DOTENV_MANAGED_VALUES: dict[str, str] = {}
 
 
 def demo_safe_mode_from_env() -> bool:
@@ -16,17 +18,44 @@ def demo_safe_mode_from_env() -> bool:
     return value not in DEMO_SAFE_MODE_FALSE_VALUES
 
 
-def load_env_file(path: Path | None = None) -> None:
-    """Load a small .env file without adding a runtime dependency."""
+def load_env_file(path: Path | None = None, *, refresh: bool = False) -> None:
+    """Load a small .env file without overriding operator-owned environment values.
+
+    ``refresh`` updates only values that this loader previously installed.  This
+    lets a long-running Discord process observe a changed .env file while still
+    preserving values supplied by the parent process or changed explicitly at
+    runtime.
+    """
     env_path = path or BASE_DIR / ".env"
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    values: dict[str, str] = {}
+    if env_path.exists():
+        raw_lines = env_path.read_text(encoding="utf-8").splitlines()
+    else:
+        raw_lines = []
+    for raw_line in raw_lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        values[key.strip()] = value.strip().strip('"').strip("'")
+
+    if refresh:
+        for key, previous in list(_DOTENV_MANAGED_VALUES.items()):
+            if key not in values:
+                if os.environ.get(key) == previous:
+                    os.environ.pop(key, None)
+                _DOTENV_MANAGED_VALUES.pop(key, None)
+
+    for key, value in values.items():
+        previous = _DOTENV_MANAGED_VALUES.get(key)
+        current = os.environ.get(key)
+        if current is None or (refresh and previous is not None and current == previous):
+            os.environ[key] = value
+            _DOTENV_MANAGED_VALUES[key] = value
+        elif previous is not None and current != previous:
+            # A caller deliberately replaced a loader-owned value.  From this
+            # point it is operator-owned and must not be overwritten by .env.
+            _DOTENV_MANAGED_VALUES.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -38,6 +67,9 @@ class Settings:
     data_dir: Path
     log_level: str
     models: dict[str, str]
+    retrieval_provider: str = "mock"
+    retrieval_model: str = "google/gemini-3.7-flash"
+    retrieval_engine: str = "exa"
     demo_safe_mode: bool = True
     auto_start_researcher: bool = False
     auto_start_deliberation: bool = False
@@ -52,8 +84,8 @@ class Settings:
     rd_strict: bool = True
 
     @classmethod
-    def from_env(cls) -> "Settings":
-        load_env_file()
+    def from_env(cls, *, refresh_dotenv: bool = False) -> "Settings":
+        load_env_file(refresh=refresh_dotenv)
         model_config = json.loads((BASE_DIR / "config" / "models.json").read_text(encoding="utf-8"))
         models = {
             agent_id: os.getenv(item["environment_key"], "").strip()
@@ -64,6 +96,9 @@ class Settings:
         provider = os.getenv("PRDCP_PROVIDER", "mock").strip().lower()
         if provider not in SUPPORTED_PROVIDERS:
             raise ValueError("PRDCP_PROVIDER must be 'mock' or 'openrouter'")
+        retrieval_provider = os.getenv("PRDCP_RETRIEVAL_PROVIDER", provider).strip().lower()
+        if retrieval_provider not in SUPPORTED_RETRIEVAL_PROVIDERS:
+            raise ValueError("PRDCP_RETRIEVAL_PROVIDER must be 'mock' or 'openrouter'")
         return cls(
             provider=provider,
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
@@ -72,6 +107,11 @@ class Settings:
             data_dir=data_dir,
             log_level=os.getenv("PRDCP_LOG_LEVEL", "INFO").upper(),
             models=models,
+            retrieval_provider=retrieval_provider,
+            retrieval_model=os.getenv(
+                "OPENROUTER_RETRIEVAL_MODEL", "google/gemini-3.7-flash"
+            ).strip(),
+            retrieval_engine=os.getenv("OPENROUTER_RETRIEVAL_ENGINE", "exa").strip(),
             demo_safe_mode=demo_safe_mode_from_env(),
             auto_start_researcher=os.getenv("PRDCP_AUTO_START_RESEARCHER", "false").strip().lower()
             in {"1", "true", "yes", "on"},

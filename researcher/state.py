@@ -8,6 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
 from common.models.workflow import WorkflowStatus
+from researcher.schemas.human_evidence import (
+    AcceptedEvidenceGap,
+    EvidenceRevisionPlan,
+    HumanEvidenceDecision,
+    HumanEvidenceIntegrityRepairRecord,
+)
 
 
 def utc_now() -> datetime:
@@ -39,11 +45,18 @@ class ExternalResearchRevisionRecord(BaseModel):
 
 class ExternalRevisionCheckpoint(str, Enum):
     REQUEST_RECEIVED = "REQUEST_RECEIVED"
+    TASKS_PLANNED = "TASKS_PLANNED"
+    TASKS_DISPATCHED = "TASKS_DISPATCHED"
+    RESULTS_COLLECTED = "RESULTS_COLLECTED"
+    REPORT_INTEGRATING = "REPORT_INTEGRATING"
+    REPORT_INTEGRATED = "REPORT_INTEGRATED"
+    QUALITY_REVIEWING = "QUALITY_REVIEWING"
+    QUALITY_REVIEWED = "QUALITY_REVIEWED"
+    REPLY_READY = "REPLY_READY"
+    COMPLETED_REVISION = "COMPLETED_REVISION"
+    # Read compatibility for states written by the first recovery implementation.
     RESEARCH_DISPATCHED = "RESEARCH_DISPATCHED"
     RESEARCH_RESULTS_COLLECTED = "RESEARCH_RESULTS_COLLECTED"
-    REPORT_INTEGRATING = "REPORT_INTEGRATING"
-    QUALITY_REVIEWING = "QUALITY_REVIEWING"
-    COMPLETED_REVISION = "COMPLETED_REVISION"
 
 
 class ResearcherWorkflowState(BaseModel):
@@ -59,6 +72,15 @@ class ResearcherWorkflowState(BaseModel):
     collected_sources: list[dict[str, Any]] = Field(default_factory=list)
     research_report: dict[str, Any] | None = None
     review_result: dict[str, Any] | None = None
+    human_evidence_decision: HumanEvidenceDecision | None = None
+    human_evidence_decision_history: list[HumanEvidenceDecision] = Field(
+        default_factory=list
+    )
+    accepted_evidence_gaps: list[AcceptedEvidenceGap] = Field(default_factory=list)
+    human_evidence_integrity_repairs: list[HumanEvidenceIntegrityRepairRecord] = Field(
+        default_factory=list
+    )
+    evidence_revision_plan: EvidenceRevisionPlan | None = None
     completed_agents: list[str] = Field(default_factory=list)
     failed_agents: list[str] = Field(default_factory=list)
     revision_count: int = Field(default=0, ge=0)
@@ -88,6 +110,14 @@ class ResearcherWorkflowState(BaseModel):
         return {
             "research_report": self.research_report,
             "quality_review": self.review_result,
+            "human_evidence_decision": (
+                self.human_evidence_decision.model_dump(mode="json")
+                if self.human_evidence_decision is not None
+                else None
+            ),
+            "accepted_evidence_gaps": [
+                item.model_dump(mode="json") for item in self.accepted_evidence_gaps
+            ],
             "deliberation_sent": self.deliberation_sent,
             "external_revision_count": self.external_revision_count,
             "external_revision_reply_sent": self.external_revision_reply_sent,

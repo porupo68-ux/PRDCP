@@ -1,0 +1,236 @@
+PRDCP Debug Report
+
+ID: 025
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Playwright / Script Production / Delivery Recovery
+Agent: playwright.manager / playwright.scriptwriter
+Error Class: PROVIDER / CHECKPOINT / RESERVATION / IDEMPOTENCY / RECOVERY
+
+1. 発生した症状
+
+Human Selection後に`--playwright --provider openrouter --safe-mode`を実行したところ、Narrative Architectは正常完了し、
+ScriptwriterのOpenRouter応答本文が完了前に中断された。workflowはFAILED、Narrative Blueprintは保存済み、Script Draft以降は未生成、
+Deliveryは未作成となった。Error PMPは`RetryableAgentError`、`automatic_retry_allowed=false`を保持し、自動retryは0だった。
+
+2. 発生地点
+
+- workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+- request message: 41efbac9-e773-4c12-92f9-3ec6973fc518
+- error message: 54b0cac8-0aa4-4a88-9781-a02f0b657d1e
+- failed agent: playwright.scriptwriter
+- model: ~anthropic/claude-sonnet-latest
+- saved messages: 5
+- saved completed agents: playwright.narrative_architect
+- legacy reservation: playwright.scriptwriter
+- Playwright state SHA-256: 1A3E7EE18C9677EC6250EA0FC25A4CA48AB4B722DADBBC915EFE4B1F1CD18BC2
+
+3. 再現条件
+
+- Playwright専門AgentのProvider応答が、生成・課金済みか判定できない通信境界で中断する。
+- Demo Safe Modeによりautomatic retryは行われない。
+- 旧Playwright task payloadにtask_idがなく、共通Provider境界がAgent IDをreservation task IDとして使用する。
+- Playwright Managerに`recover()`、one-shot retry authorization、該当CLIが存在しない。
+- `start()`は既存FAILED stateをそのまま返すため前進せず、手動再実行も旧reservationにより遮断される。
+
+4. 根本原因
+
+Playwrightだけが、同じAgentの異なる初回・内部Revision・上流Revisionを区別するLogical Task Identityと、課金済み可能性のある
+失敗を明示的に一度だけ再送する制御面を持っていなかった。Stateには正常なNarrative checkpointと相関済みError PMPがある一方、
+Managerは「保存済み成功を再利用する」「未回答要求は再送しない」「失敗taskだけ新しい監査済みidentityで一回再送する」を
+表現できなかった。したがって障害復旧の唯一の安全な操作がCLIとして欠落していた。
+
+5. なぜ既存テストで発見できなかったか
+
+既存Playwright failure testはFAILEDとDelivery未生成だけを確認し、その後のRecoverを試していなかった。Revision testもAgent call回数は
+確認したが、PMP task_idとreservation identityを検査しなかった。Mockの標準NarrativeはCTA/CONTEXTを生成しないため、Realで保存された
+全10 section typeを使うexact-state recoveryも未検証だった。
+
+6. 計画書との照合後に採用した修正計画
+
+1) 4専門段階へ`stage + upstream_revision_count + revision_count`の決定的task_idを付ける。
+2) 旧checkpointはAgent ID reservationをinitial cycleだけread compatibilityとして認める。
+3) `recover(workflow_id)`でHandoff、workflow、Final Conclusion hash、Production Context、各artifact依存IDを検証する。
+4) PMPへ保存済みの正常Resultをreservationと親子相関後に復元し、Provider call 0でcheckpointへ昇格する。
+5) 未回答request、壊れたPMP相関、再利用不能な既存exchangeは自動redispatchせず停止する。
+6) Retryable/contract/persisted validation failureだけ、共通ProviderRetryAuthorizationStoreで一回認可する。
+7) retry taskは元taskに`_operator_retry_1`を付け、認可をProvider call直前のreservation作成時に消費する。
+8) `resume()`は新Conclusion Handoff専用のまま変更せず、障害復旧を`--playwright-recover`、明示再送を
+   `--playwright-provider-retry`へ分離する。
+9) Static、Unit、Targeted、Integration、Fault、exact production clone Mockを通過後だけproductionへ反映する。
+10) productionでは保存済みNarrativeを再利用し、Scriptwriterの一回明示Retryと未完了下流段階だけを実行する。
+
+7. 実装内容
+
+- Playwright 4 Task schemaへ必須task_idを追加した。
+- Playwright Managerへ決定的task identity、checkpoint検査、saved Result復元、unanswered/correlation guardを追加した。
+- 共通one-shot authorization ledgerとreservation消費規約をPlaywrightへ適用した。
+- legacy `playwright.<agent>` reservationをupstream=0/revision=0に限って互換読込できるようにした。
+- checkpoint以降だけを無効化し、正常な前段artifactとcompleted agentを保持するようにした。
+- CLIへ`--playwright-recover`と`--playwright-provider-retry`を追加した。
+- injected Providerのreservation rootをManagerのdata_dirへ束縛し、隔離Integration testが既定storageへ逸脱しないようにした。
+- Mock Script fixtureをNarrativeSectionType全値（CONTEXT/CTAを含む）へ対応させた。
+- Playwright Manager RDを1.0.1へ更新し、recovery/retry境界を機械可読契約として追加した。
+- READMEへResume / Recover / Provider Retryの責務差を記載した。
+
+8. 変更ファイル
+
+- playwright/manager.py
+- playwright/schemas/narrative_blueprint.py
+- playwright/schemas/script_draft.py
+- playwright/schemas/citation_manifest.py
+- playwright/schemas/visual_plan.py
+- cli_app/arguments.py
+- cli_app/commands.py
+- runtime.py
+- providers/mock/playwright_fixtures.py
+- role_definitions/playwright/manager.json
+- tests/unit/test_playwright_manager.py
+- tests/unit/test_maintainability.py
+- tests/unit/test_rd_loader.py
+- README.md
+- debug_reports/025_playwright_checkpoint_recovery_and_operator_retry.txt
+- debug_reports/debug_summary.txt
+
+9. 修正の設計上の意味
+
+Agent IDは「誰が処理するか」、Logical Task IDは「どのworkflow段階・revisionの処理か」を示し、同義ではない。今回の修正で
+Playwrightも他の回復対応Layerと同じく、同じAgentの正当な別cycleと同じ論理taskの危険な二重実行を区別できる。
+
+Recoverはretryではない。まず保存済みResultを検証・昇格し、呼出し済みか不明なrequestは停止する。Provider再送が必要な場合だけ、
+Operatorが元Error PMPと元reservationに紐づく一回性authorizationを作る。この分離により、Narrativeなど正常な高コスト成果物を
+再生成せず、同じ論理taskを無条件再送せず、事故後の操作をCLIと監査台帳から追跡できる。
+
+10. 他Layerへの影響
+
+- Producer / Researcher / Deliberation / Conclusionのstate、schema、checkpoint、outboxは変更しない。
+- Conclusion HandoffとHuman Selectionは不変であり、Playwrightはfinal conclusionを変更しない。
+- Researcher、Deliberation、Conclusionは既にone-shot provider retryを持ち、今回Playwrightを同じ共通Storeへ統一した。
+- Producerは上流checkpointを持たない開始Layerであり今回の保存workflow復旧範囲外だが、将来Producer途中checkpoint recoveryを
+  導入する場合は同じLogical Task/one-shot authorization規約を適用する。
+- runtimeのinjected Provider束縛はMock/Testのstorage隔離を正すもので、通常build_providerは従来から同じrootを設定済みである。
+
+11. 同系統Failure Mode監査
+
+- Researcher: 外部Quality Reviewのtask固有one-shot retryあり。
+- Deliberation: Manager統合 / Quality Reviewを含むcheckpoint recoveryとone-shot retryあり。
+- Conclusion: 全4段階の決定的task、saved Result recovery、one-shot retry、contract repairあり。
+- Playwright: 今回4段階すべてへ決定的task/recover/one-shot retryを追加。
+- 初回 / internal revision / upstream revisionでPlaywright task IDが変わることを回帰テスト化。
+- operator retryの再retry、非retryable error、認可なしrecover、未回答request、壊れたtask correlationをcall 0で拒否。
+- saved Resultとreservation/parent/依存artifact IDが一致する場合だけ無再送復元。
+- delivery、final package、validationは失敗段階以降だけ再構築し、Final Conclusion hash不一致は早期停止。
+
+12. Regression Test
+
+- Scriptwriter interruption後、認可なしrecoverはProvider call 0で停止。
+- 一回retry後、Narrative 1、Scriptwriter 2（元失敗+retry）、Citation 1、Visual 1でCOMPLETED。
+- retry requestは`playwright_script_upstream_0_revision_0_operator_retry_1`。
+- legacy Agent ID reservationも一回だけretry可能。
+- retry済みtaskの再retryを拒否。
+- saved Script resultのstate反映失敗はProvider call 0で復元。
+- unanswered requestはredispatchしない。
+- task correlation改ざんはProvider call 0で拒否。
+- internal revisionのScript taskがrevision_0とrevision_1で一意。
+- Mock fixtureはNarrativeSectionType全値を処理可能。
+- CLI mutual exclusionと新オプションを検査。
+- Playwright Manager RD 1.0.1 recovery contractを検査。
+
+13. Mock / Fault Injection / Recovery
+
+Targeted Fault:
+- RetryableAgentError / automatic retry falseをScriptwriter初回へ注入。
+- FAILED時にNarrative保存、Script未保存、Delivery未生成を確認。
+- plain recoverは追加call 0。
+- explicit retryはNarrative再実行0、Script retry 1、Citation 1、Visual 1でDelivery完成。
+
+Saved Result checkpoint fault:
+- Script Result PMP保存後・state artifact反映前を注入。
+- reservation、request/result親子、Narrative依存IDを照合し、Provider call 0でCOMPLETED。
+
+Exact production clone:
+- production stateとlegacy Scriptwriter reservationだけを隔離領域へコピーした。
+- plain recover: exit 1、status FAILED、messages 5、reservation 1のまま。
+- explicit Mock retry: status COMPLETED、messages 5 -> 12、Narrative byte-equivalent、Delivery 6。
+- requests: Script 1 retry、Citation 1、Visual 1。Narrative request追加0。
+- reservations: legacy original、operator retry、citation、visualの4件。duplicate 0。
+
+14. Validation Ladder
+
+- Compile / Static: PASS
+- New targeted recovery/fault tests: 8 PASS
+- Related Playwright/Safe Mode/CLI tests: 74 PASS
+- Full discovery: 404 PASS
+- Integration: included in full discovery, PASS
+- 22-root recursive strict Structured Output audit: PASS
+- Role Definitions: 31 RD STRICT PASS
+- Doctor Mock: READY
+- 5-layer Mock E2E Producer -> Delivery: PASS
+- Delivery artifacts: 6
+- Exact saved-state Mock recovery: PASS
+
+15. Provider Call数
+
+- Failure capture Real: Narrative Architect 1 success、Scriptwriter 1 interrupted。
+- Cycle 025 implementation/test additional Real: 0。
+- Exact production clone: Mock Scriptwriter 1、Citation 1、Visual 1、Narrative 0。
+- automatic retry: 0。
+- duplicate Provider call: 0。
+- planned production Real: Scriptwriter retry 1 + first-time Citation 1 + first-time Visual 1。
+
+16. API Cost
+
+Failure captureとplanned Realのusage/costはreservationへ保存されないためunknown。Cycle 025 implementation/testは$0。
+正常なNarrativeを再利用し、不要なNarrative再実行1回を防止した。
+
+17. Existing Workflowへの影響
+
+本報告のpre-deploy時点でproduction stateは変更していない。保存済みNarrative、Conclusion Handoff、Human Selection、
+Researcher/Deliberation/Conclusion成果物、旧reservationを保持する。deploy対象に`storage/data`を含めず、正規CLI実行時だけ
+authorization、retry reservation、Script/Citation/Visual Result、Final Package、Deliveryを追記・更新する。
+
+18. Remaining Risk
+
+Real Scriptwriterが再び通信/contract failureになる可能性は残る。一回retryが失敗した場合、再retryせず新Debug Cycleとして停止する。
+Scriptwriter成功後のCitationまたはVisualで新しいProvider/Schema/Validation failureが発生した場合も、その地点の保存checkpointから
+別Debug Cycleとして扱う。Producer途中checkpoint recoveryは将来の別設計課題であり、今回の既存workflow完走を阻害しない。
+
+19. Result
+
+PASS / NEW FAILURE CAPTURED。
+Production deployとDoctorを完了後、明示的一回OpenRouter Retryを実施した。保存済みNarrativeは再実行せず、
+Scriptwriter retry 1回とCitation初回1回は成功した。Visual初回1回は`z-ai/glm-4.5-air`について
+OpenRouter HTTP 404 `No endpoints found that can handle the requested parameters`で停止した。
+これはScript checkpoint recoveryの失敗ではなく、新しいモデル能力不一致Failure Modeであるため、
+同一モデルretryを行わずCycle 026へ移行した。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 通信エラーだけの局所patchで終わっていない
+[YES] Sibling Failureを全Layer横断監査した
+[YES] 他Layerへの影響を確認した
+[YES] Stateを確認した
+[YES] Checkpointとsaved Result復元を確認した
+[YES] Schemaとtask identityを確認した
+[YES] PMP相関を確認した
+[YES] Reservationとauthorizationを確認した
+[YES] Outbox / Deliveryを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full E2Eを最初から再実行せず、保存済みPlaywright checkpointから未完了段階だけを再開する。
+
+Production Real追記
+
+- OpenRouter calls: Scriptwriter operator retry 1、Citation 1、Visual 1、Narrative 0。
+- Scriptwriter/Citation: SUCCESS。
+- Visual: HTTP 404 capability mismatch、automatic retry 0。
+- State: FAILED、messages 11、Narrative/Script/Citation保存済み、Visual未保存、Delivery未生成。
+- 次工程: Cycle 026で能力不一致専用の別モデル一回復旧を設計・検証する。

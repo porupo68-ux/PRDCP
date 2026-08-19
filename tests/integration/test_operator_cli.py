@@ -28,6 +28,9 @@ class OperatorCliIntegrationTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("保存済みcheckpoint", result.stdout)
+        self.assertIn("--researcher-evidence", result.stdout)
+        self.assertIn("--researcher-accept-limitations", result.stdout)
+        self.assertIn("--researcher-revise", result.stdout)
 
     def test_default_e2e_output_is_concise_and_status_is_inspectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -35,6 +38,7 @@ class OperatorCliIntegrationTests(unittest.TestCase):
             env.update(
                 {
                     "PRDCP_PROVIDER": "mock",
+                    "PRDCP_RETRIEVAL_PROVIDER": "mock",
                     "PRDCP_DATA_DIR": temporary_dir,
                     "DISCORD_BOT_TOKEN": "",
                 }
@@ -58,6 +62,7 @@ class OperatorCliIntegrationTests(unittest.TestCase):
             self.assertLess(len(result.stdout.splitlines()), 100)
             self.assertNotIn('"message_history"', result.stdout)
             self.assertIn("[Playwright] COMPLETED", result.stdout)
+            self.assertIn("Mock Human Evidence Decision", result.stdout)
 
             workflow_paths = list(
                 (Path(temporary_dir) / "workflows" / "playwright").glob("*.json")

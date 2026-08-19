@@ -13,6 +13,7 @@ from discord_app.commands import (
 )
 from discord_app.message_formatter import format_researcher_result, format_researcher_status
 from providers.mock_provider import MockModelProvider
+from researcher.schemas.human_evidence import HumanActorSource, HumanEvidenceDecisionType
 from runtime import build_producer_researcher_managers
 
 
@@ -44,6 +45,13 @@ class ProducerResearcherIntegrationTests(unittest.TestCase):
                     researcher_manager,
                     workflow_id=producer_state.workflow_id,
                 )
+            )
+            self.assertEqual(research_state.status, "WAITING_HUMAN_EVIDENCE_REVIEW")
+            research_state = researcher_manager.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
             )
             self.assertEqual(producer_state.status, "COMPLETED")
             self.assertEqual(research_state.status, "COMPLETED")
@@ -80,6 +88,9 @@ class ProducerResearcherIntegrationTests(unittest.TestCase):
                 "evidence_quality_assessments",
                 "research_limitations",
                 "unresolved_questions",
+                "human_evidence_decision",
+                "accepted_evidence_gaps",
+                "human_evidence_integrity_repairs",
             }
             self.assertFalse(required - payload.keys())
             self.assertTrue(

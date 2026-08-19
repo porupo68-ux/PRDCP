@@ -54,17 +54,26 @@ def general_opinion(input_data: dict) -> dict:
         statement = "生成AIの普及により、多くの人間の仕事が失われる"
     else:
         statement = f"{title}は社会へ大きな影響を与えるという見方が広く共有されている"
+    retrieved = input_data.get("retrieval_context", {}).get("sources", [])
+    supporting_sources = [
+        {
+            "source_id": item["source_id"],
+        }
+        for item in retrieved[:3]
+    ]
+    if len(supporting_sources) < 3:
+        supporting_sources = [
+            {"source_id": "source_mock_news", "source": "mock-news", "url": "https://example.invalid/mock/news"},
+            {"source_id": "source_mock_video", "source": "mock-video", "url": "https://example.invalid/mock/video"},
+            {"source_id": "source_mock_social", "source": "mock-social", "url": "https://example.invalid/mock/social"},
+        ]
     return {
         "general_opinion": {
             "general_opinion_id": new_id("opinion"),
             "statement": statement,
             "confidence": 0.75,
             "evidence_summary": "ニュース、動画、SNSで繰り返し見られる主張をモックとして整理",
-            "supporting_sources": [
-                {"source": "mock-news", "url": "https://example.invalid/mock/news"},
-                {"source": "mock-video", "url": "https://example.invalid/mock/video"},
-                {"source": "mock-social", "url": "https://example.invalid/mock/social"},
-            ],
+            "supporting_sources": supporting_sources,
         }
     }
 

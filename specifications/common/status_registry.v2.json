@@ -30,6 +30,29 @@
       "stable",
       "draft",
       "deprecated"
+    ],
+    "workflow_status": [
+      "CREATED",
+      "RUNNING",
+      "DISPATCHING",
+      "COLLECTING",
+      "INTEGRATING",
+      "GENERATING_POSITIONS",
+      "EVALUATING_POSITIONS",
+      "INTEGRATING_DECISION",
+      "WAITING_AGENT",
+      "REVIEWING",
+      "REVISING",
+      "WAITING_UPSTREAM_REVISION",
+      "WAITING_HUMAN_EVIDENCE_REVIEW",
+      "WAITING_HUMAN_SELECTION",
+      "FINALIZING",
+      "PARTIALLY_COMPLETED",
+      "APPROVED",
+      "COMPLETED_REVISION",
+      "COMPLETED",
+      "BLOCKED",
+      "FAILED"
     ]
   }
 }

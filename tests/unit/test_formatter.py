@@ -1,9 +1,25 @@
 import unittest
 
-from discord_app.message_formatter import format_researcher_sources, split_message
+from discord_app.message_formatter import format_researcher_sources, format_status, split_message
+from producer.state import ProducerWorkflowState
 
 
 class MessageFormatterTests(unittest.TestCase):
+    def test_failed_producer_does_not_list_pending_agents_as_completed(self):
+        state = ProducerWorkflowState(
+            workflow_id="workflow-failed",
+            initial_request={"topic": "test"},
+            status="FAILED",
+            completed_agents=[],
+            error={"message": "provider failure"},
+        )
+        text = format_status(state)
+        completed_section = text.split("Completed:\n", 1)[1].split("\n\nCurrent:", 1)[0]
+        self.assertEqual(completed_section, "(none)")
+        self.assertIn("Pending:", text)
+        self.assertIn("· Topic Scout", text)
+        self.assertNotIn("✓ Topic Scout", text)
+
     def test_long_json_code_block_is_split_into_valid_code_blocks(self):
         text = "```json\n" + ("{\"value\": 1}\n" * 300) + "```"
         chunks = split_message(text, limit=300)

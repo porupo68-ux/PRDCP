@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "conclusion_manager_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.6",
     "status": "stable",
     "agent_identity": {
       "agent_id": "conclusion.manager",
@@ -883,6 +883,11 @@
     },
     "_design_notes": {
       "stable_decisions": [
+        "Conclusion Packageは、Decision Integrationでviableとされた全候補を保持する。primary recommendation以外は、保存済みcomparison summary、conditional advantage、sensitivity analysisだけを用いてalternativesへ決定論的にmaterializeし、欠落したままdeterministic validationを通過させない。Quality ReviewerがこのManager所有artifactの欠落だけを指摘した場合は、通常のrevision上限を変更せず、同一revision epochにつき一回だけ、専門Agentを再実行しない監査済みManager repairと独立Quality Review taskを許可する。",
+        "All OpenRouter Structured Output calls require endpoint parameter support. After both the original call and its one operator retry return a contract-invalid billed response, only one separately authorized provider-contract-repair task may use an explicitly different model; it must keep its own deterministic task ID and reservation while reusing valid checkpoints.",
+        "A successfully Pydantic-validated provider-contract-repair result becomes an auditable provider-agent-output-schema compatibility binding. Future logical tasks may reuse that compatible model only while the configured model exactly matches the verified incompatible model; explicit model overrides and changed configuration take precedence.",
+        "Conclusion Structured Output is accepted only after request-bound canonical reference enums and input-aware canonical reference validation. For a trace-only saved review, the Manager revalidates persisted artifacts and begins an explicit Safe Mode revision at the earliest invalid producer instead of replaying valid predecessors. An explicit revision may consume each configured revision slot exactly once; automatic revision remains blocked by Safe Mode. A billed invalid_payload may be recovered without a Provider call only when an audited adapter removes unknown elements from explicit reference arrays and the complete result then passes schema, task, checkpoint, and canonical-reference validation.",
+        "Every Provider call uses a deterministic logical task ID and persistent reservation. Recovery reuses valid upstream checkpoints. An ambiguous or contract-invalid billed response may be retried only once through a distinct persisted operator authorization and retry task ID.",
         "Conclusion ManagerはConclusion層のオーケストレーションを担当する",
         "立場生成、評価、最終統合および品質審査を専門Agentへ分離する",
         "ConclusionはDeliberation ResultとResearcher Evidenceに拘束される",

@@ -1,0 +1,133 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 004
+Date: 2026-08-16
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher
+Agent: researcher.quality_reviewer
+Error Class: RECOVERY CONTROL / PROVIDER RETRY AUTHORIZATION
+
+1. 何が起きたか
+
+Cycle 003のOpenRouter Quality Reviewは、Structured Outputの生成途中にConnectionResetErrorで切断された。PRDCPはこれをRetryableAgentErrorとして正しく保存し、Demo Safe Modeにより自動retryを0回で停止した。一方、既存reservationを残したまま、運用者が同じcheckpointから一度だけ明示的に再送する安全な操作が存在しなかった。
+
+2. なぜ起きたか
+
+従来のSafe Mode reservationは「同一workflow・provider・logical taskの二重呼び出しを禁止する」責務だけを持っていた。外部Providerの一時障害後に、元の試行を消去せず、誰が・どのerrorに対して・何回目の再送を許可したかを永続化する制御面が未実装だった。通常の--researcher-resumeを再実行すると同じtask IDが選ばれ、既存reservationが安全に遮断するため、可用性と二重実行防止を両立する明示経路が必要だった。
+
+3. Cycle 004改修計画とv2照合
+
+計画A: RetryableAgentError、FAILED/QUALITY_REVIEWING、保存済みrequest/error相関、元reservationの存在をすべて確認してから再送を承認する。
+v2照合: Schema/PMP/Checkpoint/Reservationを無効化せず、Failure Captureからの局所Recoveryとするため適合。
+
+計画B: 元task/reservationを変更・削除せず、<original_task>_operator_retry_1という決定的な別taskと、PENDING/CONSUMEDの承認台帳を追加する。
+v2照合: Provider二重実行禁止、監査可能性、保存済み結果再利用、破壊的Storage Migration禁止に適合。
+
+計画C: 共通StructuredAgentのProvider呼び出し直前で承認を検証・消費し、再送の再送、非Retryable障害、Safe Mode OFF、承認なしretry taskを拒否する。
+v2照合: 層固有の抜け道ではなく全Agent共通のFail Closed境界で同系統Failure Modeを防ぐため適合。
+
+計画D: Researcher Managerは外部Revisionの保存済みTask、14件のResult、統合済みReportを再利用し、Quality Reviewerだけを再実行する。CLIに--researcher-provider-retryを追加する。
+v2照合: 最小checkpoint再開とReal API費用最小化に適合。
+
+計画E: Static Check、Unit、Targeted Regression、Integration、Mock Recovery、Fault Injection、Mock E2Eを完了後に限り、一回のReal Retryを実行する。
+v2照合: 計画書の検証ラダーおよびDebug Cycle自己監査に適合。
+
+4. どう直したか
+
+common/provider_retry.pyにProviderRetryAuthorizationStoreを追加した。承認はworkflow、provider、agent、元task、元error messageを一意に結び、PENDINGからCONSUMEDへの一方向遷移だけを許可する。元reservationとretry reservationは両方保持する。
+
+common/agents/base.pyの共通Provider境界は、_operator_retry_1 taskを受け取るとPENDING承認を要求する。新しいreservationを排他的に保存した後、Provider呼び出し前に承認をCONSUMEDへ遷移する。二つ目のプロセスは排他的reservationで遮断される。
+
+Researcher Managerは現在のQuality Reviewer ERROR PMPと親TASK PMPを検証し、RetryableAgentErrorだけを承認する。再開時は承認済みretry taskを選び、保存済みReviewがあればProviderを呼ばず再利用する。CLIの--researcher-provider-retryはDemo Safe Mode ONを必須とする。
+
+5. システム設計上の意味
+
+reservationは「Providerへ送る意思を一度記録した」という事実、authorizationは「その失敗に対して運用者が一回だけ追加試行を許可した」という別の事実になった。障害復旧のために監査証跡を削除する必要がなくなり、安全性、可用性、追跡可能性を同時に維持できる。Provider呼び出し直前の共通境界で強制するため、将来ほかのLayerが同じ明示retry方式を採用してもLayer側の条件漏れだけで二重実行されない。
+
+6. 同系統Failure Mode監査
+
+- 同じ承認の再利用: CONSUMEDにより拒否。
+- retryのretry: task suffix検査により拒否。
+- 非Retryable error: error_class検査により拒否。
+- 親requestが異なるerror: PMP message_id/parent_message_id/routing/task_id相関により拒否。
+- provider namespace違い: 元reservationとprovider_id照合により拒否。
+- 二プロセス同時実行: retry reservationの排他的作成により一方だけが進む。
+- 承認保存後のプロセス中断: PENDING承認を再利用し、Manager再作成後もcheckpointから続行。
+- reservation後・Provider前の中断: CONSUMEDかつreservation保持でFail Closed。同一callの重複可能性を作らない。
+- Provider応答後・state保存前の中断: retry reservationを保持し、同じtaskの再送を禁止。保存済みReviewがある場合だけ再利用する。
+
+7. State / PMP / Schema / Checkpoint / Reservation / Outbox影響
+
+State: 新しいworkflow schema fieldは追加していない。既存JSONのmigrationは不要。
+PMP: 元ERRORと親TASKの相関を読取検証する。既存messageを変更しない。retryは新しいTASK/responseとして追記する。
+Schema: OpenRouterへ送る22 root schemaおよびstrict変換は変更していない。既存strict監査59件を通過。
+Checkpoint: QUALITY_REVIEWINGから再開し、完了済みspecialist/result/reportを再利用する。
+Reservation: 元ファイルを保持し、新しいretry task用ファイルを追加する。
+Outbox: Review承認後の通常経路だけがresearch_revision_resultを生成する。再送前には変更しない。
+
+8. Regression / Recovery / Fault Injection結果
+
+Compile: PASS
+Unit: 265 PASS（隔離data dir）
+Integration: 9 PASS（UTF-8 subprocess環境）
+Strict Schema / RD / OpenRouter / Safe Mode targeted: 59 PASS
+Cycle 004 targeted: Provider retry store 4 PASS、Researcher recovery/fault 3 PASS
+Mock CLI E2E: Producer → Researcher → Deliberation → Conclusion選択 → Playwright delivery PASS
+
+Fault Injection 1: Quality ReviewerだけConnectionReset相当のRetryableAgentErrorを一回注入。保存済みspecialist resultを再利用し、retry taskだけ1 callでCOMPLETED_REVISION。
+Fault Injection 2: 承認PENDING後にManagerを再作成し、stateをREVIEWINGとして再開。承認IDを維持して完了。
+Fault Injection 3: 明示retryにもRetryableAgentErrorを注入。二回目の明示retryを拒否し、Provider call数が増えないことを確認。
+Fault Injection 4: 非Retryable error、承認なしretry、消費済み承認、retry-of-retryを拒否。
+
+9. テスト環境で発見した事項
+
+Unit初回実行では、一部既存テストがプロジェクト共通のSafe Mode reservation領域を参照し、以前のテストreservationを正しく重複として検出した。予約ガードを弱めず、テストdata dirを隔離して再実行し265件すべてPASSを確認した。Researcher test helperもprovider reservation rootを各TemporaryDirectoryへ固定した。
+
+10. Provider Call数とCost
+
+Cycle 004 Real API Calls: 1（Quality Reviewerのみ）
+Mock/Fault Provider Calls: 自動テスト内のみ
+Automatic Real Retries: 0
+Researcher specialist Real Calls: 0
+Duplicate Real Calls: 0
+API Cost: OpenRouter応答にcost情報が露出していないため不明
+
+11. Real Retry実行条件
+
+[PASS] provider=openrouter
+[PASS] Demo Safe Mode ONを維持
+[PASS] 現在のerror_classはRetryableAgentError
+[PASS] current checkpointはQUALITY_REVIEWING
+[PASS] 元taskはresearch_quality_review_external_1_contract_v2
+[PASS] 元reservationを保持
+[PASS] specialist result 14件と統合Reportを再利用可能
+[PASS] 追加callはQuality Reviewer 1回だけ
+
+12. Real Retry結果
+
+PASS - --researcher-provider-retryをprovider=openrouter / Demo Safe Mode ONで一回だけ実行した。Structured Output、PMP、Schema validationは通過し、ResearchQualityReviewOutputを正常保存した。承認はCONSUMED、retry reservationは保持され、自動retry 0、specialist再実行0、14件の保存済みResultと37-source Reportを再利用した。
+
+Reviewer判断はrevision_requiredで、Researcher stateはBLOCKED / QUALITY_REVIEWEDとなった。これはProvider障害ではなく正当な品質判定である。指摘は初期Mockソース7件の実Report混在、POLITICIAN/NEWSの誤分類・実カバレッジ不足、重複Source統合、limitations/cross-source observations整理である。次の処理は同じReviewの再送ではなく、Debug Cycle 005としてMock成果物混在と分類契約を修正し、必要な最小revisionを明示実行する。
+
+13. Remaining Risk
+
+OpenRouterまたは上流model gatewayが再び切断した場合、Cycle 004は設計どおり二回目を自動・手動とも許可しない。その場合は外部Provider停止条件として報告し、reservationやauthorizationの削除で迂回しない。また、Quality Reviewがrevision_requiredを返すことはProvider障害ではなく品質判断であり、次の既存Revision/Researcher Return経路で扱う。
+
+14. Result
+
+PASS - ONE EXPLICIT OPENROUTER RETRY COMPLETED; QUALITY REVISION ROUTED TO CYCLE 005
+
+Plan Compliance Review
+
+[YES] Root Causeまで特定した
+[YES] 局所的に既存reservationを削除していない
+[YES] 同系統Failure Modeを共通Provider境界で監査した
+[YES] 他Layerが共通境界を利用することを確認した
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outbox影響を確認した
+[YES] Regression Testを追加した
+[YES] RecoveryとFault条件を検証した
+[YES] Debug Reportを生成した
+[YES] 修正の設計上の意味を説明した
+[YES] Real API前に検証ラダーを完了した
+[YES] 不必要なProvider呼び出しを行っていない
+[YES] v2計画書を再確認し、局所E2E再開だけを予定した

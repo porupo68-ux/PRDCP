@@ -1,0 +1,151 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 014
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation -> Conclusion (plus sibling audit: Conclusion -> Playwright)
+Agent: deliberation.quality_reviewer / conclusion.manager / conclusion.quality_reviewer / playwright.manager
+Failure Stage: Conclusion handoff validation before the first Conclusion Provider call
+Error Class: SCHEMA CONTRACT / PMP HANDOFF / MOCK DRIFT
+
+1. What happened
+
+After Cycle 013 completed Deliberation and persisted its Conclusion outbox, the localized CLI command `--conclusion` stopped immediately with `Deliberation Result is not Conclusion-ready`. No Conclusion state was created and no Conclusion Provider call occurred.
+
+The persisted Quality Review is approved_with_conditions, has no blocking finding IDs, and reports conclusion_readiness=ready_with_conditions. That is the exact lowercase value required by the Deliberation Quality Reviewer RD.
+
+2. Root cause
+
+The same inter-layer field had three conflicting contracts:
+
+- Deliberation Quality Reviewer RD: lowercase ready / ready_with_conditions / not_ready / undetermined
+- Deliberation Pydantic schema: unconstrained string
+- Conclusion handoff validator and Mock fixture: uppercase READY / READY_WITH_CONDITIONS / NOT_READY
+
+Because the schema was only `str`, OpenRouter was free to follow the RD. Because Mock emitted uppercase, regression tests exercised only the receiver's accidental uppercase convention. The real response was valid according to the RD but rejected by Conclusion.
+
+This is not an Evidence shortage, Provider failure, or bad Quality Review decision. It is a cross-layer type contract failure.
+
+3. Cycle 014 plan and v2 comparison
+
+Plan A: make the RD lowercase values the canonical Pydantic enum and OpenRouter Structured Output contract.
+v2 comparison: preserves Role Definition authority and strengthens Schema rather than weakening validation.
+
+Plan B: accept legacy uppercase values only through read-time normalization. Do not migrate or rewrite saved JSON.
+v2 comparison: preserves existing checkpoints and satisfies non-destructive Recovery.
+
+Plan C: type the nested DeliberationResult quality_review and parse the duplicate top-level review at the Conclusion boundary. Reject disagreement between copies.
+v2 comparison: preserves PMP handoff compatibility while adding fail-closed cross-copy integrity.
+
+Plan D: audit the sibling Conclusion -> Playwright readiness boundary before resuming E2E.
+v2 comparison: follows the systemic-repair rule. The sibling had the same RD-lowercase / schema-uppercase / Mock-uppercase drift and was repaired in the same way.
+
+Plan E: Static -> targeted Unit/Fault -> full Unit -> Integration -> full Mock E2E -> exact saved handoff Mock replay -> localized Real Conclusion continuation.
+v2 comparison: matches the required validation ladder and minimizes Real calls.
+
+4. Implementation
+
+- Added Deliberation ConclusionReadiness with canonical lowercase values.
+- Added Conclusion PlaywrightReadiness with canonical lowercase values, including RD-defined not_applicable.
+- Added read adapters that normalize old uppercase checkpoint values in memory only.
+- Added decision/readiness consistency validators. An approved review must be ready; a revision_required or blocked review cannot be ready.
+- Changed DeliberationResult.quality_review from a free dictionary to DeliberationQualityReviewOutput.
+- Conclusion now validates both nested and top-level Deliberation Quality Review copies and rejects disagreement.
+- Conclusion's Playwright handoff validates both copies of Conclusion Quality Review, readiness, blocking IDs, and approval before writing the outbox.
+- Playwright parses the typed Conclusion review, supports legacy uppercase read compatibility, and routes invalid or mismatched handoffs upstream before any Playwright Agent call.
+- Updated both Mock fixtures to emit the actual RD lowercase contract.
+- Advanced the Deliberation Quality Reviewer RD to 1.0.3 and Conclusion Quality Reviewer RD to 1.0.1, with explicit compatibility notes.
+- README now documents the canonical inter-layer readiness values and non-destructive legacy behavior.
+
+5. Same-family failure-mode audit
+
+- Deliberation -> Conclusion: repaired and typed.
+- Conclusion -> Playwright: same drift found and repaired before a Real failure.
+- Conclusion's own schema already typed its readiness field; only the enum values conflicted with the RD.
+- Playwright final delivery_readiness is an internal Manager final-gate output, not a duplicated upstream Quality Review contract; no corresponding cross-layer enum mismatch was found.
+- Producer and Researcher quality decisions are typed and their downstream routing compares the same lowercase status values.
+- All 22 OpenRouter output roots remain recursively strict after adding both enums.
+
+6. Why Mock did not detect it
+
+Mock was written to the receiver implementation's uppercase convention instead of the source RD. Therefore Mock and the consumer agreed with each other while both disagreed with the OpenRouter prompt. The fixtures now emit RD-canonical lowercase values. Legacy uppercase has separate compatibility tests so the compatibility path cannot become the new generation contract.
+
+7. Regression / Fault / Recovery results
+
+- Targeted Deliberation/Conclusion/Playwright/schema suite: 93 PASS (98.806s)
+- Full Unit suite: 317 PASS (256.318s, isolated short data path)
+- Full Integration suite: 9 PASS (24.917s)
+- Role Definitions: 31 loaded in STRICT mode
+- Structured Output 22-root recursive audit: PASS within Unit suite
+- Doctor provider=mock: READY
+- Full Mock CLI E2E Producer -> Delivery: PASS
+- Exact production Conclusion outbox, read-only boundary validation: PASS, provider calls 0
+- Exact production Conclusion outbox copied to isolated storage, Mock Safe Mode replay: WAITING_HUMAN_SELECTION
+
+Fault A: approved + not_ready is rejected before a Conclusion Provider call.
+Fault B: revision_required/blocked + ready is rejected by the source schema.
+Fault C: top-level and nested Deliberation Quality Review disagreement is rejected.
+Fault D: top-level and package Conclusion Quality Review disagreement produces an upstream revision route before any Playwright Agent call.
+Fault E: old uppercase READY / READY_WITH_CONDITIONS is normalized during read and accepted without rewriting storage.
+
+8. State / PMP / Schema / Checkpoint / Reservation / Outbox impact
+
+State: implementation and validation did not alter production state. The failed pre-fix Conclusion command created no Conclusion state.
+
+PMP: existing handoff shape remains unchanged. Duplicate Quality Review copies must now be semantically identical after normalization.
+
+Schema: both readiness fields are closed lowercase enums in the OpenRouter-visible schema. Every object remains strict.
+
+Checkpoint: all Producer, Researcher, and Deliberation checkpoints are reused. Conclusion starts from its existing outbox; no upstream stage is rerun.
+
+Reservation: no existing reservation is deleted or overwritten. Before the Real continuation, no Conclusion reservation exists for this workflow.
+
+Outbox: the production Conclusion outbox remains unchanged during implementation and all Mock/replay validation. Playwright outbox is written only after explicit human selection.
+
+Production hashes before deployment / Real continuation:
+
+- Deliberation state: F0B8A84868E656EE7172807424512EC265CC0BE612F2D87A66E52AFC7A72DD7D
+- Deliberation messages: 00840360578040317B1F2580874560F3D166EC1A3EDCA2CACC1686E9C90D8CDB
+- Conclusion outbox: 674D69A13D99CBB34A6FE705728947B2BEE896EDAF15CA85DB28581352BEBA58
+- Conclusion state exists: false
+
+9. Provider calls and cost
+
+Cycle 014 implementation / Unit / Integration / Mock / exact replay Real calls: 0
+Mock calls: unbilled
+Automatic retries: 0
+Prevented invalid downstream calls: Conclusion and Playwright fault cases stop before their layer's first call
+API cost before Real continuation: $0
+
+10. Design meaning
+
+A cross-layer readiness flag is a protocol type, not presentation text. The producing RD, provider-visible schema, Mock, persisted artifact, and receiving Manager must share one canonical representation. Compatibility belongs at the read boundary and must not redefine the generation contract. When a PMP payload duplicates an artifact for convenience, both copies must agree or the receiver cannot know which one is authoritative.
+
+11. Debug Cycle self-audit
+
+[YES] Root cause identified across RD, Schema, Mock, and consumer.
+[YES] No receiver-only uppercase patch.
+[YES] Sibling Conclusion -> Playwright failure audited and repaired.
+[YES] Producer / Researcher / Playwright final-gate boundaries checked.
+[YES] State, PMP, Schema, Checkpoint, Reservation, and Outbox impacts checked.
+[YES] Regression tests added.
+[YES] Mock Recovery and five Fault/compatibility conditions checked.
+[YES] Debug Report generated.
+[YES] Design meaning explained.
+[YES] No unnecessary Real Provider call.
+[YES] Existing workflow/storage not mutated during implementation and validation.
+[YES] E2E plan re-read after the Debug Cycle.
+
+12. Result / next action
+
+IMPLEMENTATION / MOCK / FAULT / REGRESSION / SAVED-HANDOFF REPLAY PASS
+
+Deploy only Cycle 014 code, RD, README, tests, and reports. Verify the three production hashes remain unchanged by deployment. Then run one localized Real Conclusion command from the existing handoff:
+
+py main.py --conclusion 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode
+
+Expected calls: Position Generator, Decision Evaluator, Decision Integrator, and Conclusion Quality Reviewer once each; every Producer, Researcher, and Deliberation call remains zero. The correct terminal state is WAITING_HUMAN_SELECTION. Human selection remains an explicit user gate before Playwright.
+
+13. Localized Real continuation result
+
+The one localized Real Conclusion command passed the repaired Deliberation -> Conclusion readiness boundary and reached conclusion.position_generator. One OpenRouter Position call was made; every upstream call remained zero and automatic retry remained zero. The Provider message content was then decoded by Python's permissive json.loads as the float `inf`, and Pydantic rejected that scalar as PositionGenerationResult. Conclusion stopped FAILED before Decision Evaluator. The original task reservation was preserved. This is a new Provider-response-contract and Conclusion-recovery Failure Mode, handled by Debug Cycle 015; it does not invalidate the Cycle 014 readiness repair.

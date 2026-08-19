@@ -13,6 +13,7 @@ from discord_app.commands import (
     run_researcher,
 )
 from providers.mock_provider import MockModelProvider
+from researcher.schemas.human_evidence import HumanActorSource, HumanEvidenceDecisionType
 from runtime import build_all_managers, build_playwright_manager
 
 
@@ -39,6 +40,12 @@ class PlaywrightIntegrationTests(unittest.TestCase):
             )
             producer_state = asyncio.run(run_producer(producer, topic="生成AIは人間の仕事を奪うのか"))
             asyncio.run(run_researcher(researcher, workflow_id=producer_state.workflow_id))
+            researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
             asyncio.run(run_deliberation(deliberation, workflow_id=producer_state.workflow_id))
             waiting = asyncio.run(run_conclusion(conclusion, workflow_id=producer_state.workflow_id))
             selected_id = waiting.position_candidates[0]["position_candidate_id"]
@@ -64,6 +71,12 @@ class PlaywrightIntegrationTests(unittest.TestCase):
             )
             producer_state = asyncio.run(run_producer(producer, topic="再起動テスト"))
             asyncio.run(run_researcher(researcher, workflow_id=producer_state.workflow_id))
+            researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
             asyncio.run(run_deliberation(deliberation, workflow_id=producer_state.workflow_id))
             waiting = asyncio.run(run_conclusion(conclusion, workflow_id=producer_state.workflow_id))
             conclusion.select(waiting.workflow_id, [waiting.position_candidates[0]["position_candidate_id"]])
@@ -72,6 +85,73 @@ class PlaywrightIntegrationTests(unittest.TestCase):
             state = asyncio.run(restarted.start(waiting.workflow_id))
             self.assertEqual(state.status, "COMPLETED")
             self.assertTrue(restarted.repository.load_final_package(waiting.workflow_id))
+
+    def test_accept_with_limitations_reaches_all_five_layers_without_turning_gap_into_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            settings = self.settings(data_dir)
+            provider = MockModelProvider(
+                researcher_review_decisions=["revision_required"]
+            )
+            producer, researcher, deliberation, conclusion, playwright = build_all_managers(
+                settings, provider=provider
+            )
+            producer_state = asyncio.run(
+                run_producer(producer, topic="Human Evidence Gate limitation propagation")
+            )
+            waiting_researcher = asyncio.run(
+                run_researcher(researcher, workflow_id=producer_state.workflow_id)
+            )
+            self.assertEqual(
+                waiting_researcher.status, "WAITING_HUMAN_EVIDENCE_REVIEW"
+            )
+            summary = researcher.inspect_human_evidence_gate(producer_state.workflow_id)
+            self.assertTrue(summary.evidence_sufficiency_findings)
+            completed_researcher = researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT_WITH_LIMITATIONS,
+                reason="Explicit Mock acceptance of unresolved evidence limitations",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
+            self.assertTrue(completed_researcher.accepted_evidence_gaps)
+            self.assertTrue(
+                all(
+                    not item.factual_support_confirmed
+                    for item in completed_researcher.accepted_evidence_gaps
+                )
+            )
+            deliberation_state = asyncio.run(
+                run_deliberation(deliberation, workflow_id=producer_state.workflow_id)
+            )
+            conclusion_waiting = asyncio.run(
+                run_conclusion(conclusion, workflow_id=producer_state.workflow_id)
+            )
+            selected_id = conclusion_waiting.position_candidates[0]["position_candidate_id"]
+            conclusion_state = conclusion.select(
+                producer_state.workflow_id, [selected_id]
+            )
+            playwright_state = asyncio.run(
+                run_playwright(playwright, workflow_id=producer_state.workflow_id)
+            )
+
+            self.assertEqual(deliberation_state.status, "COMPLETED")
+            self.assertEqual(conclusion_state.status, "COMPLETED")
+            self.assertEqual(playwright_state.status, "COMPLETED")
+            final = conclusion_state.final_conclusion
+            context = playwright_state.production_context
+            self.assertEqual(
+                final["human_evidence_decision"]["decision"],
+                "ACCEPT_WITH_LIMITATIONS",
+            )
+            self.assertEqual(
+                context["accepted_evidence_gaps"], final["accepted_evidence_gaps"]
+            )
+            self.assertTrue(
+                all(
+                    not item["factual_support_confirmed"]
+                    for item in context["accepted_evidence_gaps"]
+                )
+            )
 
 
 if __name__ == "__main__":

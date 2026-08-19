@@ -237,6 +237,160 @@ class RoleDefinitionLoaderTests(unittest.TestCase):
         )
         self.assertIn("self retryは不要ですが、Researcher returnは必要", prompt)
 
+    def test_conclusion_quality_gate_uses_runtime_decision_vocabulary(self):
+        path = BASE_DIR / "role_definitions" / "conclusion" / "quality_reviewer.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        role = document["role_definition"]
+
+        self.assertEqual(
+            role["configuration"]["approval_statuses"],
+            [
+                "approved",
+                "approved_with_conditions",
+                "revision_required",
+                "blocked",
+            ],
+        )
+        serialized = json.dumps(document, ensure_ascii=False)
+        self.assertNotIn('"rejected"', serialized)
+        self.assertNotIn("rejection_reason", serialized)
+
+    def test_conclusion_quality_prompt_has_exclusive_routing_table(self):
+        prompt = (
+            BASE_DIR / "conclusion" / "prompts" / "quality_reviewer.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("排他的な対応表", prompt)
+        self.assertIn("approved_with_conditions", prompt)
+        self.assertIn("revision_scope=deliberation_return", prompt)
+        self.assertIn("内部修正とDeliberation返送", prompt)
+
+    def test_conclusion_manager_rd_persists_verified_model_compatibility(self):
+        path = BASE_DIR / "role_definitions" / "conclusion" / "manager.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        serialized = json.dumps(document, ensure_ascii=False)
+
+        self.assertEqual(
+            document["role_definition"]["role_definition_version"],
+            "1.0.6",
+        )
+        self.assertIn("provider-agent-output-schema compatibility binding", serialized)
+        self.assertIn("configured model exactly matches", serialized)
+        self.assertIn("input-aware canonical reference validation", serialized)
+        self.assertIn("同一revision epochにつき一回だけ", serialized)
+        self.assertIn("専門Agentを再実行しない", serialized)
+
+    def test_playwright_manager_rd_requires_checkpoint_safe_operator_retry(self):
+        path = BASE_DIR / "role_definitions" / "playwright" / "manager.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        role = document["role_definition"]
+        recovery = role["runtime_contract"]["checkpoint_recovery"]
+
+        self.assertEqual(role["role_definition_version"], "1.0.4")
+        self.assertTrue(recovery["reuse_completed_stages"])
+        self.assertTrue(recovery["restore_validated_saved_result_before_redispatch"])
+        self.assertFalse(recovery["unanswered_request_redispatch_allowed"])
+        self.assertTrue(
+            recovery["provider_retry_requires_explicit_operator_authorization"]
+        )
+        self.assertEqual(recovery["operator_retry_limit_per_logical_task"], 1)
+        self.assertTrue(
+            recovery["provider_capability_failure_requires_distinct_model"]
+        )
+        self.assertEqual(
+            recovery["provider_capability_repair_limit_per_logical_task"],
+            1,
+        )
+        self.assertTrue(
+            recovery["verified_provider_agent_output_schema_binding_reuse"]
+        )
+        self.assertFalse(recovery["same_model_capability_retry_allowed"])
+        self.assertFalse(recovery["safe_mode_automatic_internal_revision_allowed"])
+        self.assertEqual(
+            recovery["safe_mode_explicit_revision_command"],
+            "--playwright-revise",
+        )
+        self.assertEqual(recovery["explicit_revision_cycles_per_command"], 1)
+        self.assertTrue(recovery["persist_revision_plan_before_provider_call"])
+        self.assertEqual(
+            recovery["recover_boundary"],
+            "failed_checkpoint_or_allowlisted_blocked_local_artifact",
+        )
+        self.assertEqual(
+            recovery["deterministic_repair_allowlist"],
+            ["CITATION_MAPPING_MISSING"],
+        )
+        self.assertEqual(recovery["deterministic_repair_limit"], 1)
+        self.assertFalse(recovery["deterministic_repair_consumes_revision_limit"])
+        self.assertFalse(recovery["deterministic_repair_provider_calls_allowed"])
+        self.assertFalse(recovery["deterministic_repair_retrieval_calls_allowed"])
+        self.assertTrue(recovery["deterministic_repair_requires_content_immutability"])
+        self.assertTrue(recovery["deterministic_repair_requires_idempotency"])
+
+    def test_position_generator_uses_decision_context_as_canonical_id_allowlist(self):
+        prompt = (
+            BASE_DIR / "conclusion" / "prompts" / "position_generator.md"
+        ).read_text(encoding="utf-8")
+        path = BASE_DIR / "role_definitions" / "conclusion" / "position_generator.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        role = document["role_definition"]
+
+        self.assertIn("Decision Contextを唯一のcanonical allowlist", prompt)
+        self.assertIn("full Deliberation payload", prompt)
+        self.assertIn("一字も変更せずコピー", prompt)
+        serialized = json.dumps(role, ensure_ascii=False)
+        self.assertIn("canonical allowlistに存在しないclaim_id", serialized)
+        self.assertIn("full Deliberation payloadの別artifact", serialized)
+        self.assertIn(
+            "supporting IDはDecision Contextのkey_claim_ids",
+            serialized,
+        )
+
+    def test_conclusion_evaluator_and_integrator_enforce_canonical_references(self):
+        evaluator_prompt = (
+            BASE_DIR / "conclusion" / "prompts" / "decision_evaluator.md"
+        ).read_text(encoding="utf-8")
+        integrator_prompt = (
+            BASE_DIR / "conclusion" / "prompts" / "decision_integrator.md"
+        ).read_text(encoding="utf-8")
+        evaluator_rd = json.loads(
+            (
+                BASE_DIR
+                / "role_definitions"
+                / "conclusion"
+                / "decision_evaluator.json"
+            ).read_text(encoding="utf-8")
+        )
+        integrator_rd = json.loads(
+            (
+                BASE_DIR
+                / "role_definitions"
+                / "conclusion"
+                / "decision_integrator.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertIn("decision_context.key_claim_ids", evaluator_prompt)
+        self.assertIn("integrated_option.candidate_ids", integrator_prompt)
+        self.assertIn("理由文、説明文", integrator_prompt)
+        self.assertEqual(
+            evaluator_rd["role_definition"]["role_definition_version"],
+            "1.0.2",
+        )
+        self.assertEqual(
+            integrator_rd["role_definition"]["role_definition_version"],
+            "1.0.2",
+        )
+        self.assertIn(
+            "canonical_reference_integrity",
+            json.dumps(evaluator_rd, ensure_ascii=False),
+        )
+        self.assertIn(
+            "canonical_reference_integrity",
+            json.dumps(integrator_rd, ensure_ascii=False),
+        )
+        self.assertIn("single_candidate_selection", integrator_prompt)
+
     def test_validator_rejects_missing_responsibilities(self):
         source = BASE_DIR / "role_definitions" / "producer" / "topic_scout.json"
         content = json.loads(source.read_text(encoding="utf-8"))
@@ -367,13 +521,14 @@ class RoleDefinitionLoaderTests(unittest.TestCase):
             provider.output_schemas,
             strict=True,
         ):
-            expected_schema = json.dumps(
+            duplicated_schema = json.dumps(
                 strict_output_schema(output_model),
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
             )
-            self.assertIn("# Output Schema\n" + expected_schema, prompt)
+            self.assertIn("# Output Schema\nReturn exactly one JSON object", prompt)
+            self.assertNotIn(duplicated_schema, prompt)
         result_messages = [m for m in state.message_history if m.sender_agent_id != "producer.manager"]
         trace = result_messages[0].metadata.extensions["role_definition"]
         self.assertEqual(trace["agent_id"], "producer.topic_scout")

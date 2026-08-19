@@ -1,0 +1,133 @@
+PRDCP Debug Report
+
+ID: GF-009 / Debug Cycle 001
+Date: 2026-08-16
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher
+Agent: researcher.quality_reviewer
+Error Class: RESERVATION / IDEMPOTENCY / RECOVERY
+
+1. 発生した症状
+
+保存済みResearcher 7 Agentの追加調査結果を再利用し、37件のSourceを持つResearch Reportまで復元できた後、External Revision用Quality ReviewがDemo Safe Modeに拒否された。WorkflowはFAILED、External Revision checkpointはQUALITY_REVIEWINGで停止した。
+
+2. 発生地点
+
+Researcher ManagerがExternal Revision #1のResearch ReportをQuality Reviewerへ送る境界。実データには旧論理ID researcher.quality_reviewer のOpenRouter reservationが存在していた。
+
+3. 再現条件
+
+初回Researcher Quality Reviewを同一workflowで実行済みの状態で、DeliberationからResearcher Returnを受け、External Revision用Quality Reviewを開始する。旧payloadにはtask_idがないため、共通Agent基盤はAgent IDを予約IDとして使用し、初回とExternal #1を同一Taskと判断する。
+
+4. 根本原因
+
+ResearchQualityReviewInputとManagerのQuality Review payloadに、Review Cycleを表す決定論的task_idが存在しなかった。Agent IDとLogical Task IDが混同され、初回ReviewとExternal Revision Reviewが同一Provider Taskとして予約された。
+
+5. なぜこの問題が発生したか
+
+Demo Safe Modeの共通予約機構はpayload.task_idを優先し、存在しない場合だけAgent IDへfallbackする。Researcher Quality ReviewerだけがCycle Identityを入力契約として持っていなかったため、安全機構は仕様どおり動作したが、上流のManagerが必要な識別情報を供給できなかった。
+
+6. なぜ既存テストで発見できなかったか
+
+従来テストは初回Quality Review、External Revision、Safe Modeを個別に確認していたが、同一workflowで初回Reviewのreservationが残ったままExternal #1を実行する組合せを検証していなかった。また、Report統合後、Quality Review応答保存後、Outbox保存後からの復旧を独立したFault境界として網羅していなかった。
+
+7. 修正計画
+
+Quality Review入力に必須task_idを追加し、Initial / Internal / ExternalをCycle固有の決定論的IDへ分離する。同一External cycleのresumeではIDを維持する。保存済みTask/Result/Report/Review response/Outboxを順に照合し、永続化済み境界より前を再実行しない。External #2以降は別IDで許可し、同一要求IDの再処理は拒否する。
+
+8. 実際の修正内容
+
+- ResearchQualityReviewInput.task_idを必須化した。
+- research_quality_review_initial、research_quality_review_internal_N、research_quality_review_external_Nを一元生成するようにした。
+- 外部Revision checkpointを意味的境界へ細分化し、旧値は読込互換として保持した。
+- 保存済みspecialist result、統合済みReport、Quality Review request/response、research_revision_result Outboxを照合して再利用するようにした。
+- Outbox保存後にstate保存が失敗しても、次回resumeで既存返信を検証してCOMPLETED_REVISIONを復元するようにした。
+- 完了済みExternal #1の後に新しいExternal #2を受理できるようにし、同一request IDは重複処理しないようにした。
+- 異種Source Typeの重複URL統合では代表Sourceの型固有metadataを保持し、共通情報だけを統合するようにした。
+
+9. 変更したファイル
+
+researcher/schemas/review.py
+researcher/manager.py
+researcher/state.py
+storage/researcher_workflow_repository.py
+tests/unit/test_researcher_manager.py
+tests/unit/test_researcher_payloads.py
+README.md
+debug_reports/001_quality_review_task_identity.txt
+
+10. 修正の設計上の意味
+
+Reservationの単位を「同じAgent」から「同じ論理Provider Task」へ正しく戻した。これによりSafe Modeは、同一Taskの事故による二重実行と、同一Agentが別Revision Cycleで行う正当な実行を区別できる。Checkpointはコード行の通過ではなく、再利用可能な永続Artifactの到達点として扱われる。
+
+11. 他Layerへの影響
+
+共通Agent基盤とSafe Modeのfallback規則は変更していないため、Producer / Deliberation / Conclusion / Playwrightの既存動作は維持される。横断監査では、Deliberation Quality Reviewはtask_idを持つが現状はランダムID、Conclusion Quality Reviewと一部Producer/Playwright入力はAgent ID fallbackを使うことを確認した。これらは今回のResearcher External Returnと同一の実障害ではないが、Resume/Recover時のLogical Task IdentityとしてE2E中の重点監視項目に残す。問題が再現した場合は別Debug Cycleで設計と回帰を追加する。
+
+12. 同系統Failure Mode監査結果
+
+- Researcher Initial/Internal/External #1/#2: Cycle固有IDと同一cycle安定性をテスト済み。
+- 同一External #1の予約済み再Provider call: Safe Modeが遮断することをテスト済み。
+- Producer: Safe Modeでは自動Revision前に停止し、現在の明示CLI経路で同一Agentを別cycleとして呼ぶ箇所はない。
+- Deliberation: Quality Reviewにtask_idは存在するがrecover安定性は残存リスクとして監視する。
+- Conclusion: specialist task_idは存在するがQuality Review入力のfallbackは残存リスクとして監視する。
+- Playwright: 独立Quality Reviewerはなく、Safe Modeでは自動Revision前に停止する。
+
+13. Regression Test
+
+Compile PASS。
+Unit Test 253件 PASS。
+Integration Test 9件 PASS。
+RD STRICT 31件 PASS。
+Doctor READY（Mock、警告は任意Discordと実API設定のみ）。
+Mock CLI E2EはProducerからDeliveryまでCOMPLETED。
+
+14. Recovery / Fault Test
+
+- specialist結果保存後の停止から再dispatch 0で復旧。
+- Report統合後の停止からReport rebuildなしで復旧。
+- Quality Review response保存後の停止からProvider call 0で復旧。
+- revision reply Outbox保存後のstate保存失敗からOutbox再書込みなしで復旧。
+- 本番workflowの複製で7/7結果、14/14 task result、37 sourcesを保持し、Researcher COMPLETED_REVISION、Deliberation COMPLETED、deterministic_validation.passed=trueまで到達。
+
+15. Provider Call数
+
+Real API Calls: 0
+Golden RecoveryのResearcher specialist Provider Calls: 0
+Golden RecoveryのResearcher Quality Review Mock Calls: 1
+Reused Results: 14 ResearchResult、37-source Research Report
+Prevented Duplicate Calls: specialist 7件、および保存済み境界の再実行
+
+16. API Cost
+
+実測: $0.00（このDebug Cycleの検証はMockのみ）
+
+17. Existing Workflowへの影響
+
+本番workflow JSON、messages、results、checkpoint、reservation、outboxは検証中に変更していない。複製データだけを更新した。新コードは旧checkpoint値を読込互換で扱い、既存JSONを書き換えずにresumeできる。
+
+18. Remaining Risk
+
+実OpenRouterが新しいstrict input/output契約へ応答する境界はMockでは証明できない。実運用元へ反映後、保存済みworkflowのQUALITY_REVIEWING checkpointからResearcher Quality Reviewer 1回だけをReal APIで実行して確認する。Deliberation/ConclusionのLogical Task Identityは、実E2EでFailureが現れた場合に独立Cycleとして修正する。
+
+19. Result
+
+PASS
+
+Plan Compliance Review
+
+[YES] Root Causeまで特定した
+[YES] 局所パッチだけで終わっていない
+[YES] Sibling Failureを監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた

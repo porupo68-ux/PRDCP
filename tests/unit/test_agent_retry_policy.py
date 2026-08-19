@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from common.agents.base import StructuredAgent
 from common.models.errors import (
@@ -18,6 +18,14 @@ from common.validation import PayloadValidator
 
 class _Payload(BaseModel):
     answer: str
+
+
+class _SemanticPayload(BaseModel):
+    answer: str
+
+    @model_validator(mode="after")
+    def reject_answer(self) -> "_SemanticPayload":
+        raise ValueError("semantic validation failure")
 
 
 class _SequencedProvider:
@@ -51,6 +59,16 @@ def _agent(
 
 
 class AgentRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_validation_errors_are_json_serializable(self) -> None:
+        with self.assertRaises(PayloadValidationError) as raised:
+            PayloadValidator().validate(
+                {"answer": "invalid"},
+                _SemanticPayload,
+            )
+
+        json.dumps(raised.exception.validation_errors)
+        self.assertNotIn("ctx", raised.exception.validation_errors[0])
+
     async def test_transient_error_retries_once_then_succeeds(self) -> None:
         provider = _SequencedProvider(
             [RetryableAgentError("temporary provider failure"), {"answer": "ok"}]
@@ -81,6 +99,28 @@ class AgentRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.retry_count, 1)
         self.assertEqual(provider.calls, 2)
 
+    async def test_ambiguous_transport_error_never_retries_automatically(self) -> None:
+        provider = _SequencedProvider(
+            [
+                RetryableAgentError(
+                    "response interrupted",
+                    automatic_retry_allowed=False,
+                ),
+                {"answer": "must not be used"},
+            ]
+        )
+
+        with self.assertRaises(RetryableAgentError) as raised:
+            await _agent(provider).run(
+                _Payload(answer="input"),
+                system_prompt="test",
+                max_technical_retries=5,
+                timeout_seconds=1,
+            )
+
+        self.assertEqual(raised.exception.retry_count, 0)
+        self.assertEqual(provider.calls, 1)
+
     async def test_demo_safe_mode_disables_retryable_error_retry(self) -> None:
         provider = _SequencedProvider(
             [RetryableAgentError("temporary provider failure"), {"answer": "unused"}]
@@ -100,7 +140,7 @@ class AgentRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_payload_validation_error_is_not_retried(self) -> None:
         provider = _SequencedProvider([{}])
 
-        with self.assertRaises(PayloadValidationError):
+        with self.assertRaises(PayloadValidationError) as raised:
             await _agent(provider).run(
                 _Payload(answer="input"),
                 system_prompt="test",
@@ -109,6 +149,19 @@ class AgentRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual(raised.exception.invalid_payload, {})
+        self.assertTrue(raised.exception.validation_errors)
+
+        request = PMPMessage.create(
+            sender_agent_id="researcher.manager",
+            receiver_agent_id="researcher.test_agent",
+            message_type=MessageType.TASK,
+            objective="persist invalid provider output",
+            payload={"task_id": "task_invalid_payload"},
+        )
+        error_message = _agent(provider).create_error_message(request, raised.exception)
+        self.assertEqual(error_message.payload["invalid_payload"], {})
+        self.assertTrue(error_message.payload["validation_errors"])
 
     async def test_non_retryable_error_is_not_retried(self) -> None:
         provider = _SequencedProvider([NonRetryableAgentError("invalid request")])

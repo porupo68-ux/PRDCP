@@ -1,0 +1,161 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 012
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation
+Agent: deliberation.manager / deliberation.quality_reviewer
+Failure Stage: final_integration
+Error Class: PROVIDER / RECOVERY CONTROL / RESERVATION / IDEMPOTENCY
+
+1. 何が起きたか
+
+Cycle 011の局所Real Recoveryは保存済みCounterargument rawをProvider call 0で復元した。その後、Deliberation ManagerのFinal IntegrationをOpenRouterのmoonshotai/kimi-k3へ1回送信したが、約3分後に`IncompleteRead(5962 bytes read)`で停止した。Final Integration、Deterministic Validation、Quality Reviewは保存されず、Final logical taskのreservationだけが残った。Quality Reviewer call、自動retry、Counterargument追加callはいずれも0だった。
+
+2. 発生地点と保存状態
+
+- task_id: deliberation_manager_final_integration_revision_1_recovery_1
+- original reservation: 保存済み、削除・上書きなし
+- revision_count: 1
+- current checkpoints: primary 3件、initial integration、counterargument
+- missing checkpoints: final integration、deterministic validation、quality review
+- state: FAILED
+- message history: 64件。Manager内部統合はPMP Agentではないため、このtransport errorの専用ERROR PMPは存在しない。
+- Research Report / Primary / Initial / Counterargument: 保持
+- Outbox: 変更なし
+
+3. 根本原因
+
+Pythonの`http.client.IncompleteRead`は、`urllib.request.urlopen()`がresponse bodyを読み切る前に接続が切れたことを表す。OpenRouterModelProviderはHTTPError、URLError、TimeoutError、ConnectionErrorを分類していたが、IncompleteReadをcatchしていなかった。そのためRetryableAgentErrorへ変換されず、Deliberation Managerのtyped retry/failure保存境界を通らない一般例外としてWorkflow error文字列だけに残った。
+
+さらに、Cycle 004で実装済みの一回限りoperator retryはStructuredAgent共通境界とResearcher Quality Reviewerには存在したが、Providerを直接呼ぶDeliberation Manager integrationには承認検査・消費が実装されていなかった。途中切断後に元reservationを守りながら明示再送する制御面が層間で不完全だった。
+
+4. なぜ自動retryしないか
+
+IncompleteReadでは、Provider側の生成や課金が完了し、応答転送だけが途中で切れた可能性がある。通常のtechnical retryとして同一logical taskを直ちに再送すると、二重生成・二重課金になり得る。このFailureはRetryableだが`automatic_retry_allowed=false`とし、元reservation、保存failure、operator authorizationを照合した一回限りの明示retryだけを許可する。
+
+5. Cycle 012改修計画とv2照合
+
+計画A: IncompleteReadを共通OpenRouter境界で安全なRetryableAgentErrorへ分類し、partial response bodyをerrorへ露出しない。
+v2: Failure Classを全Layer共通境界で修正し、秘密・payload漏えいを防ぐため適合。
+
+計画B: ambiguous transportにautomatic retry禁止属性を付け、StructuredAgentとDeliberation Manager retry loopの双方で強制する。
+v2: 同一logical taskのProvider二重実行禁止とCost Controlに適合。
+
+計画C: Deliberation Manager failureをstateへ監査保存し、元reservationを保持したまま`_operator_retry_1`、PENDING/CONSUMED承認、retry reservationを使用する。
+v2: Persist Before Advance、Reservation Principle、破壊的Storage Migration禁止に適合。
+
+計画D: 同じ専用CLIをDeliberation Quality ReviewerのRetryable ERROR PMPにも適用する。保存済みReview responseがある場合はartifact identity一致時だけ再利用する。
+v2: Sibling Failure Audit、PMP相関、checkpoint局所再開に適合。
+
+計画E: Static→Targeted→Unit→Integration→Mock/Fault→実workflow read-only cloneを通した後だけ、`--deliberation-provider-retry`をSafe Modeで一回実行する。
+v2: Validation LadderとReal API Use Ruleに適合。
+
+6. 実装
+
+- OpenRouter `_post`がIncompleteReadを本文非公開のRetryableAgentErrorへ変換する。
+- AgentExecutionErrorへ`automatic_retry_allowed`を追加し、既存retryable errorの既定動作は維持する。
+- StructuredAgentとDeliberationRegistryは同属性がfalseならSafe Mode OFFでも自動retryしない。
+- Deliberation stateへ`manager_provider_failures`を追加。旧stateはdefault空配列で読込可能。
+- Manager integration failureはtask/stage/error/root type/retry count/provider/modelを保存する。
+- pre-Cycle-012の`IncompleteRead(...)` stateは、既存Final reservationを確認して読込時audit recordへ変換する。既存JSONを事前migrationしない。
+- DeliberationRegistryのManager予約境界がoperator authorizationを検査し、retry reservationの排他的保存後、Provider call前にCONSUMEDへ遷移する。
+- `--deliberation-provider-retry WORKFLOW_ID`を追加し、Demo Safe Mode必須とした。
+- Manager Final/InitialとDeliberation Quality Reviewerの両方が同じ一回性台帳を利用する。
+- 保存済みQuality Review PMP responseはResearch Report、Primary、Initial、Counterargument、Final、Validation、Revision contextのidentity一致時だけ再利用する。Blocked workflowの意図的再審査は再利用しない。
+- Manager RD 1.0.3とREADMEへ運用規則を追加した。
+
+7. 同系統Failure Mode監査
+
+- Producer / Researcher / Deliberation specialist / Conclusion / Playwright: 共通OpenRouterとStructuredAgentでIncompleteRead分類・自動再送禁止が適用される。
+- Deliberation Manager: 独自integration境界にも同じ禁止と承認消費を追加。
+- Deliberation Quality Reviewer: PMP request/error相関と共通Agent reservationを使用。
+- retry-of-retry: original taskが`_operator_retry_1`なら承認拒否。
+- 承認なしretry task: Provider call前に拒否。
+- 消費済み承認: reusable responseがなければ再送拒否。
+- response保存後/state保存前fault: artifact identity一致responseをcall 0で再利用。
+- Blocked Quality Review再検証: 保存responseを再利用せずReviewerを意図どおり再実行。
+- Windows path: 実運用retry reservation pathは210文字で既定制限内。
+
+8. Regression / Fault / Recovery結果
+
+- Compile: PASS
+- Cycle 012 targeted Fault/Recovery: 7 PASS
+- Related Provider/Retry/Deliberation/RD/Strict: 125 PASS
+- Unit full: 305 PASS（249.208s、隔離Storage）
+- Integration full: 9 PASS（26.303s）
+- Role Definitions: 31件STRICT PASS
+- Structured Output 22 root recursive audit: PASS（関連Suite内）
+- CLI help: `--deliberation-provider-retry` / `--deliberation-recover`表示
+
+Fault A: IncompleteReadをpartial body非公開で分類。
+Fault B: Safe Mode OFFでもambiguous transportを自動retry 0で停止。
+Fault C: Manager Finalだけを一回明示retryし、承認CONSUMED後に完了。
+Fault D: Quality Reviewerだけを一回明示retryし、Finalを再実行しない。
+Fault E: retry自身が再切断した場合、二回目承認をcall 0で拒否。
+Fault F: Review response保存後のstate faultはartifact一致時だけcall 0で復元。
+Fault G: 旧`IncompleteRead(5962 bytes read)` stateを互換承認へ変換。
+
+実workflow state/messagesのread-only clone Mock Recovery:
+
+- Result: COMPLETED
+- Provider namespace: openrouter（network-free Mock）
+- Calls: FinalIntegratedAnalysis 1、DeliberationQualityReviewOutput 1
+- Counterargument call: 0
+- Validation: passed=true
+- Review: approved_with_conditions
+- Research Report: unchanged
+- Authorization: CONSUMED
+- retry reservation: exists
+- Production state/messages SHA-256: clone試験前後で不変
+
+9. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: optional audit field追加。旧保存stateは互換読込し、明示承認時だけaudit recordを追記する。
+PMP: Quality Reviewerはrequest/error parent相関を検証。Manager内部統合はstate failure recordを監査正本とする。
+Schema: 22 Structured Output root schemaは変更なし。strict safetyは維持。
+Checkpoint: Primary/Initial/Counterargumentを再実行しない。Finalからだけ再開。
+Reservation: 元Final reservationを保持。retry taskの別reservationを一回だけ追加。
+Outbox: Mock cloneだけConclusion outbox生成。本番はReal retry前まで未変更。
+
+10. Provider Calls / Cost
+
+Cycle 012 failure capture Real calls:
+- Counterargument: 0
+- Final Integration: 1 attempt
+- Quality Review: 0
+- Automatic retries: 0
+
+修正検証中Real calls: 0
+Mock/Fault calls: 課金なし
+API cost: CLIに利用額がないためunknown
+
+11. 設計上の意味
+
+Retryableは「自動で再送してよい」と同義ではなくなった。外部完了状態が不明なtransport failureを、復旧可能性は保ちながら自動二重実行から分離した。reservationは送信試行の事実、failure recordは結果が曖昧である事実、authorizationは運用者が追加1回を許可した事実、retry reservationはその許可が使用された事実をそれぞれ保持する。これによりStorage削除やTask IDのランダム変更なしで、安全性・可用性・監査可能性・Cost Controlを同時に維持する。
+
+12. Plan Compliance Review
+
+[YES] Root CauseをIncompleteRead未分類とDeliberation Manager承認境界欠落まで特定
+[YES] 局所的な例外catchだけで終わらず全StructuredAgent/Manager/Reviewerを監査
+[YES] 他Layerの共通Provider影響を確認
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outbox影響を確認
+[YES] Regression Testを追加
+[YES] Recovery/Fault 7条件を確認
+[YES] 実workflow read-only cloneを確認
+[YES] Debug Reportを生成
+[YES] 設計上の意味を説明
+[YES] 不必要なReal Provider callを実行していない
+[YES] v2計画書を再確認
+
+13. Result / Next
+
+IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS
+
+Cycle 012 Real Retry Addendum (2026-08-17)
+
+The explicit one-time retry was executed with OpenRouter and Safe Mode. Counterargument used its saved checkpoint (0 calls). Final Integration completed in 1 call. Deterministic Validation completed. Quality Review completed in 1 call. Automatic retry count was 0, the authorization became CONSUMED, and the original reservation remained intact.
+
+The workflow then stopped at the intended Demo Safe Mode boundary with revision_required. This was not a transport or Strict Schema failure. The only deterministic blocking issue was challenge_a in traceability_index.counterargument_ids; Cycle 013 handles that separate typed-traceability defect.
+
+本番へCycle 012差分だけを反映し、state/messages hash不変とDoctor READYを確認する。その後、`--deliberation-provider-retry 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`を一回だけ実行する。期待するReal callはFinal Integration 1、Quality Review 1、Counterargument 0。新しいfailureはCycle 013として扱い、Full E2Eを最初から再実行しない。

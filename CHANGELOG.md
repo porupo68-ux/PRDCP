@@ -1,7 +1,18 @@
 # Changelog
 
+## Cycle 029
+
+- Search retrievalをStructured Reasoningから分離し、8 Agentへdurable retrieval context、決定論的identity、独立reservation、source-grounding contractを追加。
+- Research Plannerは検索不要のままGemini reasoningへ移行し、General Opinionと7 Researcher specialistはOpenRouter Web Search adapterから保存済みcitationを受け取る構成へ変更。
+- DoctorをReasoning / Retrievalの二軸監査へ拡張し、438回帰テストと5層Mock E2Eを完走。
+
 ## Unreleased
 
+- Separate Playwright's LLM revision budget from an allowlisted, one-pass,
+  zero-Provider deterministic citation repair. `--playwright-recover` can now
+  reconstruct a missing paragraph-to-evidence mapping only from saved canonical
+  traceability, re-run Final Gate locally, persist a hash-audited repair artifact,
+  and deliver exactly once without changing Script, Conclusion, Visual, or Evidence.
 - Refine Demo Safe Mode to block automatic LLM agent execution rather than
   revision state transitions: persist upstream requests and mixed pending plans,
   enter `WAITING_UPSTREAM_REVISION`, and stop before Researcher or Deliberation

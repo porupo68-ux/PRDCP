@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from researcher.schemas.human_evidence import AcceptedEvidenceGap, HumanEvidenceDecision
 
 
 class DecisionContext(BaseModel):
@@ -26,5 +27,7 @@ class DecisionContext(BaseModel):
     tradeoffs: list[dict[str, Any]] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    human_evidence_decision: HumanEvidenceDecision | None = None
+    accepted_evidence_gaps: list[AcceptedEvidenceGap] = Field(default_factory=list)
     evaluation_criteria: list[str] = Field(min_length=1)
     value_profiles: list[dict[str, Any]] = Field(min_length=1)

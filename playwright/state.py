@@ -7,6 +7,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from playwright.schemas.deterministic_repair import (
+    PlaywrightDeterministicRepairRecord,
+)
 
 
 def utc_now() -> datetime:
@@ -72,6 +75,10 @@ class PlaywrightWorkflowState(BaseModel):
     current_agent_ids: list[str] = Field(default_factory=list)
     revision_count: int = Field(default=0, ge=0)
     revision_history: list[PlaywrightRevisionRecord] = Field(default_factory=list)
+    deterministic_repair_count: int = Field(default=0, ge=0)
+    deterministic_repair_history: list[PlaywrightDeterministicRepairRecord] = Field(
+        default_factory=list
+    )
     upstream_revision_count: int = Field(default=0, ge=0)
     upstream_revision_history: list[PlaywrightUpstreamRevisionRecord] = Field(default_factory=list)
     message_history: list[PMPMessage] = Field(default_factory=list)
@@ -95,4 +102,3 @@ class PlaywrightWorkflowState(BaseModel):
             "delivery_paths": self.delivery_paths,
             "delivered": self.delivered,
         }
-

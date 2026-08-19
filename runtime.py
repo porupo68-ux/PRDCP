@@ -12,6 +12,7 @@ from playwright.registry import PlaywrightRegistry
 from producer.manager import ProducerManager
 from producer.registry import ProducerRegistry
 from providers import MockModelProvider, OpenRouterModelProvider
+from retrieval import MockRetrievalProvider, OpenRouterWebSearchProvider, RetrievalCoordinator
 from researcher.manager import ResearcherManager
 from researcher.registry import ResearcherRegistry
 from storage import (
@@ -38,6 +39,43 @@ def build_provider(settings: Settings):
     raise ValueError(f"Unsupported provider: {settings.provider}")
 
 
+def build_retrieval_coordinator(settings: Settings) -> RetrievalCoordinator:
+    reservation_root = settings.data_dir / "retrieval_call_reservations"
+    if settings.retrieval_provider == "openrouter":
+        if not settings.openrouter_api_key:
+            raise ValueError(
+                "PRDCP_RETRIEVAL_PROVIDER=openrouter requires OPENROUTER_API_KEY"
+            )
+        provider = OpenRouterWebSearchProvider(
+            api_key=settings.openrouter_api_key,
+            model=settings.retrieval_model,
+            base_url=settings.openrouter_base_url,
+            engine=settings.retrieval_engine,
+            reservation_root=reservation_root,
+        )
+    elif settings.retrieval_provider == "mock":
+        provider = MockRetrievalProvider(reservation_root=reservation_root)
+    else:
+        raise ValueError(
+            f"Unsupported retrieval provider: {settings.retrieval_provider}"
+        )
+    return RetrievalCoordinator(
+        provider,
+        data_dir=settings.data_dir,
+        demo_safe_mode=settings.demo_safe_mode,
+    )
+
+
+def _bind_provider_reservation_root(settings: Settings, provider):
+    """Keep an injected Provider on the same storage boundary as its managers."""
+
+    if hasattr(provider, "reservation_root") and getattr(
+        provider, "reservation_root", None
+    ) is None:
+        provider.reservation_root = settings.data_dir / "provider_call_reservations"
+    return provider
+
+
 def build_role_definition_loader(settings: Settings) -> RoleDefinitionLoader:
     return RoleDefinitionLoader.from_project(
         BASE_DIR,
@@ -53,14 +91,21 @@ def build_producer_manager(
     *,
     provider=None,
     rd_loader: RoleDefinitionLoader | None = None,
+    retrieval_coordinator: RetrievalCoordinator | None = None,
 ) -> ProducerManager:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = rd_loader or build_role_definition_loader(settings)
     registry = ProducerRegistry(
         provider,
         settings.models,
         rd_loader=rd_loader,
         demo_safe_mode=settings.demo_safe_mode,
+        retrieval_coordinator=(
+            retrieval_coordinator or build_retrieval_coordinator(settings)
+        ),
     )
     repository = WorkflowRepository(settings.data_dir)
     return ProducerManager(
@@ -76,14 +121,21 @@ def build_researcher_manager(
     *,
     provider=None,
     rd_loader: RoleDefinitionLoader | None = None,
+    retrieval_coordinator: RetrievalCoordinator | None = None,
 ) -> ResearcherManager:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = rd_loader or build_role_definition_loader(settings)
     registry = ResearcherRegistry(
         provider,
         settings.models,
         rd_loader=rd_loader,
         demo_safe_mode=settings.demo_safe_mode,
+        retrieval_coordinator=(
+            retrieval_coordinator or build_retrieval_coordinator(settings)
+        ),
     )
     repository = ResearcherWorkflowRepository(settings.data_dir)
     return ResearcherManager(
@@ -100,7 +152,10 @@ def build_deliberation_manager(
     provider=None,
     rd_loader: RoleDefinitionLoader | None = None,
 ) -> DeliberationManager:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = rd_loader or build_role_definition_loader(settings)
     registry = DeliberationRegistry(
         provider,
@@ -123,7 +178,10 @@ def build_conclusion_manager(
     provider=None,
     rd_loader: RoleDefinitionLoader | None = None,
 ) -> ConclusionManager:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = rd_loader or build_role_definition_loader(settings)
     registry = ConclusionRegistry(
         provider,
@@ -146,7 +204,10 @@ def build_playwright_manager(
     provider=None,
     rd_loader: RoleDefinitionLoader | None = None,
 ) -> PlaywrightManager:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = rd_loader or build_role_definition_loader(settings)
     registry = PlaywrightRegistry(
         provider,
@@ -176,11 +237,25 @@ def build_all_managers(
     ConclusionManager,
     PlaywrightManager,
 ]:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = build_role_definition_loader(settings)
+    retrieval_coordinator = build_retrieval_coordinator(settings)
     return (
-        build_producer_manager(settings, provider=provider, rd_loader=rd_loader),
-        build_researcher_manager(settings, provider=provider, rd_loader=rd_loader),
+        build_producer_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
+        build_researcher_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
         build_deliberation_manager(settings, provider=provider, rd_loader=rd_loader),
         build_conclusion_manager(settings, provider=provider, rd_loader=rd_loader),
         build_playwright_manager(settings, provider=provider, rd_loader=rd_loader),
@@ -192,11 +267,25 @@ def build_managers(
     *,
     provider=None,
 ) -> tuple[ProducerManager, ResearcherManager, DeliberationManager]:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = build_role_definition_loader(settings)
+    retrieval_coordinator = build_retrieval_coordinator(settings)
     return (
-        build_producer_manager(settings, provider=provider, rd_loader=rd_loader),
-        build_researcher_manager(settings, provider=provider, rd_loader=rd_loader),
+        build_producer_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
+        build_researcher_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
         build_deliberation_manager(settings, provider=provider, rd_loader=rd_loader),
     )
 
@@ -206,11 +295,25 @@ def build_producer_researcher_managers(
     *,
     provider=None,
 ) -> tuple[ProducerManager, ResearcherManager]:
-    provider = provider or build_provider(settings)
+    provider = _bind_provider_reservation_root(
+        settings,
+        provider or build_provider(settings),
+    )
     rd_loader = build_role_definition_loader(settings)
+    retrieval_coordinator = build_retrieval_coordinator(settings)
     return (
-        build_producer_manager(settings, provider=provider, rd_loader=rd_loader),
-        build_researcher_manager(settings, provider=provider, rd_loader=rd_loader),
+        build_producer_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
+        build_researcher_manager(
+            settings,
+            provider=provider,
+            rd_loader=rd_loader,
+            retrieval_coordinator=retrieval_coordinator,
+        ),
     )
 
 

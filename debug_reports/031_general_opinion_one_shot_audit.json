@@ -1,0 +1,65 @@
+{
+  "cycle": 31,
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "provider": "openrouter",
+  "model_id": "google/gemini-3.7-flash",
+  "task_id": "producer.general_opinion_analyst_provider_output_repair_1",
+  "provider_call_count": 1,
+  "retrieval_call_count": 0,
+  "pre": {
+    "status": "FAILED",
+    "completed_agent_count": 2,
+    "provider_reservation_count": 4,
+    "retrieval_context_count": 1,
+    "retrieval_reservation_count": 1,
+    "state_sha256": "ae2c528af2c4430c96268d4ecd24af58e4d651314530f4ba5ab9da0c2b727387",
+    "messages_sha256": "b9995c75f63ae65b31d8b4f0fda75006446acc2c316063d0f022f2debbf8faa3"
+  },
+  "post": {
+    "status": "RUNNING",
+    "completed_agent_count": 3,
+    "general_opinion_saved": true,
+    "research_plan_saved": false,
+    "provider_reservation_count": 5,
+    "retrieval_context_count": 1,
+    "retrieval_reservation_count": 1,
+    "research_planner_reservation_exists": false,
+    "state_sha256": "c4637a6f181e57ab68d044d9ecc0e8fecf8606fca9617cdb5d2f101762ab1f60",
+    "messages_sha256": "6dbf3849a5907fe1db816613ebf9b158ba135a02cf18507e81bd34f93f59baa1"
+  },
+  "immutable_inputs": {
+    "retrieval_id": "retrieval_f354b54b51f6c2f44f4dbfd1",
+    "retrieval_context_sha256": "bfe69d5cb5d26993a7482c9de28c1e2fbc6a68b504360507943ee5d13f1b9455",
+    "retrieval_reservation_sha256": "2b0f127bd934f75d93cdb31c88258712610276aded54a50803597a134042b673",
+    "original_provider_reservation_sha256": "b66242c3e5a62483b32efb892dd4de446bb4e1d90aac8ec042770d97e411e039",
+    "cycle030_retry_reservation_sha256": "ce923d8293269452a6a4480f949fe767a7faed49844b82ceb57b5c3d6a1beafa",
+    "cycle030_retry_authorization_sha256": "a8f7c8011c735d05c6964e7a3bf955af3a5cf531c54675ceafb0165eebe5b46a"
+  },
+  "authorization": {
+    "authorization_id": "a0aac407-284f-47cb-83aa-824cb1254d86",
+    "source_retry_authorization_id": "2cf26975-91fc-4e42-b1fe-5e325745ec28",
+    "source_error_message_id": "5eee762a-578d-4121-994b-d7922bb0628c",
+    "failure_signature": "retrieval_metadata_hydration_contract",
+    "status": "CONSUMED"
+  },
+  "pmp": {
+    "task_message_id": "74bf1982-2103-47ba-a3f8-6f34e056186b",
+    "result_message_id": "e474283d-f4bb-4412-8648-5cc41d43e119",
+    "parent_link_valid": true
+  },
+  "output_contract": {
+    "retrieved_source_count": 5,
+    "selected_source_count": 4,
+    "selected_source_ids_unique": true,
+    "selected_metadata_exact": true
+  },
+  "verification": {
+    "targeted_tests": 28,
+    "all_tests": 450,
+    "all_tests_passed": true,
+    "role_definitions_strict": 31,
+    "structured_output_schemas": 22,
+    "mock_e2e_passed": true,
+    "production_clone_recovery_passed": true
+  }
+}

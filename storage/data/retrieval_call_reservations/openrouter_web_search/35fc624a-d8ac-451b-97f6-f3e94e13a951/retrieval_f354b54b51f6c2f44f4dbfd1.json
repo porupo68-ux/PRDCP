@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_f354b54b51f6c2f44f4dbfd1",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "task_id": "general_opinion_topic-ai-copyright-003_74234e98",
+  "agent_id": "producer.general_opinion_analyst",
+  "strategy": "GENERAL_OPINION",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-17T13:03:05.174189+00:00"
+}

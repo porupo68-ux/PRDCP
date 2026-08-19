@@ -101,6 +101,11 @@
         "principle_id": "CSA-P09",
         "name": "traceable_causal_model",
         "rule": "因果モデルの各要素をclaim_id、evidence_id、source_idおよびresearch_question_idへ追跡可能にする。"
+      },
+      {
+        "principle_id": "CSA-P10",
+        "name": "canonical_role_specific_item_namespaces",
+        "rule": "Use causal_ for causal claims, mechanism_ for mechanisms, structure_ or structural_ for structural factors, feedback_ for feedback loops, and alternative_ or alt_exp_ for alternative explanations. Reuse those exact IDs in evidence mappings and downstream traceability."
       }
     ],
     "responsibilities": {

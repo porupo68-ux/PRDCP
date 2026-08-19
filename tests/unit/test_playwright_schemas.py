@@ -2,7 +2,9 @@ import unittest
 
 from pydantic import ValidationError
 
+from common.structured_outputs import strict_output_schema, strict_schema_violations
 from playwright.schemas import (
+    CitationEditingResult,
     CitationManifest,
     NarrativeBlueprint,
     PlaywrightFinalGateResult,
@@ -11,6 +13,7 @@ from playwright.schemas import (
     UpstreamConclusionRevisionRequest,
     VisualPlan,
 )
+from providers.mock import playwright_fixtures
 
 
 def production_context_data() -> dict:
@@ -161,6 +164,92 @@ class PlaywrightSchemaTests(unittest.TestCase):
                 }
             )
 
+    def test_visual_plan_rejects_unknown_asset_requirement_reference(self):
+        with self.assertRaisesRegex(ValidationError, "unknown asset_requirement_ids"):
+            VisualPlan.model_validate(
+                {
+                    "visual_plan_id": "visual_1",
+                    "citation_validated_script_id": "validated_1",
+                    "visual_cues": [
+                        {
+                            "visual_cue_id": "cue_1",
+                            "section_id": "section_1",
+                            "paragraph_id": "paragraph_1",
+                            "visual_type": "TEXT_OVERLAY",
+                            "description": "問いを表示する",
+                            "target_duration_seconds": 10,
+                            "asset_requirement_ids": ["asset_missing"],
+                        }
+                    ],
+                }
+            )
+
+    def test_citation_result_requires_cross_artifact_identity(self):
+        result = playwright_fixtures.citation_editing(
+            {
+                "production_context": production_context_data(),
+                "script_draft": script_data(),
+            }
+        )
+        result["citation_manifest"]["script_draft_id"] = "script_other"
+        with self.assertRaisesRegex(ValidationError, "same Script Draft"):
+            CitationEditingResult.model_validate(result)
+
+    def test_citation_strict_schema_binds_each_mapping_to_its_paragraph(self):
+        input_data = {
+            "task_id": "playwright_citation_upstream_0_revision_1",
+            "target_agent_id": "playwright.evidence_citation_editor",
+            "production_context": production_context_data(),
+            "script_draft": script_data(),
+            "revision_context": None,
+        }
+        schema = strict_output_schema(CitationEditingResult, input_data=input_data)
+        self.assertEqual([], strict_schema_violations(schema))
+        mapping_array = self._property_node(schema, "mappings")
+        branches = mapping_array["items"]["anyOf"]
+        self.assertEqual(1, len(branches))
+        properties = branches[0]["properties"]
+        self.assertEqual(["paragraph_1"], properties["paragraph_id"]["enum"])
+        self.assertEqual(
+            ["evidence_1"],
+            properties["evidence_ids"]["items"]["enum"],
+        )
+        self.assertEqual(
+            ["source_1"],
+            properties["source_ids"]["items"]["enum"],
+        )
+
+    def test_visual_strict_schema_binds_cues_to_paragraph_local_references(self):
+        citation = playwright_fixtures.citation_editing(
+            {
+                "production_context": production_context_data(),
+                "script_draft": script_data(),
+            }
+        )
+        input_data = {
+            "task_id": "playwright_visual_upstream_0_revision_1",
+            "target_agent_id": "playwright.visual_director",
+            "production_context": production_context_data(),
+            "citation_validated_script": citation["citation_validated_script"],
+            "citation_manifest": citation["citation_manifest"],
+            "revision_context": None,
+        }
+        schema = strict_output_schema(VisualPlan, input_data=input_data)
+        self.assertEqual([], strict_schema_violations(schema))
+        cue_array = self._property_node(schema, "visual_cues")
+        branch = cue_array["items"]["anyOf"][0]
+        properties = branch["properties"]
+        self.assertEqual(["section_1"], properties["section_id"]["enum"])
+        self.assertEqual(["paragraph_1"], properties["paragraph_id"]["enum"])
+        self.assertEqual(
+            ["evidence_1"],
+            properties["evidence_ids"]["items"]["enum"],
+        )
+        self.assertEqual(
+            ["source_1"],
+            properties["source_ids"]["items"]["enum"],
+        )
+
     def test_revision_gate_requires_target(self):
         with self.assertRaises(ValidationError):
             PlaywrightFinalGateResult.model_validate(
@@ -184,6 +273,26 @@ class PlaywrightSchemaTests(unittest.TestCase):
                     "source_finding_ids": ["finding_1"],
                 }
             )
+
+    @staticmethod
+    def _property_node(schema: dict, field: str) -> dict:
+        found = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                properties = node.get("properties")
+                if isinstance(properties, dict) and field in properties:
+                    found.append(properties[field])
+                for child in node.values():
+                    walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+
+        walk(schema)
+        if len(found) != 1:
+            raise AssertionError(f"expected one {field} property, found {len(found)}")
+        return found[0]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,289 @@
+PRDCP CLI E2E Debug Summary
+
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Final E2E Result: RECOVERY/REVISION E2E COMPLETED THROUGH PLAYWRIGHT DELIVERY WITH PROVIDER=OPENROUTER - FRESH ALL-OPENROUTER ACCEPTANCE REQUIRES SEPARATE COST AUTHORIZATION
+
+Cycle 020 Update
+Result: IMPLEMENTATION / UNIT / INTEGRATION / MOCK / FAULT / EXACT-SAVED-STATE RECOVERY PASS - ONE EXPLICIT REAL PROVIDER RETRY PENDING
+Root Cause: Cycle 016の成功したdistinct-model contract repairはtask-local overrideであり、同じAgent/output schemaの新revision taskが既知の非互換configured modelへ戻った。legacy random repair taskもrevision cycleのcheckpoint候補に残り、初回Positionを修正Positionとして誤復元し得た。
+Repair: Pydantic検証済みrepairをprovider/agent/output schema/incompatible modelのappend-only compatibility bindingとして保存する。configured model完全一致時だけ将来taskへcompatible modelを適用し、明示override・設定変更・provider変更を優先する。旧saved repairはPMP/authorizationからbackfillする。revision/upstream cycleではlegacy initial taskをrestore候補から除外する。
+Regression: Targeted 7 PASS、Related 116 PASS、Full Unit 362 PASS、Integration 9 PASS、31 RD STRICT、22-root strict audit 13 PASS、Mock CLI Producer -> Delivery PASS。
+Fault/Recovery: binding欠落とrevision Position failureを注入し、saved repair backfill後のoperator retryがPositionを再送せずcurrent retry taskをcompatible modelで実行。exact production FAILED-state cloneもopenai/gpt-5-mini 1 Position callでWAITING_HUMAN_SELECTIONへ到達。
+Provider Calls: Cycle 020 implementation/test Real 0、automatic retry 0、upstream redispatch 0。次操作はcurrent FAILED Positionへの--conclusion-provider-retry一回だけ。
+
+Cycle 019 Update
+Result: PASS - IMPLEMENTATION / UNIT / INTEGRATION / MOCK / FAULT / EXACT-SAVED-STATE RECOVERY / ONE EXPLICIT REAL INVOCATION COMPLETE
+Root Cause: Demo Safe Modeが有効なConclusionでは有効なrevision_required Reviewを保存して自動再実行を止められたが、そのdecision checkpointを一回だけ消費するoperator CLIがなかった。Position GeneratorはDecision Contextとfull Deliberation payloadを同時に受け取る一方、canonical Traceability ID集合が前者だけであることをPrompt/RDへ明記しておらず、同prefixの非正規claim IDを採用した。
+Repair: --conclusion-reviseをSafe Mode専用のone-cycle操作として追加し、revision plan、count、history、依存checkpoint無効化を最初のProvider call前に保存する。再Reviewがrevision_requiredなら自動で次cycleへ進まない。Position supporting IDはDecision Contextのkey_claim_ids/analysis_ids/evidence_idsだけから完全一致で選ぶ契約をPrompt/RD/Schema descriptionに固定した。
+Regression: Targeted 96 PASS、OpenRouter/strict/runtime/Safe Mode related 50 PASS、Full Unit 357 PASS、Integration 9 PASS、31 RD STRICT、22-root strict audit、Mock CLI Producer -> Delivery PASS。
+Fault: revision Position保存後のEvaluator contract failureから、Position callを増やさずone-shot provider retryでEvaluator以降を復旧。productionの正確なBLOCKED state cloneはrevision_1の4 Mock callだけでWAITING_HUMAN_SELECTIONへ到達。
+Provider Calls: Cycle 019 implementation/Mock/Fault Real 0。明示--conclusion-reviseはPosition Generator 1、downstream 0、upstream 0、automatic retry 0。
+Real Result: revision_1 state/history/task/reservationは正しく保存され、root floatをProviderResponseContractErrorとしてfail-closedした。Cycle 016で別taskをopenai/gpt-5-miniへrepair済みだったが、新しいrevision taskはqwen/qwen3.5-flash-02-23へ戻った。task-local repairが将来taskのmodel compatibilityへ継承されない設計をCycle 020で扱う。
+
+Cycle 016 Update
+Result: IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT / EXACT-SAVED-STATE RECOVERY PASS - ONE EXPLICIT REAL CONTRACT REPAIR PENDING
+Root Cause: PRDCP sent strict response_format but did not set OpenRouter provider.require_parameters=true, so endpoint parameter support was not a hard routing condition. Independently, the configured Qwen3.5 Flash endpoint returned a scalar root on both the original Position call and its only permitted retry, making another same-model send a provider/model contract failure rather than a transient retry.
+Repair: require all OpenRouter endpoints to support all request parameters; add a shared persisted PENDING/CONSUMED provider-contract-repair authorization; permit only one explicitly different model under a deterministic `_provider_contract_repair_1` task and separate reservation; reuse valid checkpoints; block same-model repair and any fourth call; add `--conclusion-contract-repair` in Demo Safe Mode.
+Validation: targeted 71 PASS, Unit 332 PASS, Integration 9 PASS, 31 RD STRICT, 22-root audit PASS, full Mock CLI E2E PASS. Fault tests prove a failed repair cannot make a fourth call and a saved repair Result restores with Provider call delta zero. An exact production FAILED-state copy reached WAITING_HUMAN_SELECTION with Position/Evaluation/Integration/Quality Review one Mock call each, upstream zero, automatic retry zero, and repair authorization CONSUMED.
+Provider Impact: Cycle 016 implementation/validation Real calls 0. One explicit different-model Real contract repair is the only next permitted call sequence.
+
+Cycle 015 Update
+Result: SAFETY / RECOVERY PASS - ONE LOCALIZED REAL RETRY COMPLETED; REPEATED MODEL CONTRACT FAILURE MOVED TO CYCLE 016
+Root Cause: Python json.loads accepted OpenRouter message content Infinity/NaN and exponent overflow as non-finite floats, while the Provider boundary required neither an object root nor recursively finite JSON numbers. Pydantic therefore received `inf`. Conclusion also lacked deterministic stage task IDs, checkpoint recovery, and one-shot Provider retry authorization.
+Repair: enforce a finite-object JSON response contract for all 22 OpenRouter roots; persist non-sensitive response hash/length/root/path; add deterministic IDs to all four Conclusion calls; add `--conclusion-recover` and `--conclusion-provider-retry`; restore correlated saved result PMP messages before considering a resend; preserve the original reservation and use one distinct `_operator_retry_1` authorization/reservation.
+Validation: targeted 59 PASS, Unit 327 PASS, Integration 9 PASS, 31 RD STRICT, 22-root audit PASS, full Mock CLI E2E PASS. Exact production FAILED state copied to isolation reached WAITING_HUMAN_SELECTION with Position/Evaluation/Integration/Quality Review one call each, upstream zero, automatic retry zero, authorization CONSUMED. Saved-result fault restored all four stages with Provider call delta zero.
+Provider Impact: Cycle 014 captured one Real Position call and no downstream calls. Cycle 015 explicit retry made Position 1, downstream 0, upstream 0, automatic retry 0. It was rejected as ProviderResponseContractError with root float, retry authorization CONSUMED, and no retry-of-retry. Cycle 016 owns the model/endpoint contract repair.
+
+Cycle 014 Update
+Result: IMPLEMENTATION / MOCK / FAULT / REGRESSION / SAVED-HANDOFF REPLAY PASS - LOCALIZED REAL CONCLUSION PENDING
+Root Cause: Deliberation Quality Reviewer RD and the real OpenRouter response used lowercase ready_with_conditions, while the Pydantic field was an unconstrained string and Conclusion plus Mock required uppercase. Mock therefore masked a source-RD/consumer contract split. The same latent split existed at Conclusion -> Playwright.
+Repair: make both readiness boundaries closed lowercase enums matching their RDs; normalize legacy uppercase only on read; type the nested Deliberation review; require duplicated Quality Review copies to match; reject decision/readiness contradictions; update Mock to the canonical generation contract.
+Validation: targeted 93 PASS, Unit 317 PASS, Integration 9 PASS, 31 RD STRICT, 22-root strict audit PASS, full Mock CLI E2E PASS, exact production Conclusion outbox read-only validation PASS with 0 calls, isolated exact-handoff Mock Safe Mode replay reached WAITING_HUMAN_SELECTION.
+Provider Impact: Cycle 014 Real calls so far 0, automatic retries 0, existing Producer/Researcher/Deliberation results fully reused. Next action is one localized OpenRouter Conclusion continuation from the saved handoff.
+
+Cycle 013 Update
+Result: IMPLEMENTATION / MOCK / FAULT / REGRESSION / READ-ONLY RECOVERY PASS
+Root Cause: challenge_ was accepted as both a Steelman Challenge and a Counterargument namespace. OpenRouter could therefore place challenge_a in traceability_index.counterargument_ids, while deterministic cross-artifact validation correctly rejected it because the persisted Counterargument IDs are three distinct counter_* values.
+Recovery Design: add typed challenge_ids; reject new namespace mixing in JSON Schema; cross-check IDs against the persisted Counterargument artifact; move a saved ID only when it exactly equals a saved Steelman Challenge; audit the move; invalidate only validation/review; use a distinct corrected-review task ID; make no Primary/Initial/Counterargument/Final provider call.
+Validation: targeted 5 PASS, related 135 PASS, Unit 309 PASS, Integration 9 PASS, 31 RD STRICT, 22-root strict audit PASS, Doctor READY. Exact production-state clone completed with only one Mock Quality Reviewer call and validation passed=true.
+Real Status: localized --deliberation-recover completed. Quality Reviewer 1, Primary/Initial/Counterargument/Final 0, automatic retry 0. Deterministic validation passed with 0 findings, review approved_with_conditions, Deliberation COMPLETED, and Conclusion handoff persisted. CLI did not expose measured cost.
+
+Cycle 012 Closure
+Result: ONE EXPLICIT REAL RETRY COMPLETED
+Real Result: Counterargument 0, Final Integration 1, Quality Review 1, automatic retry 0. Communication and Strict Schema succeeded. Demo Safe Mode correctly stopped on a legitimate traceability revision finding, which became Cycle 013.
+
+Cycle 012 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - ONE EXPLICIT REAL RETRY PENDING
+Root Cause: OpenRouter response.read中の`http.client.IncompleteRead`が共通Providerで未分類だった。さらにCycle 004のoperator retry controlがStructuredAgentには存在したが、Deliberation Manager direct integration境界には未接続だった。
+Recovery Design: ambiguous transportをRetryableかつautomatic_retry_allowed=falseとして全Agent/Managerで自動再送禁止。Manager failureをstateへ保存し、元reservationを残したまま`_operator_retry_1`、PENDING/CONSUMED承認、retry reservationを使う。Deliberation Quality Reviewerも同じCLI経路を使用し、保存済みReviewはartifact identity一致時だけ再利用する。
+Validation: Targeted 7 PASS、Related 125 PASS、Unit 305 PASS、Integration 9 PASS、31 RD STRICT、22 strict audit PASS。本番state/messages read-only cloneはCounter 0 + Final/QR 2 mock callsでCOMPLETED、Report不変、authorization CONSUMED。
+Real Result: Cycle 011局所RecoveryでCounter 0、Final 1 attemptがIncompleteRead、Quality Review 0、自動retry 0。Cycle 012修正後の明示一回retryは未実行。
+
+Cycle 011 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - DOWNSTREAM REAL RECOVERY ATTEMPTED
+Root Cause: CounterargumentのPydantic analysis ID/conditional routing validatorがstrict JSON Schemaへ表現されず、Provider適合JSONがlocal validationで拒否された。
+Recovery Design: analysis/integration ID patternをschema可視化し、Counterargument required_revisionをanyOf true/false branchへ分離、internal targetをenum化。保存invalid rawは誤prefixと非内部targetだけを監査付きread adapterで修復し、Counterargument Provider call 0で再利用する。
+Validation: Targeted 64 PASS、Unit 297 PASS、Integration 9 PASS、22 strict audit PASS、RD STRICT/Doctor READY。実workflow copyはCounter 0 + Final/QR 2 mock callsでCOMPLETED。
+Real Result: 保存rawからCounterargument call 0で復元。Final Integration 1 attemptがIncompleteReadで停止し、Quality Review 0、automatic retry 0。Cycle 012へ移行。
+
+Cycle 010 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - ONE LOCALIZED REAL RETRY COMPLETED
+Root Cause: 保存用Research Reportの重複table、Initial Integration内情報のTask直下再掲、strict schemaのprompt/response_format二重送信により、DeepSeek R1 64K endpointへ約69,786 input tokensを送ってHTTP 400となった。
+Recovery Design: 保存artifactは不変のままEvidence/Source/Metadata/Qualityをtrace IDでmergeした明示型runtime viewを生成し、stage間の重複payloadを除去。既知context上限をreservation/HTTP前に検査し、失敗済みtaskは決定的`counter_task_revision_1_context_repair_1`で一回だけ再開する。Quality Review identityもrevision/recovery単位に決定化した。
+Validation: Compile PASS、Targeted 64 PASS、Unit 293 PASS、Integration 9 PASS、RD STRICT/Doctor READY。実workflow read-only copy Mock RecoveryはInitial 0 + Counter/Final/QR 3 callsでCOMPLETED。Counter request推定45,766 tokens、保存Research Report不変。
+Real Result: Initial 0、Counterargument context repair 1 call。64K errorは解消し応答受領。local schema差で停止しCycle 011へ移行。自動retry 0。
+
+Cycle 009 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - LOCALIZED REAL RECOVERY PENDING
+Root Cause: Initial IntegrationはIntegrationChange artifactを持たないのに、OpenRouter rawが`ichg_*`をtraceabilityだけへ出力した。これはprefix差ではなく参照先のないdangling lineageだった。
+Recovery Design: Initialのchange参照を禁止し、Finalは同payloadで定義した`change_*`だけを許可。保存済みInitial rawのdangling 5件を監査記録付きで除去し、Provider call 0で再検証する。
+Validation: Compile PASS、Targeted 14 PASS、Unit full PASS、Integration 9 PASS。本番rawを含むstate copyはInitial 0 + downstream 3 mock callsでCOMPLETED。
+Real Result: Initial contract repair 1 callがlocal rejection、自動retry 0、応答raw保存済み。次回Initial callは0を期待。
+
+Cycle 008 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - ONE LOCALIZED REAL RECOVERY PENDING
+Root Cause: Causal outputはitem_idを自由文字列として`cc_/mech_/sf_/fb_/alt_`を許した一方、Integration traceabilityは役割別canonical prefixだけを許した。Manager direct integrationはlocal validation rawを保存していなかった。
+Recovery Design: 新規Causal Schemaを役割別ID型に分離し、旧checkpointは決定的read adapterで非破壊変換。Manager Initial/Final rawを永続化・再検証し、rawのない旧Failureだけ一回性contract repairを使う。Counterargument taskもrevision単位で決定化。
+Validation: Compile PASS、Structured Output PASS、Targeted Fault 4 PASS、RD strict 20 PASS、Unit full PASS、Integration 9 PASS。本番Failure state read-only copy Mock Recoveryは4 call/reservationでCOMPLETED。
+Real Result: Initial Integration 1 callがlocal Schema rejection、自動retry 0、他stage call 0。次は保存checkpointから一回だけ局所Real Recoveryを行う。
+
+Cycle 007 Update
+Result: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - ONE LOCALIZED REAL RECOVERY PENDING
+Root Cause: evidence_idsでResearchReportへ追跡できる具体情報にもSpecificFactへの同文複製を要求していた。また、SpecificFactのsource_idsはprefixだけを検査し、Reportの実在IDおよびevidence→source関係と照合していなかった。
+Recovery Design: evidence-bound項目は重複SpecificFactなしで許可し、未紐付け具体情報の禁止は維持。新規応答はReport外・不一致sourceを拒否し、保存済みERROR payloadだけはReportの一意なevidence→source対応で互換補正する。
+Validation: Compile PASS、Structured Output/Payload 36 PASS、Unit full PASS、Integration 9 PASS。本番state read-only copy Mock Recovery COMPLETED、Stakeholder provider call 0、downstream mock calls/reservations 4。
+Real Result: 未実行。次は保存checkpointから一回だけ局所`--deliberation-recover --provider openrouter --no-safe-mode`を実行する。
+
+Cycle 004 Update
+Result: PASS - ONE EXPLICIT OPENROUTER RETRY COMPLETED
+Root Cause: Safe Mode reservationに、外部一時障害後の明示的一回再送を削除なしで監査・承認する制御面が存在しなかった。
+Recovery Design: 元reservationを保持し、決定的なoperator retry task、PENDING/CONSUMED承認台帳、共通Provider境界の一回性検査を追加した。
+Validation: Compile PASS、Unit 265 PASS、Integration 9 PASS、targeted 59 PASS、Mock CLI E2E PASS。
+Real Result: Quality Reviewer 1 callで正常応答。自動retry 0、specialist call 0、重複call 0。revision_requiredは品質判断としてCycle 005へ移行。
+
+Cycle 005 Update
+Result: PASS - IMPLEMENTATION / MOCK / FAULT / RECOVERY / ONE EXPLICIT REAL REVISION COMPLETE
+Root Cause: 共通ResearchResult schemaがagent_idとsource_typeを相関させず、provider切替後のResult採用provenance規則もなかった。
+Recovery Design: 22 root schemaを維持したtask別specialization、local category validation、provider reservation provenance filter、Safe Mode明示一revision cycleを追加。
+Validation: Compile PASS、Unit 275 PASS、Integration 9 PASS、Mock CLI E2E PASS。
+Real Result: POLITICIAN / NEWS / PUBLIC_OPINIONのみ再実行し、4カテゴリを再利用。22 sources、Quality Review approved、Researcher COMPLETED_REVISION。Provider calls 4、automatic retries 0。
+
+Cycle 006 Update
+Result: IMPLEMENTATION / MOCK / FAULT / RECOVERY PASS - REAL DELIBERATION RECOVERY PENDING
+Root Cause: Researcherがev_*/src_*を保存できる一方でDeliberationがevidence_*/source_*だけを許可し、Researcher Return後の新Evidence集合と保存済みprimary分析の一致が0件でも明示target外を再利用していた。Revision task identityとnormal-mode reservationも不十分だった。
+Recovery Design: 新規ID prefix強制、旧JSONの読込時canonical化、upstream Evidence dependency closure、決定論的revision task、task_id付きnormal-mode persistent reservation、semantic-invalid payloadの一回限りcontract repairを追加。
+Validation: Compile PASS、Unit 280 PASS、Integration 9 PASS、Doctor READY、31 RD STRICT PASS、実運用state read-only copy Mock Recovery COMPLETED（7 calls / 7 reservations）。
+Real Result: Deliberation Stakeholder 1 callがlocal PayloadValidationErrorで停止。retry 0、下流call 0。既存state/checkpointを保持し、局所`--deliberation-recover`待ち。
+
+1. Debug Cycle一覧
+
+001 Quality Review Logical Task Identity
+Result: PASS
+Root Cause: Researcher Quality ReviewにCycle固有task_idがなく、初回とExternal #1が同じ予約IDへfallbackした。
+
+002 Research Quality Finding Target Contract
+Result: PASS
+Root Cause: findingの修正責任先とProvider再実行先を同じ専門Researcher集合で表現し、Manager級findingを拒否した。
+
+003 OpenRouter Connection Reset
+Result: PARTIAL / STOP
+Root Cause: contract-v2実行中の外部transport ConnectionResetError。Safe Modeによりretry 0で停止。
+
+2. 修正Architecture
+
+- Researcher Quality ReviewへInitial / Internal / External cycle固有の決定論的Logical Task IDを導入。
+- External RevisionをTask、Result、Report、Review、Replyの永続checkpointから再開可能にした。
+- Finding責任先とspecialist Provider revision targetを別Enumに分離。
+- Local Schema rejection時のProvider原文を共通error PMPへ保存し、Schema修正後にAPI call 0で再検証できるようにした。
+- 原文が存在しない旧validation failureだけ、固定contract-v2 identityを1回使用可能にした。
+- Outbox保存後のstate write failureを既存返信の照合で復元可能にした。
+
+3. Regression Coverage
+
+Compile: PASS
+Unit: 257 PASS
+Integration: 9 PASS
+RD STRICT: 31 PASS
+Doctor: READY
+Structured Output cross-schema tests: PASS
+Mock CLI E2E Producer → Delivery: PASS
+
+4. Recovery Coverage
+
+- External specialist results保存後
+- Report integration前後
+- Quality Review request/response境界
+- Local validation failureのraw payload再検証
+- legacy raw payload欠落時のcontract repair
+- revision reply Outbox保存後
+- External #1 / External #2
+- same logical task duplicate block
+- Researcher Return → Deliberation Resume
+
+5. Golden Workflow Result
+
+本番workflow複製では、14/14 ResearchResult、37-source Research Reportを再利用し、Researcher COMPLETED_REVISION、Deliberation内部Revision、deterministic validation passed、Deliberation COMPLETEDまでMockで到達した。
+
+6. Provider Call Impact
+
+Cycle 001 Real Calls: 1（Schema validation failure）
+Cycle 002 Real Calls: 1（Connection reset、response未完了）
+Cycle 003 Additional Calls: 0
+Researcher specialist redispatch: 0
+Automatic retries: 0
+Duplicate calls: 0
+API Cost: unknown（CLIから実測不能）
+
+7. Known Limitations / Remaining Risks
+
+- contract-v2 taskはConnectionReset前に予約済みであり、Safe Modeは同じtaskの再送を遮断する。
+- 外部Provider障害後の明示的なOperator reauthorizationは現在のCLIにない。
+- Deliberation / ConclusionのLogical Task Identityは実E2E継続時の重点監視項目。
+- Fresh Full Real E2Eは未実施。最終用予算を消費せず保持した。
+
+8. Storage Safety
+
+既存workflow/storageを手動編集・削除・初期化していない。変更は正規CLIによるstate/message/reservation更新だけ。保存済みspecialist result、37-source Report、revision countを保持している。
+
+9. Resume Condition
+
+外部Provider状態の回復だけでは、既存reservationにより同一task再送は行われない。次へ進むには、Provider transport failure後の明示的再送をどのように承認・識別・監査するかについてユーザー判断が必要。
+
+Cycle 016 OpenRouter Parameter Guard / Provider Contract Repair
+Result: PASS
+Root Cause: strict response_format対応endpointをroutingの必須条件にしておらず、同一Qwenモデルがroot scalarを二回返した。
+Repair: 全22 rootsへprovider.require_parameters=trueを適用し、元task・operator retryと異なるモデル/task/reservationを使う一回限りcontract repairを追加した。
+Real Result: openai/gpt-5-miniのPosition repairは3候補生成に成功。上流再実行0、元task再送0。
+
+Cycle 017 Decision Evaluation Matrix Contract
+Result: IMPLEMENTATION / MOCK / FAULT PASS, PRODUCTION RESUME PENDING
+Root Cause: 無制限の平坦candidate×criterion配列、JSON Schemaで表現不能な複合一意性、RDの複数候補配列とPydantic singular IDの不一致、PayloadValidationError retry認可欠落。
+Repair: 最大70件、完全一致反復だけの無損失正規化、競合重複・coverage・matrix rating・candidate/profile参照検査、複数候補ID配列、監査可能な一回retryを追加。
+Regression: Full Unit 341 PASS、Integration 9 PASS、31 RD STRICT、22-root strict audit、Mock CLI Producer -> Delivery PASS。
+Provider Calls: failure capture Decision Evaluator Real 1、Cycle 017 implementation/test Real 0、automatic retry 0。
+Remaining: productionへstorage非変更で反映後、保存済みPosition checkpointからDecision Evaluatorを一回だけ再開する。
+
+Cycle 017 Real Retry Update
+Result: Decision Evaluator PASS / Decision Integrator PASS / Quality Review contract failure captured。
+Provider Calls: Decision Evaluator 1、Decision Integrator 1、Quality Reviewer 1、automatic retry 0。Positionおよび全upstream call 0。
+Transition: Quality Reviewerが承認と内部/上流revisionを混在させ、runtime validatorが正しく停止。Cycle 018へ移行。
+
+Cycle 018 Conclusion Quality Decision / Routing Contract
+Result: PASS - IMPLEMENTATION / UNIT / INTEGRATION / MOCK / FAULT / ONE EXPLICIT REAL RETRY COMPLETE
+Root Cause: Conclusion Quality Reviewer RDの正式状態名がrevision_requiredとrejectedへ分裂し、Promptにstatus/readiness/internal revision/upstream return/blockedの排他的対応表がなかった。
+Repair: RD vocabularyをruntime 4値へ統一。approved系は前進のみ、internal revisionとdeliberation_returnは相互排他、blockedは経路確定不能だけに限定。revision targetを有限Enum化し、finding参照をcross-check。
+Regression: Targeted 67 PASS、RD/OpenRouter/retry 44 PASS、Full Unit 350 PASS、Integration 9 PASS、31 RD STRICT、22-root strict audit、Mock CLI Producer -> Delivery PASS。
+Fault: 観測矛盾payloadでFAILED後、明示retryは保存済みPosition/Evaluation/Integrationを再利用しQuality Reviewerだけを再実行してWAITING_HUMAN_SELECTION。
+Provider Calls: Cycle 018実装/Mock/Fault Real 0。明示retryはQuality Reviewer 1、Position/Evaluation/Integration/upstream 0、automatic retry 0。
+Real Result: strict Schema error 0。revision_required / not_ready / targeted / Position Generatorだけという整合した内部revision判定を保存し、Safe Modeが追加Provider call直前で停止。承認/routing矛盾は解消した。
+Transition: Safe Mode停止後に保存済みReviewを明示承認して内部revisionへ進めるConclusion CLI経路がないため、Cycle 019へ移行。
+
+Cycle 020 Verified Provider Model Compatibility Recovery
+Result: PASS - IMPLEMENTATION / UNIT / INTEGRATION / MOCK / FAULT / ONE EXPLICIT REAL RETRY COMPLETE
+Root Cause: 成功済みdistinct-model contract repairがtask-local overrideのままで、将来のrevision logical taskへ検証済み互換modelが継承されなかった。revision cycleでもlegacy initial checkpointを復元候補にする潜在不整合もあった。
+Repair: provider/agent/output schema/incompatible model単位のappend-only verified binding、旧PMP/authorizationからの検証付きbackfill、revision cycleでのlegacy checkpoint除外を追加。
+Regression: Full Unit 362 PASS、Integration 9 PASS、31 RD STRICT、22-root strict audit、Mock CLI Producer -> Delivery PASS、exact production state clone recovery PASS。
+Provider Calls: Cycle 020実装/Mock/Fault Real 0。明示CLI 1回でPosition/Evaluator/Integrator/Quality Reviewerの4 call、upstream 0、automatic retry 0、duplicate 0。実測costは保存されずunknown。
+Real Result: Positionはopenai/gpt-5-miniで3候補を生成し、後続3段階まで完了。新たなunknown claim traceability findingに対しSafe Modeが自動revision直前で停止。
+Transition: Decision Integration/Packageの再帰traceability deterministic validation漏れをCycle 021で修正する。
+
+Cycle 021 Conclusion Recursive Reference Integrity
+Result: PASS / NEW FAILURE CAPTURED - IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT / EXACT SAVED-STATE / ONE REAL ATTEMPT COMPLETE
+Root Cause: ConclusionはJSON shapeだけを確定し、Decision Contextのcanonical集合に対するinput-aware ID実在性検査をsuccess保存前に行っていなかった。ValidatorもPositionと一部Integrator evidenceだけで、nested/array/packageのclaim/candidate/source/analysis等を再帰検査していなかった。legacy Decision Contextにもkey_claim_ids外のtradeoff参照が存在した。
+Repair: Pydantic後・success保存前のConclusion output contract、全artifactの再帰reference validator、保存JSONを変えないprovider-facing Decision Context view、saved artifactによる最初の不正producerへのrevision narrowing、明示revision slotのoff-by-one修正を追加。
+Regression: Full Unit 369 / Full discovery 389 PASS、31 RD STRICT、Common spec audit、5-layer Mock E2E、6 delivery artifacts PASS。Faultではunknown IDをIntegratorで確定前に拒否。production pre-call cloneはrevision_2、2 Mock callsでWAITING_HUMAN_SELECTION / approved / unknown refs 0。
+Provider Calls: 明示CLI一回でReal Integrator 1、QR/upstream/automatic retry 0。Integratorはcandidate_idsへ説明キー名3件を混入し、新local contractがsuccess保存前に拒否。RD/Schema件数矛盾と動的enum欠落をCycle 023へ移行。
+
+Cycle 022 Verification Isolation / Active Surface
+Result: PASS - FULL VERIFY COMPLETE
+Root Cause: verify.pyのcompileallがarchiveまで走査してWindows MAX_PATHに達し、unittestへ隔離PRDCP_DATA_DIRを渡さず過去Mock Reservationと衝突した。
+Repair: active Python surfaceを明示しarchive/storageをcompile対象外化。unit/integrationとMock E2Eへ別々の一時storageを強制した。Reservation安全機構や既存データは変更・削除していない。
+Regression: 専用2 test、代表fault再実行、Full Unit 369 / Full discovery 389、Doctor、5-layer Mock E2E、6 artifactsすべてPASS。
+Provider Calls: Real 0、cost $0。
+
+Cycle 023 Request-bound Reference Schema / Saved Payload Recovery
+Result: PASS - IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT / EXACT SAVED-STATE / ONE LOCALIZED REAL RECOVERY COMPLETE
+Root Cause: RDはsingle/conditional selectionとminimum candidate 1を許す一方、IntegratedOption.candidate_idsだけがmin_length=2だった。静的strict schemaもrequest固有IDをstring以上に拘束せず、LLMが件数合わせで説明キー名3件をcandidate ID配列へ入れた。
+Repair: candidate_ids min1、Conclusion全4 outputのrequest-bound ID enum、local validator二段防御、保存済みreference-invalid rawから未知の配列要素だけを除去する監査付き無再送Recoveryを追加。未知scalar・自由文・必須不足・Reservation不一致は非修復。
+Regression: Targeted 6、Related 146、Full Unit 371、Full discovery 391、31 RD STRICT、5-layer Mock E2E、6 artifacts PASS。production exact cloneはIntegrator 0 / QR 1、unknown refs 0、approved、WAITING_HUMAN_SELECTION。
+Provider Calls: Cycle開始Real Integrator 1 / QR 0。Recovery Real Integrator 0 / QR 1、automatic retry 0。QRは上流問題解消を確認し、Manager Packageのalternatives欠落だけをrevision_requiredとして返したためCycle 024へ移行。
+
+Cycle 024 Conclusion Alternative Materialization / Bounded Manager Repair
+Result: PASS - IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT / EXACT SAVED-STATE / ONE EXPLICIT OPENROUTER REVIEW COMPLETE
+Root Cause: Managerがviable集合ではなくrecommended_options[1:]だけからalternativesを構築し、Validatorも`viable - primary == alternatives`を検査しなかったため、viableなfallbackがPackageから脱落したままpassed=trueになった。
+Repair: 全viable非primary候補をsaved comparison/conditional/sensitivityから決定論的にmaterializeし、coverage/detail/metricsをcross-check。revision上限を変更せず、Manager-only alternative defectに限るepoch一回の監査済みrepairと専用QR taskを追加。
+Regression: New 3、Related 94、Full Unit 374、Integration 9、Full discovery 394、31 RD STRICT、5-layer Mock E2E、6 artifacts PASS。production exact cloneはrevision_count 2、Manager repair 1、Position/Evaluation/Integration 0、QR 1、approved、WAITING_HUMAN_SELECTION。
+Provider Calls: Cycle 024 implementation/test Real 0。productionはQR 1だけ、Position/Evaluation/Integration/upstream/automatic retry 0。Result approved / ready / findings 0、WAITING_HUMAN_SELECTION。次は明示Human Selection後にPlaywrightを局所再開する。
+
+Cycle 025 Playwright Checkpoint Recovery / Operator Retry
+Result: PASS / NEW FAILURE CAPTURED - PRODUCTION LOCALIZED REAL RETRY COMPLETE
+Root Cause: Playwrightだけがcycle固有Logical Task ID、FAILED checkpoint recovery、課金済み可能性のあるProvider failureを一回だけ明示再送する制御面を持たず、正常なNarrative保存後のScriptwriter中断から安全に前進できなかった。
+Repair: 4段階へupstream/revision固有task ID、saved Result復元、Final Conclusion/依存ID検査、unanswered/correlation guard、legacy Agent ID reservation互換、one-shot authorization、`--playwright-recover`/`--playwright-provider-retry`を追加。Resumeは新Conclusion Handoff専用のまま維持。
+Regression: Full discovery 404、31 RD STRICT、22-root strict audit、5-layer Mock E2E、6 delivery artifacts PASS。production exact cloneはplain recover call 0で停止後、Narrative 0 / Script retry 1 / Citation 1 / Visual 1でCOMPLETED、Narrative不変、messages 5 -> 12、duplicate 0。
+Provider Calls: failure capture Real Narrative 1 + interrupted Script 1。Cycle 025 implementation/test Real 0。productionはScript retry 1成功 + Citation 1成功 + Visual 1失敗、Narrative 0、automatic retry 0。Visualは`z-ai/glm-4.5-air`にStructured Outputs対応endpointがないHTTP 404で停止し、保存済み3段階を維持してCycle 026へ移行。
+
+Cycle 026 Structured Output Model Capability Repair
+Result: PASS / NEW FAILURE CAPTURED - PRODUCTION ONE DISTINCT-MODEL REAL REPAIR COMPLETE
+Root Cause: OpenRouterの`require_parameters=true`は正しくfail closedしたが、Visual Directorの設定モデル`z-ai/glm-4.5-air`にStructured Outputs要求を扱えるendpointがなく、汎用NonRetryable errorのままでは同一モデルretryとも安全な別モデル移行とも区別できなかった。
+Repair: endpoint能力404をProviderCapabilityErrorへ分類し、同一モデルretryを禁止する一回限りのcapability repair authorization、専用task/reservation、Playwright checkpoint recovery、成功後のprovider-Agent-output schema互換bindingを追加。旧NonRetryable 404 checkpointもexact signatureで読込互換。
+Regression: Targeted 93、Full discovery 408、31 RD STRICT、22-root strict audit、5-layer Mock E2E、6 artifacts PASS。production exact cloneはplain recover 0、same-model repair 0、Visual distinct-model Mock 1だけで能力修復を完了し、既存Narrative/Script/Citation不変、authorization CONSUMED、binding記録を確認。
+Provider Calls: Cycle 026 implementation/test Real 0、Mock exact clone Visual 1。productionはVisual `openai/gpt-5-mini` 1回成功、他Agent 0、automatic retry 0。authorization CONSUMED、VisualPlan Pydantic検証、compatibility binding保存。続くdeterministic validationがCitation 5件とVisual 13件の計18件を検出してBLOCKEDとなり、Cycle 027へ移行。
+
+Cycle 027 Playwright Safe Mode Explicit Revision / Request-bound Reference Integrity
+Result: PASS - PRODUCTION LOCALIZED OPENROUTER REVISION AND DELIVERY COMPLETE
+Root Cause: Safe Modeが自動遷移禁止ではなくrevision capacityを0へ変更して修正可能なfindingをBLOCKED化していた。Citation/Visual strict schemaはJSON shapeのみを拘束し、現在のparagraph/evidence/source/asset集合へ参照を束縛していなかった。Manager所有のcanonical limitation 113件もCitation LLMに再転記させていた。
+Repair: `--playwright-revise`による一回性明示cycle、Safe Modeとrevision capacityの分離、request-specific strict ID enum、Citation/Visual same-output cross-check、canonical disclosureのManager deterministic preservation、legacy BLOCKED read compatibilityを追加した。
+Regression: Focused 66、Full verify 417、Compile、31 RD STRICT、22-root strict recursive audit、5-layer Mock E2E、6 delivery artifacts PASS。exact production cloneはRevision 1、findings 0、APPROVED_WITH_LIMITATIONS、COMPLETED。Citation後のVisual fault recoveryとpersistent-invalid一cycle停止を確認。
+Provider Calls: implementation/test Real 0。production明示Revision action 1回でCitation 1、Visual 1、上流4層/Narrative/Script 0、automatic retry 0、revision 2 0、duplicate 0。costはreservationにusageがなくunknown。
+Real Result: Playwright Revision 1はOpenRouter `openai/gpt-5-mini`でCitation/Visualを各1回実行。deterministic validationはsections 10、paragraphs 25、citation mappings 6、visual cues 25、chart requests 2、errors 0。Final Gate APPROVED_WITH_LIMITATIONS、Delivery 6件、CLI statusは5層すべてCOMPLETED系を表示した。既存workflowのRecovery/Revision E2Eはprovider=openrouterでDeliveryまで完走。Fresh all-OpenRouter workflowは多数callの別費用判断として未実施。
+
+Cycle 028 OpenRouter Model Capability Preflight / Topic Scout Migration
+Result: PARTIAL PASS - IMPLEMENTATION / STATIC / 429 TESTS / 31 RD STRICT / 22 SCHEMA ROOTS / MOCK 5-LAYER / FAULT / DOCTOR COMPLETE; FRESH REAL E2E BLOCKED
+Root Cause: strict Structured Output契約を送信時までlive model/Endpoint capabilityと照合せず、perplexity/sonar Topic Scoutがrequire_parameters=trueでrouting先0件になった。
+Repair: 公開metadataのfail-closed Preflightを全共通Provider経路とDeliberation Managerの予約前へ追加。Doctorで31 effective modelsをalias/binding込み監査。Topic Scoutをgoogle/gemini-3.7-flashへ移行。Discord Completed/Current/Pendingを保存State基準へ分離。Windows CLI UTF-8を固定。
+Regression: Final full verify 429 PASS、31 RD STRICT、22-root recursive strict schema audit、5-layer Mock E2E、6 delivery artifacts PASS。非対応/不存在/UNKNOWN/alias/env override/Manager副作用/Discord表示のFault PASS。
+Doctor: Topic Scout 6/6対応。全体はCompatible 22/31、Unknown 0、Failed 9。残る9件はProducer/ResearcherのPerplexity検索系。
+Provider Calls: paid chat completion 0、automatic retry 0、duplicate 0、generation cost $0。公開metadata GETのみ。
+Storage: workflow 6c18e466-fce5-403b-bb68-6432b735dd9d はFAILEDかつSHA256 26BD96...を維持。workflow 15f3f5c5-4167-447d-b255-069fc7f5beb2 は5層COMPLETED系を維持。既存State/PMP/checkpoint/reservation/outboxは未変更。
+Stop: 残る9 Agentを単純model置換すると検索・出典取得の意味を破壊し得る。Doctor 31/31までReal Fresh E2Eを開始しない。次Cycleでstrict対応model + 明示web-search plugin、または検索能力を持つ別Endpointを選定する。

@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "position_generator_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.1",
     "status": "stable",
     "agent_identity": {
       "agent_id": "conclusion.position_generator",
@@ -761,6 +761,8 @@
         "Deliberationへの再分析要求候補としてmissing_informationへ記録する"
       ],
       "prohibited_traceability_behavior": [
+        "Decision Contextのcanonical allowlistにないclaim_id、analysis_id、evidence_idまたはsource_idを使用する",
+        "full Deliberation payloadの別artifactまたは自由文からtraceability IDを採用する",
         "存在しないanalysis_idを生成する",
         "存在しないevidence_idまたはsource_idを生成する",
         "一つのEvidenceを無関係な候補要素へ機械的に関連付ける",
@@ -1045,6 +1047,8 @@
         "複数候補を最終案として統合する",
         "新しいEvidenceまたはSourceを作成する",
         "Deliberationに存在しない因果関係を確定する",
+        "Decision Contextのcanonical allowlistに存在しないclaim_id、analysis_idまたはevidence_idを使用する",
+        "full Deliberation payloadの別artifactまたは自由文からTraceability IDを採用する",
         "特定の政治的・思想的立場へ誘導するため候補を歪める",
         "反対証拠または不確実性を削除する",
         "動画向けの説得表現を作成する"
@@ -1098,6 +1102,7 @@
         "Position Generatorは候補生成専任である",
         "候補の評価、順位付けおよび最終選択を行わない",
         "候補はDeliberation ResultおよびResearcher Evidenceに拘束される",
+        "supporting IDはDecision Contextのkey_claim_ids、analysis_idsおよびevidence_idsから完全一致で選択する",
         "候補は単なる賛成・反対ではなく、立場・提言・実施条件を含むパッケージとする",
         "各候補の価値判断、前提、トレードオフおよび不確実性を明示する",
         "各候補からAnalysis、EvidenceおよびSourceまでの追跡性を維持する",

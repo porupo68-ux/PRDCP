@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+import re
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deliberation.schemas.identifiers import (
+    CHALLENGE_PREFIXES,
     COUNTERARGUMENT_ANALYSIS_PREFIX,
     COUNTERARGUMENT_PREFIXES,
     EVIDENCE_PREFIXES,
@@ -12,48 +15,72 @@ from deliberation.schemas.identifiers import (
     require_identifier_list,
 )
 
+ChallengeId = Annotated[
+    str,
+    Field(min_length=1, pattern=r"^(?:challenge_|steelman_).+"),
+]
+CounterargumentId = Annotated[
+    str,
+    Field(min_length=1, pattern=r"^(?:counterargument_|counter_).+"),
+]
+ALTERNATIVE_INTERPRETATION_PREFIX = "alt_interp_"
+AlternativeInterpretationId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        pattern=r"^alt_interp_.+",
+        description=(
+            "Counterargument-owned alternative interpretation identifier using "
+            "alt_interp_*; distinct from Causal Analyst alternative_/alt_exp_* IDs"
+        ),
+    ),
+]
+
 
 class Challenge(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    challenge_id: str = Field(min_length=1)
+    challenge_id: ChallengeId
     target_claim_ids: list[str] = Field(min_length=1)
     argument: str = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
     strength: str = Field(min_length=1)
 
+    @field_validator("challenge_id")
+    @classmethod
+    def validate_challenge_id(cls, value: str) -> str:
+        if not value.startswith(CHALLENGE_PREFIXES):
+            raise ValueError("challenge_id must use challenge_* or steelman_*")
+        return value
 
-class Counterargument(BaseModel):
+
+RevisionAgentId = Literal[
+    "deliberation.argument_analyst",
+    "deliberation.causal_structural_analyst",
+    "deliberation.stakeholder_response_analyst",
+    "deliberation.counterargument_analyst",
+    "deliberation.manager",
+]
+ALLOWED_REVISION_AGENT_IDS = {
+    "deliberation.argument_analyst",
+    "deliberation.causal_structural_analyst",
+    "deliberation.stakeholder_response_analyst",
+    "deliberation.counterargument_analyst",
+    "deliberation.manager",
+}
+
+
+class CounterargumentBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    counterargument_id: str = Field(min_length=1)
+    counterargument_id: CounterargumentId
     target_claim_ids: list[str] = Field(min_length=1)
     argument: str = Field(min_length=1)
     severity: str = Field(min_length=1)
     impact: str = Field(min_length=1)
     supporting_evidence_ids: list[str] = Field(default_factory=list)
-    required_revision: bool
-    revision_target_agent_ids: list[str] = Field(default_factory=list)
     remaining_uncertainty: str = ""
     research_gap_required: bool
-    acceptance_conditions: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_challenge_shape(cls, value: object) -> object:
-        if not isinstance(value, dict) or "counterargument_id" in value:
-            return value
-        normalized = dict(value)
-        normalized["counterargument_id"] = normalized.pop("challenge_id")
-        normalized["severity"] = normalized.pop("strength", "undetermined")
-        normalized["impact"] = normalized.get("argument", "legacy impact not recorded")
-        normalized["supporting_evidence_ids"] = normalized.pop("evidence_ids", [])
-        normalized.setdefault("required_revision", False)
-        normalized.setdefault("revision_target_agent_ids", [])
-        normalized.setdefault("remaining_uncertainty", "")
-        normalized.setdefault("research_gap_required", False)
-        normalized.setdefault("acceptance_conditions", [])
-        return normalized
 
     @field_validator("counterargument_id")
     @classmethod
@@ -71,21 +98,21 @@ class Counterargument(BaseModel):
             field_name="supporting_evidence_ids",
         )
 
-    @model_validator(mode="after")
-    def validate_revision_route(self) -> "Counterargument":
-        if self.required_revision and not self.revision_target_agent_ids:
-            raise ValueError(
-                "required_revision counterarguments need revision_target_agent_ids"
-            )
-        if self.required_revision and not self.acceptance_conditions:
-            raise ValueError(
-                "required_revision counterarguments need acceptance_conditions"
-            )
-        if not self.required_revision and self.revision_target_agent_ids:
-            raise ValueError(
-                "non-revision counterarguments cannot name revision_target_agent_ids"
-            )
-        return self
+
+
+class RevisionRequiredCounterargument(CounterargumentBase):
+    required_revision: Literal[True]
+    revision_target_agent_ids: list[RevisionAgentId] = Field(min_length=1)
+    acceptance_conditions: list[str] = Field(min_length=1)
+
+
+class NonRevisionCounterargument(CounterargumentBase):
+    required_revision: Literal[False]
+    revision_target_agent_ids: list[RevisionAgentId] = Field(max_length=0)
+    acceptance_conditions: list[str] = Field(default_factory=list)
+
+
+Counterargument = RevisionRequiredCounterargument | NonRevisionCounterargument
 
 
 class IntegrationRevision(BaseModel):
@@ -95,8 +122,8 @@ class IntegrationRevision(BaseModel):
     target_item_id: str = Field(min_length=1)
     required_change: str = Field(min_length=1)
     reason: str = Field(min_length=1)
-    source_counterargument_ids: list[str] = Field(min_length=1)
-    revision_target_agent_ids: list[str] = Field(min_length=1)
+    source_counterargument_ids: list[CounterargumentId] = Field(min_length=1)
+    revision_target_agent_ids: list[RevisionAgentId] = Field(min_length=1)
     acceptance_conditions: list[str] = Field(min_length=1)
     research_gap_required: bool
 
@@ -134,7 +161,7 @@ class ChallengeCondition(BaseModel):
 class AlternativeInterpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    interpretation_id: str = Field(min_length=1)
+    interpretation_id: AlternativeInterpretationId
     summary: str = Field(min_length=1)
 
 
@@ -155,6 +182,7 @@ class CounterargumentAnalysisResult(BaseModel):
 
     analysis_id: str = Field(
         min_length=1,
+        pattern=r"^counterargument_analysis_.+",
         description="Unique counterargument identifier using counterargument_analysis_*",
     )
     task_id: str = Field(
@@ -177,7 +205,7 @@ class CounterargumentAnalysisResult(BaseModel):
     def normalize_legacy_counterarguments(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
-        normalized: dict[str, Any] = dict(value)
+        normalized: dict[str, Any] = deepcopy(value)
         revision_ids = {
             counterargument_id
             for revision in normalized.get("required_revisions", [])
@@ -195,12 +223,28 @@ class CounterargumentAnalysisResult(BaseModel):
             "decisive",
         }
         counterarguments: list[Any] = []
+        legacy_counterargument_ids: dict[str, str] = {}
         for raw in normalized.get("counterarguments", []):
-            if not isinstance(raw, dict) or "counterargument_id" in raw:
+            if not isinstance(raw, dict):
                 counterarguments.append(raw)
                 continue
             item = dict(raw)
-            counterargument_id = str(item.get("challenge_id", ""))
+            if "counterargument_id" in item:
+                item.setdefault("required_revision", False)
+                item.setdefault("revision_target_agent_ids", [])
+                item.setdefault("remaining_uncertainty", "")
+                item.setdefault("research_gap_required", False)
+                item.setdefault("acceptance_conditions", [])
+                counterarguments.append(item)
+                continue
+            legacy_challenge_id = str(item.get("challenge_id", ""))
+            suffix = re.sub(
+                r"[^a-zA-Z0-9_-]+",
+                "_",
+                legacy_challenge_id,
+            ).strip("_")
+            counterargument_id = f"counter_legacy_{suffix or 'unknown'}"
+            legacy_counterargument_ids[legacy_challenge_id] = counterargument_id
             severity = str(item.get("severity") or item.get("strength") or "undetermined")
             required_revision = (
                 counterargument_id in revision_ids
@@ -232,6 +276,13 @@ class CounterargumentAnalysisResult(BaseModel):
             item.pop("evidence_ids", None)
             counterarguments.append(item)
         normalized["counterarguments"] = counterarguments
+        for revision in normalized.get("required_revisions", []):
+            if not isinstance(revision, dict):
+                continue
+            revision["source_counterargument_ids"] = [
+                legacy_counterargument_ids.get(identifier, identifier)
+                for identifier in revision.get("source_counterargument_ids", [])
+            ]
         return normalized
 
     @field_validator("analysis_id", mode="before")
@@ -240,7 +291,11 @@ class CounterargumentAnalysisResult(BaseModel):
         return canonicalize_analysis_id(
             value,
             canonical_prefix=COUNTERARGUMENT_ANALYSIS_PREFIX,
-            legacy_prefixes=("analysis_counterargument_", "integration_initial_"),
+            legacy_prefixes=(
+                "analysis_counterargument_",
+                "integration_initial_",
+                "counteranalysis_",
+            ),
         )
 
     @model_validator(mode="after")
@@ -275,3 +330,54 @@ class CounterargumentAnalysisResult(BaseModel):
             for item in self.counterarguments
             if item.required_revision and item.counterargument_id not in revision_sources
         )
+
+
+def normalize_saved_counterargument_payload(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Repair directly inferable provider-contract errors in a saved raw payload."""
+
+    normalized = deepcopy(value)
+    original_analysis_id = str(normalized.get("analysis_id") or "")
+    if original_analysis_id.startswith("counteranalysis_"):
+        normalized["analysis_id"] = (
+            COUNTERARGUMENT_ANALYSIS_PREFIX
+            + original_analysis_id[len("counteranalysis_") :]
+        )
+
+    removed_targets: dict[str, list[str]] = {}
+    for item in normalized.get("counterarguments", []):
+        if not isinstance(item, dict):
+            continue
+        targets = [
+            target
+            for target in item.get("revision_target_agent_ids", [])
+            if isinstance(target, str)
+        ]
+        kept = [target for target in targets if target in ALLOWED_REVISION_AGENT_IDS]
+        if not item.get("required_revision"):
+            kept = []
+        removed = [target for target in targets if target not in kept]
+        if removed:
+            removed_targets[str(item.get("counterargument_id") or "unknown")] = removed
+        item["revision_target_agent_ids"] = kept
+
+    for item in normalized.get("required_revisions", []):
+        if not isinstance(item, dict):
+            continue
+        targets = [
+            target
+            for target in item.get("revision_target_agent_ids", [])
+            if isinstance(target, str)
+        ]
+        kept = [target for target in targets if target in ALLOWED_REVISION_AGENT_IDS]
+        removed = [target for target in targets if target not in kept]
+        if removed:
+            removed_targets[str(item.get("revision_id") or "unknown")] = removed
+        item["revision_target_agent_ids"] = kept
+
+    return normalized, {
+        "analysis_id_before": original_analysis_id,
+        "analysis_id_after": normalized.get("analysis_id"),
+        "removed_revision_target_agent_ids": removed_targets,
+    }

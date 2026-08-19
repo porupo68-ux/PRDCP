@@ -139,14 +139,14 @@ def decision_evaluation(input_data: dict, *, blocking_candidate_id: str | None =
         "candidate_evaluations": evaluations,
         "comparison_matrix": matrix,
         "conditional_advantages": [
-            {"profile_id": "effectiveness_priority", "advantaged_candidate_id": candidates[0]["position_candidate_id"]},
-            {"profile_id": "equity_priority", "advantaged_candidate_id": candidates[1]["position_candidate_id"]},
+            {"profile_id": "effectiveness_priority", "advantaged_candidate_ids": [candidates[0]["position_candidate_id"]]},
+            {"profile_id": "equity_priority", "advantaged_candidate_ids": [candidates[1]["position_candidate_id"]]},
         ],
         "disqualification_findings": disqualified,
         "sensitivity_analysis": [
-            {"profile_id": "effectiveness_priority", "preferred_candidate_id": candidates[0]["position_candidate_id"], "reason": "効果と直接性を優先"},
-            {"profile_id": "equity_priority", "preferred_candidate_id": candidates[1]["position_candidate_id"], "reason": "分配影響を優先"},
-            {"profile_id": "risk_averse", "preferred_candidate_id": candidates[2]["position_candidate_id"], "reason": "可逆性を優先"},
+            {"profile_id": "effectiveness_priority", "preferred_candidate_ids": [candidates[0]["position_candidate_id"]], "reason": "効果と直接性を優先"},
+            {"profile_id": "equity_priority", "preferred_candidate_ids": [candidates[1]["position_candidate_id"]], "reason": "分配影響を優先"},
+            {"profile_id": "risk_averse", "preferred_candidate_ids": [candidates[2]["position_candidate_id"]], "reason": "可逆性を優先"},
         ],
         "missing_information": [
             {"candidate_id": candidates[2]["position_candidate_id"], "criterion": "POLITICAL_FEASIBILITY", "status": "NOT_EVALUABLE"}
@@ -182,7 +182,9 @@ def decision_integration(input_data: dict) -> dict:
             {"candidate_id": item, "reason": "非相殺のBlocking Issue"} for item in sorted(blocked)
         ],
         "candidate_comparison_summary": [
-            {"candidate_id": item["position_candidate_id"], "summary": item["summary"]} for item in candidates
+            {"candidate_id": item["position_candidate_id"], "summary": item["summary"]}
+            for item in candidates
+            if item["position_candidate_id"] in viable
         ],
         "recommended_options": [
             {"candidate_id": item, "recommendation_type": "conditional", "reason": "優先価値により選択が変わる"}
@@ -213,7 +215,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
     base = {
         "review_id": new_id("conclusion_review"),
         "reason": "ConclusionのSchema、Traceability、責務境界、Human Gate準備状態を確認した",
-        "playwright_readiness": "READY",
+        "playwright_readiness": "ready",
         "findings": [],
         "blocking_finding_ids": [],
         "revision_scope": "none",
@@ -230,7 +232,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             **base,
             "status": "revision_required",
             "reason": "候補間の実質的多様性を修正する必要がある",
-            "playwright_readiness": "NOT_READY",
+            "playwright_readiness": "not_ready",
             "findings": [{
                 "finding_id": finding_id,
                 "severity": "MAJOR",
@@ -249,7 +251,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             **base,
             "status": "revision_required",
             "reason": "共通評価基準の適用を修正する必要がある",
-            "playwright_readiness": "NOT_READY",
+            "playwright_readiness": "not_ready",
             "findings": [{
                 "finding_id": finding_id,
                 "severity": "MAJOR",
@@ -268,7 +270,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             **base,
             "status": "revision_required",
             "reason": "Stakeholder分析が不足しておりConclusion内では修正できない",
-            "playwright_readiness": "NOT_READY",
+            "playwright_readiness": "not_ready",
             "findings": [{
                 "finding_id": finding_id,
                 "severity": "MAJOR",
@@ -295,7 +297,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             **base,
             "status": "blocked",
             "reason": "決定論的検証またはWorkflow完全性を満たしていない",
-            "playwright_readiness": "NOT_READY",
+            "playwright_readiness": "not_ready",
             "findings": [{
                 "finding_id": finding_id,
                 "severity": "CRITICAL",
@@ -312,7 +314,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
             **base,
             "status": "approved_with_conditions",
             "reason": "開示済みの制約を保持すればHuman Selectionへ進める",
-            "playwright_readiness": "READY_WITH_CONDITIONS",
+            "playwright_readiness": "ready_with_conditions",
             "limitations_to_disclose": ["一部の実現可能性はNOT_EVALUABLE"],
         }
     return {**base, "status": "approved"}

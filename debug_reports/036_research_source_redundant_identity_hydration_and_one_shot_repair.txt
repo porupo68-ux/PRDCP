@@ -1,0 +1,227 @@
+PRDCP v2 Debug Report
+Cycle: 036
+Title: Research Source Redundant Identity Hydration and One-Shot Repair
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: DEPLOYED / MOCK / FAULT / FULL REGRESSION / PRODUCTION CLONE COMPLETE; FRESH REAL AUTHORIZATION PENDING
+
+1. What happened
+
+The explicitly authorized Cycle 035 runtime-adapter repair invoked one Gemini Structured
+Reasoning task and stopped on a new deterministic output-contract failure:
+
+OUTPUT_CONTRACT_ERROR: ungrounded source identity metadata for
+source_008333aebcd976549e1a618a: 内閣官房 / 内閣府知的財産戦略推進事務局
+
+The consumed task identity is:
+
+task_1abf9d163f0f4c20980e4221ca960e1e_runtime_adapter_repair_1
+
+The correlated ERROR PMP is 7ffba5ca-18dc-4636-b7a6-680f89a6c02f with parent request
+cd5d014f-29b6-49a9-8421-499569e207a8. The consumed authorization is
+ec189c10-1fa8-4686-a62a-4f619f4098e7 and the Provider model is
+google/gemini-3.7-flash.
+
+The command stopped immediately. Retrieval, the other eight Researcher reasoning tasks
+and Quality Review were not invoked.
+
+2. Root cause
+
+ResearchSource contained three independent representations of the same source identity:
+
+* source_name;
+* author_or_organization;
+* the source-type-specific identity such as GovernmentMetadata.organization.
+
+The latter is the typed, category-specific canonical field. The first two are redundant
+presentation aliases, but the strict Provider schema asked Gemini to generate all three
+independently. Even when the facts were compatible, normal wording variation could make
+the redundant alias fail exact grounding.
+
+For the observed source, 内閣府知的財産戦略推進事務局 is present in the saved PDF with a
+layout whitespace difference already handled by Cycle 035. 内閣官房 is represented by the
+immutable saved www.cas.go.jp URL. The combined value was nevertheless searched as one
+literal substring, which cannot exist across the URL and document text boundary.
+
+This was not missing Evidence and not a Retrieval failure. It was an output ownership
+error: a value derived from already structured identity metadata was still delegated to
+the generative Provider.
+
+3. Why Mock and Doctor did not detect it
+
+Mock fixtures produced identical values in source_name, author_or_organization and typed
+metadata, so no spelling divergence occurred. Cycle 035 Fault Injection covered Unicode,
+PDF layout whitespace, country domains and analytical classifications, but did not inject
+a composite organization into a redundant alias.
+
+Doctor verifies runtime configuration and Provider capability. It cannot detect semantic
+duplication inside a valid schema. The required protection belongs in strict-schema
+specialization, deterministic output hydration and contract Fault Injection.
+
+4. Repair design
+
+For every one of the seven Researcher source categories, the Provider-bound strict schema
+now omits source_name and author_or_organization. The model produces one typed primary
+identity only:
+
+* EXPERT: expert_name
+* ACADEMIC: journal_name
+* GOVERNMENT: organization
+* NEWS: media_name
+* PUBLIC_OPINION: platform
+* POLITICIAN: politician_name
+* INDUSTRY: organization_name
+
+After the response returns, the shared ResearcherAgent deterministically hydrates both
+presentation aliases from that primary identity. Existing Pydantic models, saved JSON,
+Research Report materialization, deduplication and downstream contracts remain unchanged.
+The compatibility change is therefore confined to the Provider boundary.
+
+Government composite organizations remain permitted only when every component is
+individually grounded. A component must occur in normalized saved title/URL/content or be
+an exact member of a closed alias list for the immutable official hostname. The mapping
+covers the observed cas.go.jp case and audited official domains used by the current saved
+Contexts. An unrelated organization such as 総務省 on cas.go.jp remains rejected.
+
+Producer General Opinion uses its separate SupportingSource schema, already reduced to a
+retrieved source_id, and is not changed. Deliberation, Conclusion and Playwright do not
+emit ResearchSource identity aliases and are unaffected.
+
+5. Recovery identity and billing safety
+
+A new explicit command is provided:
+
+py main.py --researcher-runtime-identity-repair WORKFLOW_ID --provider openrouter --safe-mode
+
+It creates exactly one task identity:
+
+<original_task_id>_runtime_identity_repair_1
+
+Authorization requires the consumed Cycle 035 adapter authorization, its exact Provider
+reservation and model, the correlated NonRetryableAgentError, a composite-identity error
+for a source_id in the saved Context, and the unchanged Retrieval ID and SHA-256. A plain
+unrelated identity failure is not eligible for this recovery.
+
+The authorization is consumed only after its new reservation is durable and before the
+Provider call. Failure or ambiguity prevents a second invocation. Success returns to the
+existing Cycle 032 state machine, which executes only the eight untouched tasks,
+integration and one Quality Review. Retrieval is never re-run.
+
+6. Regression and Fault Injection
+
+PASS  All seven Researcher strict schemas omit redundant identity aliases
+PASS  Empty-Retrieval schema also omits aliases and allows zero output sources
+PASS  Provider-generated alias spellings are overwritten deterministically
+PASS  cas.go.jp plus saved PDF text grounds both components of the observed organization
+PASS  Unrelated organization on the same domain is rejected
+PASS  Country/domain grounding and PDF whitespace normalization remain intact
+PASS  Non-composite identity failure is ineligible for this recovery
+PASS  Consumed identity repair cannot invoke the Provider a second time
+PASS  Changed Retrieval hash blocks before reservation or Provider invocation
+PASS  Producer General Opinion retains its separate source_id-only boundary
+
+Verification results:
+
+* initial targeted and Fault suite: 78/78 PASS
+* focused post-adjustment suite: 39/39 PASS
+* maintained runtime compilation: PASS
+* full unit/integration suite: 497/497 PASS
+* 31 Role Definitions loaded in STRICT mode: PASS
+* 22 OpenRouter Structured Output schema roots recursively validated: PASS
+* Doctor mock readiness: READY, fail=0
+* five-layer Mock CLI E2E through Playwright: COMPLETED
+
+7. Exact production-clone recovery
+
+The current production workflow was copied to isolated temporary storage and tested with
+the Cycle 036 implementation before and after the full suite.
+
+* initial Researcher status: FAILED
+* final Researcher status: COMPLETED
+* Retrieval calls: 0
+* Gemini Structured Reasoning calls: 9
+* Quality Review calls: 1
+* runtime-identity repair authorizations: 1
+* total runtime-model repair authorizations: 9
+* duplicate logical Provider calls: 0
+* production source state/messages changed: NO
+
+This proves that the historical adapter failure receives one distinct identity, while all
+saved Retrieval, Topic Scout, Topic Selector and completed Producer artifacts are reused.
+
+Deployment verification repeated the clone with production code and obtained the same
+COMPLETED result and call counts. CLI help exposes
+--researcher-runtime-identity-repair. Read-only status still loads Producer COMPLETED and
+Researcher FAILED at the expected saved adapter failure. Every hash and count in section
+8 remained unchanged.
+
+8. Production workflow boundary after the Cycle 035 Real attempt
+
+* state SHA-256: 534B98B2C91A0D56369290D46419D4ABA4896EB095156EB2F4BC8418CCFA146B
+* messages SHA-256: 7FB46F055533CCE87A4F92DA9C478917715A0F51DA88FD25D012E350042FD74F
+* outbox SHA-256: C3E3ACBBD813327B33A8D8327695CC24415BDFE820029BC27EBC194F654B6CCE
+* saved Retrieval Context files: 10
+* saved Retrieval reservations: 10
+* Provider reservations: 19
+* runtime-model repair authorizations: 1
+* runtime-output repair authorizations: 1
+* runtime-adapter repair authorizations: 1
+* runtime-identity repair authorizations: 0
+
+Implementation and non-billable verification used only staging or isolated clone storage.
+No production workflow record was deleted, reset or migrated.
+
+9. Provider call and cost accounting
+
+Real call that exposed Cycle 036:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+* automatic retries: 0
+
+Cycle 036 implementation and verification:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 0
+* Quality Review: 0
+
+Exact OpenRouter cost was not persisted by the runtime. All Cycle 036 tests, Doctor, Mock
+E2E and clone recovery were non-billable.
+
+10. Remaining authorization boundary
+
+The most recent maximum of nine additional reasoning calls has consumed one call. Eight
+remain, but safe completion requires nine calls: one new identity-repair invocation plus
+the eight untouched Researcher tasks. The implementation does not make a partial
+eight-call continuation and does not reuse the consumed task.
+
+A fresh explicit authorization is required for Retrieval 0, additional Gemini Structured
+Reasoning maximum 9, Quality Review maximum 1, and the bounded state/messages/
+reservations/authorizations/outbox updates.
+
+11. State, PMP, Schema, Checkpoint, Reservation and Outbox impact
+
+The strict schema becomes smaller while the persisted ResearchSource remains unchanged.
+PMP storage, existing Context files, prior reservations, checkpoints and outbox formats do
+not change. The new recovery adds one suffix-specific authorization directory and one
+task/reservation identity; existing authorization records remain immutable.
+
+12. Debug Cycle self-audit
+
+Root cause identified: YES
+Symptom-only patch avoided: YES
+Same Failure Mode audited across all 7 Researcher specialists: YES
+Producer General Opinion boundary checked separately: YES
+Other layers and common reservation pipeline checked: YES
+State/PMP/Schema/Checkpoint/Reservation/Context/Outbox impact checked: YES
+Regression tests added: YES
+Recovery and fault conditions verified: YES
+Production clone verified twice: YES
+Debug Report generated: YES
+Design meaning explained: YES
+Unnecessary Provider calls: NO; the Real attempt was limited to 1
+Safety mechanisms disabled: NO
+
+Cycle 036 is deployed and ready for a separately authorized Real continuation.
+

@@ -1,0 +1,171 @@
+PRDCP Debug Report
+
+ID: 016
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Common Provider boundary / Conclusion
+Agent: conclusion.position_generator
+Error Class: PROVIDER / CONFIG / RESERVATION / IDEMPOTENCY / RECOVERY
+
+1. What happened
+
+The explicit one-time Real retry from Cycle 015 reached OpenRouter and reused all saved upstream checkpoints, but the configured Qwen3.5 Flash Position Generator again returned one large numeric value instead of the required JSON object. The strict response boundary rejected it. The retry authorization and retry reservation were consumed exactly once; no Evaluation, Integration, Quality Review, or upstream Provider call ran.
+
+2. Failure location
+
+The response failed at `providers/openrouter_provider.py`, after a successful HTTP response envelope but before Pydantic validation. The saved Error PMP identifies the requested model, SHA-256 hash, character length 8224, root type `float`, and invalid path `$`. No response body is stored.
+
+3. Reproduction conditions
+
+- Provider: openrouter
+- Model: qwen/qwen3.5-flash-02-23
+- Structured Output root: PositionGenerationResult
+- Demo Safe Mode: enabled
+- Original task: position_task_7001de5f08ae4dabbd3881fed57dcd5a
+- Explicit retry task: original task plus `_operator_retry_1`
+- Original response: legacy Pydantic root `inf` failure
+- Retry response: ProviderResponseContractError, finite scalar root
+
+4. Root cause
+
+There are two distinct causes. First, PRDCP sent `response_format` but did not set OpenRouter `provider.require_parameters=true`. OpenRouter documents that this routing preference defaults to false; without it, parameter support was not a hard routing condition. This is a systemic request-contract defect affecting all 22 Structured Output roots.
+
+Second, this exact Qwen model/endpoint produced a non-object response twice. OpenRouter currently advertises Structured Output support for compatible endpoints, but also documents that strict enforcement varies by provider and is not guaranteed identically on every endpoint. Because the same model failed both the original call and the only allowed retry, another send under the same task/model is no longer a retryable transient operation. It is a provider-contract compatibility failure requiring a different model and a distinct logical task.
+
+Official references:
+- https://openrouter.ai/docs/guides/features/structured-outputs
+- https://openrouter.ai/docs/guides/routing/provider-selection
+- https://openrouter.ai/openai/gpt-5-mini/providers
+
+5. Why the problem occurred
+
+The code enforced schema shape and response decoding, but it did not express endpoint parameter support as a routing invariant. The existing one-shot retry correctly prevented accidental duplicate billing, yet there was no audited way to change the model after two correlated contract-invalid responses. Manually editing a reservation, deleting storage, or retrying the retry would violate PRDCP idempotency.
+
+6. Why prior tests did not detect it
+
+Mock providers always return valid schema objects and do not simulate OpenRouter endpoint selection. The schema audit verified JSON Schema compatibility, not the `provider` routing object in the HTTP request. Cycle 015 added response-boundary failures, but its fault provider recovered on the same model after one injected failure and therefore did not model repeated model-specific noncompliance.
+
+7. Repair plan
+
+1. Require all OpenRouter requests to route only to endpoints supporting every supplied parameter.
+2. Preserve the original task, retry task, reservations, errors, and authorization.
+3. Permit a provider-contract repair only after both original and one-shot retry are correlated contract-invalid responses.
+4. Require an explicitly different, syntactically valid model ID.
+5. Use a deterministic `_provider_contract_repair_1` task, dedicated PENDING/CONSUMED authorization, and separate reservation.
+6. Reuse valid checkpoints and rerun only the failed Conclusion stage plus its true downstream dependencies.
+7. Block a fourth call if the repair itself fails.
+
+8. Implemented repair
+
+- Every `OpenRouterModelProvider.generate_structured` request now sends `provider: {require_parameters: true}`.
+- Added a shared persistent ProviderContractRepairAuthorizationStore.
+- Shared StructuredAgent execution supports an explicit model override without mutating the registered Agent model and validates/consumes repair authorization at reservation time.
+- Conclusion Manager recognizes the consumed original retry, authorizes one different-model repair, passes a stage-local model override, and preserves completed upstream checkpoints.
+- Legacy random Conclusion task IDs are supported only when their retry/repair descendants are backed by persisted authorization records.
+- Added `--conclusion-contract-repair WORKFLOW_ID REPAIR_MODEL_ID`; Demo Safe Mode is mandatory.
+- Recovery recognizes saved repair Result PMP messages and restores them after a checkpoint write fault without another Provider call.
+
+9. Changed files
+
+- common/provider_contract_repair.py
+- common/agents/base.py
+- providers/openrouter_provider.py
+- conclusion/manager.py
+- cli_app/arguments.py
+- cli_app/commands.py
+- tests/unit/test_openrouter_provider.py
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_maintainability.py
+- role_definitions/conclusion/manager.json
+- README.md
+- debug_reports/015_non_finite_provider_response_conclusion_recovery.txt
+- debug_reports/016_openrouter_parameter_guard_and_provider_contract_repair.txt
+- debug_reports/debug_summary.txt
+
+10. Design meaning
+
+Structured Output is now a routing precondition, not merely a request hint. A same-task retry remains limited to one explicit operation. After repeated contract failure, changing models is represented as a new auditable logical operation instead of erasing history or pretending the retry never happened. This separates transient transport recovery from provider/model contract repair and keeps billing/idempotency reasoning inspectable.
+
+11. Other-layer impact
+
+The `require_parameters` guard and model-override-safe StructuredAgent path are shared by Producer, Researcher, Deliberation, Conclusion, and Playwright. Existing task IDs and normal Agent models do not change. Existing Researcher/Deliberation retry paths remain unchanged. The new contract-repair CLI is scoped to Conclusion because that is the observed failed checkpoint; no other layer receives an automatic model fallback.
+
+12. Same-family Failure Mode audit
+
+- All 22 OpenRouter roots use the same request builder and therefore receive the routing guard.
+- All 22 roots retain recursive strict JSON Schema and finite-object response validation.
+- Original, retry, and repair task IDs are disjoint.
+- Repair requires both prior reservations and a CONSUMED retry authorization.
+- Same-model repair is rejected before a Provider call.
+- A repair task cannot authorize another repair or retry.
+- An unanswered repair request is not automatically redispatched.
+- Saved repair Result PMP can restore a missing checkpoint with zero calls.
+- Unsupported repair-model endpoint selection fails closed because `require_parameters=true` is mandatory.
+
+13. Regression tests
+
+- OpenRouter request body contains `provider.require_parameters == true`.
+- Original and retry contract failures remain separate and one-shot.
+- Different-model repair uses a third distinct task ID and reservation.
+- Same-model repair is rejected.
+- Downstream stages run once after a successful Position repair.
+- Failed repair prevents a fourth Position call.
+- Repair Result checkpoint fault restores without Provider calls.
+- CLI parses workflow and explicit repair model.
+- Existing recursive 22-root strict schema tests remain green.
+
+14. Recovery / Fault results
+
+- Static compile: PASS.
+- Targeted Provider/Conclusion/CLI/retry suite: 71 PASS.
+- New focused Mock/Fault tests: PASS.
+- Full Unit: 332 PASS in 278.269s.
+- Full Integration: 9 PASS in 25.973s.
+- Role Definitions: 31 loaded in STRICT mode.
+- 22-root Structured Output audit: PASS through full Unit.
+- Doctor provider=mock Safe Mode: READY.
+- Full Mock CLI E2E Producer -> Delivery: PASS.
+- Exact production FAILED state copied to isolated storage: contract repair reached WAITING_HUMAN_SELECTION.
+- Exact-state isolated calls: Position 1, Evaluation 1, Integration 1, Quality Review 1; upstream 0; automatic retries 0; authorization CONSUMED.
+
+15. Provider call count
+
+Failure capture inherited from Cycle 015 explicit Real retry: Position 1, downstream 0, upstream 0, automatic retry 0.
+Cycle 016 implementation, Mock, Fault, exact-state isolation: Real 0.
+Next permitted Real operation: one provider-contract repair task only. It is not a retry of the original or retry task.
+
+16. API cost
+
+The CLI did not expose the measured cost of the failed Cycle 015 Qwen call, so that cost remains unknown. Cycle 016 implementation and validation used $0 Real API. The proposed repair model is `openai/gpt-5-mini`, currently listed by OpenRouter at $0.25/M input and $2/M output; actual request cost will depend on tokens and may differ with provider/caching.
+
+17. Existing workflow impact
+
+Before deployment and Real repair, production Deliberation state, messages, Conclusion outbox, Conclusion state/messages, original/retry reservations, and retry authorization hashes were captured. No production storage file was modified during implementation or Mock/Fault validation. The isolated exact-state test copied files into a separate data directory and did not write back.
+
+18. Remaining risk
+
+The explicit different-model Real repair can still expose a semantic/schema issue or external Provider failure. If the repair itself fails, the system intentionally stops without a fourth Position call. Evaluation, Integration, Quality Review, Playwright, and Delivery still require real-model validation. Human Selection remains an explicit user decision and must not be auto-selected in the production workflow.
+
+19. Plan compliance review / result before Real repair
+
+[YES] Root cause identified beyond the local float symptom.
+[YES] Request routing and repeated model failure were separated.
+[YES] All 22 roots and all five layers were audited through shared boundaries.
+[YES] State, PMP, Schema, Checkpoint, Reservation, Outbox, and Provider effects were checked.
+[YES] Regression tests were added.
+[YES] Mock, recovery, and fault injection passed.
+[YES] Exact saved production state was validated in isolation.
+[YES] Debug Report generated and design meaning documented.
+[YES] No Real API call was used for a Mock-verifiable change.
+[YES] Existing production workflow/storage remained unchanged during implementation.
+[YES] CLI E2E Execution & Stabilization Plan v2 was re-read and used as the controlling plan.
+
+20. Real repair result
+
+2026-08-17、`--conclusion-contract-repair 15f3f5c5-4167-447d-b255-069fc7f5beb2 openai/gpt-5-mini --provider openrouter --safe-mode`を一回実行した。Position Generatorは3候補を正常生成し、専用authorizationとreservationはCONSUMEDになった。元Position taskとoperator retryは再実行されず、上流3層も再実行されなかった。
+
+Position成功後、通常の次工程Decision Evaluatorがqwen/qwen3.6-35b-a3bで一回実行され、candidate/criterion重複のPayloadValidationErrorで停止した。Decision IntegratorとQuality Reviewerは呼ばれていない。この新規failureはCycle 017として分離した。
+
+Real calls in this resume command: Position 1, Decision Evaluation 1, Integration 0, Quality Review 0, upstream 0, automatic retry 0. Actual cost: unknown。
+
+Result: PASS（provider-contract repairの目的であるPosition checkpoint復旧を達成）。下流の新規schema failureはCycle 017へ移管。

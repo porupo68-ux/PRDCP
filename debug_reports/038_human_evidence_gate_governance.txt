@@ -1,0 +1,84 @@
+Cycle 038 Debug Report — Human Evidence Gate Governance
+Date: 2026-08-18 (Asia/Tokyo)
+Target workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+
+1. Background
+PRDCP v2のFresh Real E2EはProducer完了後、Researcher Quality Reviewで停止していた。直前のReal RecoveryではRetrieval 0、Gemini Structured Reasoning 9、Quality Review 1、automatic retry 0、duplicate call 0で、13 sourceを持つResearch Reportが保存済みだった。本Cycleは期限都合のQuality Review迂回ではなく、Evidence sufficiencyの最終責任をHuman-in-the-loop境界へ正式に移す設計改訂である。
+
+2. Observed Real E2E state
+実運用workflowはProducer=COMPLETED、Researcher=BLOCKED、Quality Review=revision_required、finding 6件だった。5件はEvidence sufficiency、1件はcas.go.jp政府文書をINDUSTRYとしたManager内部分類問題だった。開始時state SHA-256は7965e73cb4a6c0f7f205d73e5205d8a9204e914d85adad7ae5003661a7b44ccd、Research Report SHA-256はeb5367bfc127898831ee10c195ddabf10d11a8e3f224e35b491f63228179b3a8、source countは13だった。
+
+3. Root design problem
+旧設計は、機械的に強制できるintegrity failureと、目的・期限・費用・リスク許容度で答えが変わるEvidence sufficiencyを同じQuality Reviewのrevision_requiredへ収束させていた。そのためAI Reviewerが追加調査の最終決定者となり、人間が現Evidenceで審議へ進む監査可能な境界がなかった。
+
+4. Why Evidence Sufficiency is Human-governed
+Schema、PMP、provenance、ID、traceability等の整合性は機械が強制でき、Human overrideを許してはならない。一方、Evidenceが目的に対して十分かは規範的・予算的判断を含む。AIは不足と追加調査案を提示し、HumanがACCEPT、ACCEPT_WITH_LIMITATIONS、REVISEを最終選択する責務分離へ変更した。
+
+5. Architecture change
+Researcher workflowをResearch Report→Quality Review→WAITING_HUMAN_EVIDENCE_REVIEW→Human Decision→Deliberation Handoffへ変更した。ConclusionのHuman Selection Gateとは別の判断点である。Mock E2Eだけは明示的なmock_fixture actorとしてHuman Decisionを作成する。
+
+6. Hard Gate / Human Gate taxonomy
+Finding typeをEVIDENCE_SUFFICIENCY_FINDING、HARD_INTEGRITY_FAILURE、UNCLASSIFIEDへ型付けした。ACCEPTは未解決Evidence findingが0件の場合だけ、ACCEPT_WITH_LIMITATIONSは全Evidence findingを未解決gapとして受容する場合だけ許可する。hard/unclassified findingが残る場合はfail closedとしHuman overrideを拒否する。AcceptedEvidenceGap.factual_support_confirmedは常にfalseである。
+
+7. RD changes
+Researcher Manager RDとQuality Reviewer RDをv1.1.0へ更新し、finding分類、Human Gate、Human DecisionとProvider authorizationの分離、hard failure precedenceを明記した。9 Researcher RDの登録関係を監査し、31 RD STRICT preloadを通した。
+
+8. PMP/State changes
+WorkflowStatusへWAITING_HUMAN_EVIDENCE_REVIEW、MessageTypeへhuman_evidence_decisionを追加した。Researcher StateはHuman Decision、履歴、accepted gaps、deterministic repairs、Evidence Revision Planを保持する。Human Decision PMPはQuality Review PMPとResearcher→Deliberation research_result PMPの間に独立して置かれる。
+
+9. Human Decision persistence
+Decisionはartifacts/human_evidence_decisions/<workflow_id>/<quality_review_id>.jsonへcreate-onceで先に保存し、その後State、最後にOutboxを保存する。競合Decisionは1件だけが勝者となる。artifact後State失敗、Outbox後最終State失敗をfault injectionし、Recoveryが同じDecision/Outboxを再利用してProvider call 0、Outbox exactly-onceとなることを確認した。
+
+10. CLI/Discord UX
+CLIへ--researcher-evidence、--researcher-accept、--researcher-accept-limitations、--researcher-revise、--researcher-recover、--reasonを追加した。Discordへ対応するresearcher_*コマンドとchannel routingを追加した。REVISEは0-callでPlanを保存し、Provider authorizationを付与しない。Discord Botへ新コマンドを反映するにはproduction deploy後のプロセス再起動が必要である。
+
+11. Downstream propagation
+Researcher→DeliberationはHuman Decision、accepted gaps、integrity repairsを明示する。Deliberation→ConclusionとConclusion→Playwrightは同じDecision/gapをトップレベルと正本成果物内部で一致検証する。accepted gapはEvidence、引用、事実確認へ変換せず、limitations/uncertaintiesとして全層に残す。
+
+12. Revision/API budget interaction
+Human REVISEとProvider call authorizationを分離した。REVISEは対象finding、Agent、Research QuestionをEvidenceRevisionPlanへ保存してBLOCKEDとなる。追加調査の有料呼び出しは別の明示authorizationがなければ開始しない。Safe ModeはProvider実行範囲を制御するがHuman Decisionを代行しない。
+
+13. Backward compatibility
+旧Quality Reviewのfinding_type欠落は読込時にUNCLASSIFIEDから決定論的分類する。旧保存JSON自体は書き換えない。新しいQuality Review schemaではfinding_typeがstrict Structured Outputのrequired propertyである。公式政府domainをINDUSTRYとした既知ケースはclosed allowlistによる決定論的repairだけを許可し、元Quality Reviewとsource countを保持する。
+
+14. Fault Injection
+実施項目: concurrent decision、decision artifact後State save failure、Outbox後final State save failure、RecoveryのDecision非推測、hard failure override拒否、REVISE 0-call、旧Runtime Model/Output/Adapter/Identity/Provenance Recovery後のHuman Gate停止。すべて対象回帰でPASSした。
+
+15. Regression
+Static compile PASS。Human Gate unit、taxonomy、idempotency、crash recovery、hard override拒否、CLI、Discord、Researcher/Deliberation/Conclusion/Playwright Manager、8 Retrieval recovery系を対象再検証した。31 RD STRICT PASS。OpenRouter Structured Output 22 root schema PASS。Mock DoctorはREADY（fail=0、Discord/API設定に関するwarnのみ）。5-layer Mock E2EのACCEPTとACCEPT_WITH_LIMITATIONS、REVISE 0-callがPASSした。最終full regressionは533 tests / 468.537s / OKだった。その後追加したlegacy BLOCKED status routingを含むHuman Gate対象14 testsもproduction配置でOKだった。
+
+16. Documentation synchronization
+更新した現行正本・利用者文書:
+- README.md
+- researcher/README.md
+- docs/architecture/ARCHITECTURE.md
+- cli_app/README.md
+- discord_app/README.md
+- specifications/common/README.md
+- specifications/common/handoff_contracts.v2.json
+- role_definitions/researcher/README.md
+- role_definitions/researcher/manager.json
+- role_definitions/researcher/quality_reviewer.json
+- Researcher/Deliberation/Conclusion/Playwrightの直接関係prompt
+Archiveと提出用presentationは変更していない。
+
+17. Production clone
+production state/reportだけを一時領域へcopyしたread-only clone検証を実施した。source hashは開始値と一致、source count 13、qf006相当finding_qr_006は決定論的repair済み、Evidence finding 5件、ACCEPT_WITH_LIMITATIONS後clone Researcher=COMPLETED、Provider calls=0、Retrieval calls=0、source storage mutated=falseだった。
+
+18. Production deployment
+コード、RD、仕様、README、tests、Debug Reportのallowlist 63ファイルを実運用PRDCP_v2へ差分適用した。storage/dataはcopy、初期化、削除、上書きしていない。Production配置でのDoctor/対象テストがappendしたrd_access検証イベントは、最初のCycle 038イベントの完全なUTF-8 JSON byte markerで境界を検証し、今回分だけを除去して事前状態へ復元した（ログ内のCRLF/LF混在も考慮）。最終的にstorage file count=1299、manifest SHA-256=633157418157f07fc62c5304a8673053235b6a8dd2dabeb7e51fd03133c6371b、対象state/report hashはSection 2の値と一致した。Production CLI help、既存workflow status、Mock Doctor READY、production codeを用いたclone検証もPASSした。
+
+19. Human decision application
+production workflowへのHuman Decisionは未適用である。cloneでACCEPT_WITH_LIMITATIONS eligibilityを確認したが、実運用artifact/state/outbox更新はユーザーの明示Decisionまで行わない。
+
+20. Provider call count
+本CycleのReal Provider calls=0、Real Retrieval calls=0。全実装・Fault・E2E検証はMockまたはread-only production cloneで行った。
+
+21. Final state
+現時点のproduction正本は開始時と同じResearcher=BLOCKEDであり、Human Decision未適用、Deliberation未開始である。コード反映後もstorageを変更せず、この状態を保持する。Cycleの設計上の最終地点は、ユーザーが明示ACCEPT_WITH_LIMITATIONSを実行した後のResearcher=COMPLETED、Deliberation=NOT STARTED/READYである。
+
+22. Remaining risks
+- Production Human Decisionはまだ未適用。ユーザーの明示操作が必要。
+- Discord新コマンドはBot再起動まで有効にならない。
+- 旧UNCLASSIFIED findingは安全側に倒し、決定論的に分類できない場合はHuman acceptを拒否するため、未知の旧文言ではManager修復が必要になり得る。
+- Accepted gapは下流promptとschemaで非Evidenceとして扱うが、将来の新Agent/新Handoff追加時にも同じ契約を明示する必要がある。

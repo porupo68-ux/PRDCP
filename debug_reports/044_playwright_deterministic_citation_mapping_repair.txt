@@ -1,0 +1,315 @@
+Cycle 044 Debug Report
+Playwright Deterministic Citation Mapping Repair
+Date: 2026-08-19 (Asia/Tokyo)
+Workflow: 4b837e0e-9e1c-4150-97e1-ac31ef87024e
+
+1. 結果
+
+Cycle 044は完了した。
+
+Producer     COMPLETED
+Researcher   COMPLETED
+Deliberation COMPLETED
+Conclusion   COMPLETED
+Playwright   COMPLETED
+Delivery     6 artifacts generated
+
+Playwright Final GateはBLOCKEDからAPPROVED_WITH_LIMITATIONSへ遷移した。
+blocking_finding_idsは0件となり、CITATION_MAPPING_MISSINGは解消した。
+非阻害的WARNINGのSCRIPT_CHARACTER_COUNT_MISMATCHは残した。
+Researcher Human Evidence Gateで受容済みのNEWS evidence gapもlimitationとして保持した。
+
+Production Recoveryを含むCycle 044の実API呼び出しは以下のとおり。
+
+OpenRouter Provider calls: 0
+Retrieval calls: 0
+Provider reservation追加: 0（39 -> 39）
+Retrieval reservation追加: 0（10 -> 10）
+
+2. 何が起きたか
+
+Playwrightの4専門Agentはすべて完了していたが、Final Gateはinternal revision_count=2 / max_revisions=2で
+BLOCKEDになっていた。最終blocking findingは次の1件だけだった。
+
+code: CITATION_MAPPING_MISSING
+paragraph_id: para_005_analysis_03
+claim_id: claim_genai_macro_labor_shortage_cushion_004
+evidence_id: evidence_cao_world_economy_2024
+
+対象段落、claim、evidence、evidenceからsourceへの対応は保存済みだった。欠けていたのはCitation Manifestの
+paragraph-to-evidence mappingだけだった。それでも従来のFinal Gateは、すべての内部ERRORをLLM Agent revisionと
+同じ経路へ送り、revision budgetが尽きているため停止していた。
+
+3. なぜ起きたか
+
+直接原因はCitation Editorの最終成果物に対象paragraphのmappingが含まれなかったこと。
+
+設計上の根本原因は、次の2種類の処理が同じRevision Budgetに束ねられていたこと。
+
+- 文章、構成、引用判断を作り直すLLM-driven revision
+- 保存済みの確定済みID対応から欠落したartifactを復元するdeterministic repair
+
+LLM Revision Budgetは有料の生成処理と自動ループを制限するためのものだが、既存情報だけで安全に復元できる
+局所artifact修復まで禁止していた。このため、3回目のLLM revisionは不要であるにもかかわらず、Deliveryへ
+進めなかった。
+
+4. 修正内容
+
+4.1 Canonical owner
+
+責務を次のように分離した。
+
+- PlaywrightValidator: CITATION_MAPPING_MISSINGを検出する正本
+- PlaywrightDeterministicRepairer: repairability判定とmapping再構成の正本
+- PlaywrightManager: checkpoint、Final Gate再評価、Deliveryのオーケストレーション
+- PlaywrightWorkflowRepository: repair audit artifactとDeliveryの永続化
+
+4.2 AllowlistとFail Closed
+
+初期allowlistはCITATION_MAPPING_MISSINGだけである。自動修復は次をすべて満たす場合だけ許可する。
+
+- saved Final Gateとdeterministic validationのblocking IDが一致する
+- ERRORがすべてallowlist対象である
+- paragraphがScript DraftとCitation Validated Scriptの双方に存在し、本文とclaim/evidenceが一致する
+- citation_required=trueかつevidence_idsが空でない
+- 対象paragraphに既存mappingがない
+- evidenceがProduction Contextのcanonical allowlistに存在する
+- evidenceが保存済みsourceへ一意に解決する
+- 同じevidence/source pairがCitation Manifest source registryにも存在する
+- accepted unresolved gapのIDをEvidence、Claim、Sourceとして利用していない
+- 同じclaim/evidence/sourceを持つ保存済みmapping群でclaim_typeとsupport_statusが一意に合意する
+- locator、URL、title、claim、Evidenceを推測・新規生成しない
+
+競合mapping、未知Evidence、source/locator不足、意味分類の不一致、別ERROR、repair budget再消費はすべて
+Fail Closedである。
+
+4.3 Revision Budget分離
+
+LLM revision_countは2のまま保持した。local deterministic repair専用に次を追加した。
+
+deterministic_repair_count
+deterministic_repair_history
+max deterministic repair passes = 1
+
+local repairはNarrative Architect、Scriptwriter、Evidence & Citation Editor、Visual Directorを再実行しない。
+
+4.4 Identityと監査artifact
+
+mapping_idとrepair_idはcanonical contentからSHA-256で決定論的に生成する。Recoveryを繰り返してもIDが増殖しない。
+repair artifactにはfinding、paragraph、claim、evidence、source、donor mapping、Citation Manifest前後hash、
+保護artifact hash、provider_calls=0、retrieval_calls=0を保存する。
+
+保存先:
+storage/data/artifacts/playwright_deterministic_repairs/<workflow_id>/<repair_id>.json
+
+4.5 Recoveryとexactly-once
+
+--playwright-recoverは従来のFAILED checkpoint recoveryに加え、BLOCKED Final Gateでallowlist対象だけが
+残った場合にlocal repairを実行する。修復checkpointをFinal Gate再評価前に保存するため、その直後にプロセスが
+停止してもVALIDATING_PACKAGEからProvider 0件で再開できる。
+
+COMPLETED後の同じrecoverはread-only no-opであり、mapping、repair artifact、Delivery file、Delivery PMPを
+二重生成しない。
+
+4.6 Operator guidance
+
+CLIの旧consumerには「BLOCKED内部ERRORなら常に--playwright-revise」という前提が残っていた。post-change auditで
+これを検出し、allowlist対象かつrepair budget未消費なら--playwright-recover、budget到達後は--status、その他の
+内部ERRORだけを--playwright-reviseへ案内するよう修正した。CLI/Discord statusにはdeterministic repair countも
+表示する。
+
+5. システム設計上の意味
+
+LLM Revision BudgetとDeterministic Repair Budgetを分離した。前者は生成内容を再作成する回数と課金・ループを
+制限し、後者は保存済み確定情報から機械的に復元できる局所artifactだけを扱う。
+
+Deterministic Repairは品質ゲートのbypassではない。修復後に同じPlaywrightValidatorとManager Final Gateを再実行し、
+ERRORが残ればDeliveryしない。さらに、semantic classificationが保存済みデータから一意に得られない場合はAgent
+revisionへ戻す。これにより「mappingがないから任意のEvidenceを結ぶ」という危険な修復を防いだ。
+
+6. 回帰・Fault Injection
+
+開始時基準: 570 tests
+最終: 581 tests
+全Unit/Integration: 581 / 581 PASS (575.728s)
+
+Cycle 044 targeted tests:
+
+- revision_count=2 / max=2でもlocal repair可能
+- Provider/Agent call 0
+- mappingを1件だけ追加
+- Final Gate再評価とDelivery 6成果物
+- Final Conclusion、Production Context、Narrative、Script Draft、Validated Script、Visual Planのhash不変
+- persist -> reload -> repair -> save -> reload -> Final Gate
+- repair checkpoint直後のprocess faultから、2回目repairなしで復旧
+- COMPLETED後のrecoverが完全no-op
+- mapping conflictを上書きせず停止
+- canonical evidence/source欠落で停止
+- Citation Manifest locator欠落で停止
+- accepted unresolved gapのEvidence化を拒否
+- 別のblocking ERRORがある場合に部分修復せず停止
+- deterministic repair budget再消費を拒否
+- DETERMINISTIC_REPAIRABLE / AGENT_REVISION_REQUIRED / UPSTREAM_REVISION_REQUIRED / NON_REPAIRABLEの分離
+- CLIが3回目revisionではなくlocal recoverを案内
+
+既存Playwright targeted regression: 49 / 49 PASS
+RD/repair/maintainability targeted regression: 65 / 65 PASS
+Role Definition loader tests: 26 / 26 PASS
+Structured Output schema tests: 14 / 14 PASS
+31 Role Definitions: STRICT PASS
+22 OpenRouter Structured Output roots: PASS
+Doctor: READY (fail=0, warn=2)
+5-layer Mock E2E: PASS, Delivery 6 artifacts
+
+Doctorの2 warningはdiscord Python dependencyがbundled test runtimeに未導入であることと、Mock利用時の
+OpenRouter readiness案内であり、Cycle 044のFailureではない。
+
+最初の5-layer Mock CLIではLLM providerだけをmockにし、環境に残るRetrieval providerがOpenRouterのままだったため、
+隔離temp内で検索送信前にsandbox network denialとなった。API成功・課金・正本mutationは0。その後、
+PRDCP_RETRIEVAL_PROVIDER=mockも明示した新しい隔離領域で5層を完走した。これは実装Failureではなく検証コマンドの
+二軸設定不足であり、再実行ではProviderとRetrievalの両方を明示固定した。
+
+7. Production clone
+
+Production source storageをworkflow IDでcloneし、正本を変更せず次を確認した。
+
+BLOCKED -> deterministic repair -> APPROVED_WITH_LIMITATIONS -> COMPLETED -> Delivery 6 files
+Provider calls: 0
+Retrieval calls: 0
+LLM revision_count: 2 -> 2
+deterministic_repair_count: 0 -> 1
+message count: 23 -> 24（Final Delivery PMP 1件のみ追加）
+repeat recover writes: 0
+source storage mutated: false
+
+8. Production Recovery
+
+実行コマンド:
+py main.py --playwright-recover 4b837e0e-9e1c-4150-97e1-ac31ef87024e --provider openrouter --safe-mode
+
+実行結果:
+
+Playwright status: COMPLETED
+Final Gate: APPROVED_WITH_LIMITATIONS
+blocking findings: 0
+remaining finding: SCRIPT_CHARACTER_COUNT_MISMATCH (WARNING)
+mapping count: 12 -> 13
+target mapping count: 1
+repair artifact count: 1
+Delivery files: 6
+Delivery PMP messages: 1
+message count: 23 -> 24
+internal revision_count: 2 -> 2
+deterministic_repair_count: 0 -> 1
+failed agents: 0
+
+mapping_id: citation_mapping_repair_a9c002cf8fb151327ec17b92
+repair_id: playwright_repair_20be97f34f7d03298b0ed777
+
+Citation Manifest canonical hash:
+before sha256:a9c778998a8c1458cd6d2a2c40b99933e74c904f8fc5b97d924faa6f185c28e6
+after  sha256:d5a6937034ab55fd13ec282a2385a1c5f814dd37a9d980af4cb232191315caec
+
+保護artifact canonical hash（before == after）:
+
+Final Conclusion:
+sha256:29e37e813220603527b4d15911a533401ad20d12b6350aa424760f08428f87d3
+Production Context:
+sha256:7ba7ba06fad9a65bb182dacc6483f9e73a832e3d639567bfdfac1bfdae4a0f3c
+Narrative Blueprint:
+sha256:4f543d5c448e82424e4b10b22b7f2aefb6f840d0bdafda7d27dd3efbd64be8d2
+Script Draft:
+sha256:a32b4249bf3ded83c36ef0429052670b003c856d3ea55695e0c54518cbc40f02
+Citation Validated Script:
+sha256:76f540f43be9db6fee600713da4023ad65c3d5644e511a9f9fbca2a85ff9d5e4
+Visual Plan:
+sha256:6854ebe94a99cdca6f5ffc84b778ac77e43029ad29a10ed4b26006dff4b2007b
+
+9. Delivery成果物
+
+storage/data/deliveries/4b837e0e-9e1c-4150-97e1-ac31ef87024e/
+
+- final_script_package.json
+- script.md
+- citation_manifest.json
+- source_list.md
+- visual_plan.md
+- production_notes.md
+
+10. Post-change Impact Audit
+
+再検索対象:
+
+CITATION_MAPPING_MISSING
+deterministic_repair
+revision_count
+max_revisions
+final_gate
+citation_mappings
+playwright-revise
+playwright-recover
+
+監査経路:
+
+canonical Validator finding
+-> deterministic Repairer
+-> Playwright Manager
+-> workflow state
+-> repository persistence
+-> CLI/Discord operator view
+-> FinalScriptPackage
+-> citation_manifest.json / source_list.md
+-> final_script_delivery PMP
+
+監査で発見した旧前提はCLI next-actionの1件で、修正・回帰済み。現在のconsumerに「revision exhaustedなら
+必ず3回目Agent revisionを案内する」という前提は残っていない。Conclusion、Researcher、Deliberation、
+Production Context、Script、Visualのcontractは変更していない。OpenRouter Structured Output rootも追加していない。
+
+11. 今後の再発防止
+
+- deterministic repairはallowlistにないfindingへ拡張しない
+- 新しいrepair typeごとに独立したeligibilityとFault Injectionを追加する
+- repairはcanonical ID chainと保存済みsemantic classificationの双方を要求する
+- Provider/Retrieval call 0をテストとaudit artifactの両方で固定する
+- local repairとLLM revisionのcounter、CLI、RDを別契約として監査する
+- producer -> persistence -> direct consumer -> transitive Deliveryまでpost-change再検索する
+- repeat recovery、checkpoint fault、conflict、locator missing、accepted gapを常設回帰にする
+
+12. 残存limitations
+
+- SCRIPT_CHARACTER_COUNT_MISMATCHはWARNINGとして残る。Deliveryを阻害しない既存policyのため昇格させていない。
+- rq_ai_emp_003のNEWS evidence不足はHuman OperatorがACCEPT_WITH_LIMITATIONSで受容済みであり、
+  factual supportへ変換せずProduction Notesのlimitationとして保持する。
+- Cycle 044はCITATION_MAPPING_MISSING以外のdeterministic findingを修復しない。
+
+13. Self Audit
+
+根本原因まで特定した: Yes
+局所症状だけでなくRevision Budget責務境界を修正した: Yes
+同系統Failure ModeをPlaywright/CLI/Discord/Deliveryまで監査した: Yes
+State/PMP/Schema/Checkpoint/Reservation/Outbox/Delivery影響を確認した: Yes
+Regression Testを追加した: Yes
+Recovery/Fault条件を確認した: Yes
+Debug Reportを生成した: Yes
+設計上の意味を記録した: Yes
+不要なProvider呼び出しを行わなかった: Yes
+正本storageを手動編集しなかった: Yes
+3回目のLLM Revisionを許可しなかった: Yes
+
+14. Discord Bot rollout
+
+Cycle 043から稼働していたlauncher/worker pair 8344/30400を、PID、実行ファイル、開始時刻で照合して停止した。
+WindowsAppsのpy launcherとworkerの通常sandbox起動はいずれもアクセス拒否となり、プロセス生成前に停止した。
+その後、同じPython 3.14 worker実体を明示し、承認済みの外部実行でHidden起動した。
+
+Current Bot worker PID: 38444
+Started: 2026-08-19T04:24:29+09:00
+Executable: C:\Users\kpi01\AppData\Local\Python\pythoncore-3.14-64\python.exe
+Duplicate old Bot processes: 0
+Discord Gateway connected: 2026-08-19 04:24:35
+
+起動ログの2000文字制限例外は23:29以前の履歴であり、新起動では再発していない。新BotはCycle 044の
+deterministic repair status表示と、Cycle 041で導入した短いoperational error summaryを読み込んでいる。
+Bot再起動によるworkflow、reservation、Provider、Retrievalの追加処理は0件。
+
+Cycle 044 completion: ACHIEVED

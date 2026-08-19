@@ -76,6 +76,7 @@ class NarrativeBlueprint(BaseModel):
 class NarrativeDesignTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    task_id: str = Field(min_length=1)
     target_agent_id: str = Field(default="playwright.narrative_architect")
     production_context: ProductionContext
     revision_context: dict[str, Any] | None = None

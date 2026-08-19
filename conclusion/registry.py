@@ -24,7 +24,7 @@ class ConclusionRegistry:
         demo_safe_mode: bool = True,
     ) -> None:
         self.provider = provider
-        self.models = models or {}
+        self.models = dict(models or {})
         self.rd_loader = rd_loader or RoleDefinitionLoader.from_project(
             BASE_DIR,
             access_log_path=Path(BASE_DIR) / "storage" / "data" / "logs" / "rd_access.jsonl",

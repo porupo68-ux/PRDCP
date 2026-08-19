@@ -1,0 +1,184 @@
+PRDCP Debug Report
+
+ID: 017
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion
+Agent: conclusion.decision_evaluator
+Error Class: SCHEMA / VALIDATION / RECOVERY
+
+1. 発生した症状
+
+Cycle 016の明示的一回Real provider-contract repairによりPosition Generatorはopenai/gpt-5-miniで3候補を正常生成・保存した。その直後の通常工程Decision Evaluatorはqwen/qwen3.6-35b-a3bからJSON objectを受信したが、DecisionEvaluationResultのcandidate/criterion pair一意性検査で停止した。ConclusionはFAILED、completed_agentsはPosition Generatorだけとなり、IntegrationとQuality Reviewは呼ばれなかった。
+
+2. 発生地点
+
+- workflow_id: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+- task_id: conclusion_decision_evaluation_upstream_0_revision_0
+- message_id: b6c3868f-fe01-48b5-addf-f637412efaa8
+- parent_message_id: 1d0f0593-3f4b-4297-a00f-1b2c2a674703
+- provider: OpenRouter
+- model: qwen/qwen3.6-35b-a3b
+- Safe Mode: true
+- reservation: 保存済み
+- invalid payload: Error PMPへ保存済み
+
+3. 再現条件
+
+3候補と14基準を平坦なcandidate_evaluations配列で出力させる。旧SchemaにはmaxItemsがなく、JSON Schemaでは(candidate_id, criterion)という複合キーの一意性も表現できない。実応答は134件となり、29組が複数回現れた。重複内のratingとrationaleは全件同一だった。
+
+さらにconditional_advantagesとsensitivity_analysisはPydanticでは候補IDを単数文字列として要求した一方、RDは同率・条件付き優位を複数候補ID配列で保持する設計だった。Providerは複数候補を一つのID文字列へ連結し、3参照が入力候補IDと不一致になった。
+
+4. 根本原因
+
+根本原因は、厳格JSON Schemaが保証できる「型・必須キー」と、実装が事後に期待した「動的な複合キー一意性・入力ID参照整合性」の間に契約の空白があったことである。
+
+- candidate_evaluationsが無制限配列だった。
+- 候補×基準の各組を一回だけ返す要求がPromptとSchema境界で明示・制限されていなかった。
+- RDの複数候補表現とPydanticの単数候補表現が不一致だった。
+- comparison_matrixとcandidate_evaluationsのrating一致、候補参照、criteria完全性をResult Schema自身が保証していなかった。
+- 課金済みProvider応答のPayloadValidationErrorはinvalid payloadを保存していたが、明示的一回retry認可の対象外で、保存済みPositionから再開できなかった。
+
+5. なぜこの問題が発生したか
+
+Mock fixtureは常に3×14の正規配列と単一候補IDを返していたため、Providerが完全一致項目を反復する条件、同率候補を複数表現する条件、課金済みsemantic validation failureからのretryを再現していなかった。22ルートstrict監査はobject schema互換性を検証していたが、配列の動的関係制約まではJSON Schemaで保証できない。
+
+6. なぜ既存テストで発見できなかったか
+
+- candidate_evaluationsの上限と反復Fault Injectionがなかった。
+- uniqueness validatorは「拒否する」ことだけをテストし、情報が同一のProvider反復と内容が競合する重複を区別していなかった。
+- RDのadvantaged_position_ids配列とruntime schemaのsingular IDを比較するRegressionがなかった。
+- Decision EvaluatorのPayloadValidationErrorを起点に、Position checkpointを再利用するrecovery testがなかった。
+
+7. 修正計画
+
+1) RDとruntime schemaの複数候補表現を一致させる。
+2) Decision Evaluationの全配列を業務上の最大件数で制限する。
+3) 完全一致のcandidate/criterion反復だけを無損失正規化する。
+4) 内容が異なる重複、criteria欠落、matrix rating不一致、未知候補・profile参照をfail closedする。
+5) invalid payloadとvalidation errorsを持つ相関済みProvider出力だけ、既存の一回限りretry台帳へ認可する。
+6) Position checkpointを再利用し、Decision Evaluator以降だけを再開するFault Testを追加する。
+
+8. 実際の修正内容
+
+- candidate_evaluationsを最大70件、comparison_matrixを最大5件へ制限した。
+- conditional_advantages.advantaged_candidate_idsとsensitivity_analysis.preferred_candidate_idsを複数ID配列に変更した。
+- 旧保存データの単数IDは読込時だけ1要素配列へ変換し、新規保存は複数形へ統一した。
+- 同じcandidate_id、criterion、全payloadが完全一致する反復だけを除去した。rating、rationale、traceability等が一つでも異なる重複は拒否する。
+- 各候補がframeworkの全14基準を持ち、comparison_matrixと同じratingであることを検証した。
+- conditional/sensitivity/disqualification/missing/revisionの候補参照とvalue profile参照を検証した。
+- Promptへ「各候補×各基準を正確に1件」「IDを改変・連結しない」を明記した。
+- PayloadValidationErrorの明示retryは、invalid_payload、validation_errors、model_id、PMP相関、元reservationが揃う場合だけ許可した。
+
+9. 変更したファイル
+
+- conclusion/schemas/decision_evaluation.py
+- conclusion/prompts/decision_evaluator.md
+- conclusion/manager.py
+- common/provider_retry.py
+- providers/mock/conclusion_fixtures.py
+- role_definitions/conclusion/decision_evaluator.json
+- tests/unit/test_conclusion_schemas.py
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_provider_retry.py
+- tests/unit/test_structured_output_schemas.py
+- README.md
+- debug_reports/016_openrouter_parameter_guard_and_provider_contract_repair.txt
+- debug_reports/017_decision_evaluation_matrix_contract.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Structured Outputの正しさを「JSONとしてSchemaに入る」だけでなく、「入力で定義された有限集合を、重複・欠落・参照汚染なしに表現する」契約へ引き上げた。JSON Schemaで表現できない動的な関係制約はdomain validatorで検証し、情報が完全同一の反復だけを無損失処理する。意味が競合する出力は自動選択せず停止する。
+
+また、Providerが応答を返した後のlocal validation failureを、通信失敗やアプリ内部エラーと区別した。永続invalid payload、PMP相関、reservationが揃う場合だけ一回再送できるため、無条件retryを増やさず、通常CLIからcheckpoint recoveryできる。
+
+11. 他Layerへの影響
+
+22 output rootと全schemaのmodel_validator/unique-ID patternを監査した。単純ID配列の一意性検査は複合Cartesian matrixではなく、今回の134件反復と同じ増幅構造ではない。Position Candidateは最大5件、その他の主要Conclusion配列も既存の有限業務単位を持つ。共通ProviderRetry storeはPayloadValidationErrorを記録可能になったが、各Managerの既存認可条件は維持され、Conclusionだけが追加の監査条件を満たす場合に利用する。
+
+12. 同系統Failure Mode監査結果
+
+- 全22 OpenRouter roots: recursive strict schema PASS。
+- $defs、array items、union/anyOf、all object additionalProperties=false: PASS。
+- ConclusionのPosition、Integration、Quality Review: 既存のID/coverage validatorと有限候補数を確認。
+- Playwright Script section/paragraph uniqueness、Deliberation分析ID、Researcher source/review ID: 複合候補×基準matrixとは異なるが既存validatorを維持。
+- free-form dictへadditionalProperties=falseを機械適用していない。
+- Provider retryは同一task再送ではなく_operator_retry_1と別reservationを使い、retry-of-retryを拒否する。
+- OutboxはDecision failure前の既存Conclusion outbox hashが不変で、新規Playwright outboxは生成されない。
+
+13. Regression Test
+
+- 完全一致pairを4倍反復しても42件へ無損失正規化。
+- ratingが異なる重複を拒否。
+- candidate_evaluationsとcomparison_matrixのrating不一致を拒否。
+- 連結された未知候補IDを拒否。
+- 旧singular candidate IDの読込互換。
+- strict schemaのcandidate_evaluations maxItems=70、comparison_matrix maxItems=5。
+- strict schemaに複数形候補IDのみが存在。
+- PayloadValidationErrorの一回認可と未分類error拒否。
+
+14. Recovery / Fault Test
+
+- Static compile: PASS。
+- Targeted schema/manager/retry/22-root suite: 64 PASS。
+- Full Unit: 341 PASS in 301.249s。
+- Integration: 9 PASS in 27.722s。
+- Role Definitions: 31 loaded in STRICT mode。
+- Doctor provider=mock Safe Mode: READY。
+- Full Mock CLI E2E Producer -> Delivery: PASS。
+- Fault: candidate_evaluationsを4倍反復してもProvider retry 0でConclusion WAITING_HUMAN_SELECTION。
+- Fault: unknown candidate参照でFAILED、Position checkpointを保持し、明示retry後はPosition call 0、Evaluation/Integration/Quality Reviewだけを実行してWAITING_HUMAN_SELECTION。
+- Conflicting duplicateは自動修復せずFAILED。
+
+15. Provider Call数
+
+- Failure capture: Real Decision Evaluator 1。
+- Cycle 017 implementation / tests / Mock / Fault: Real 0。
+- Position repair result reused: 1 completed checkpoint。
+- Prevented duplicate upstream calls: Producer、Researcher、Deliberation、Positionの全呼出し。
+- Automatic retries: 0。
+- 次の許可操作: 保存済みPositionからDecision Evaluatorを_operator_retry_1で一回だけ実行する。
+
+16. API Cost
+
+Decision Evaluatorの実測costはCLI/保存応答に記録されていないためunknown。Cycle 017の実装と検証はReal API $0。最終Fresh Real E2E用予算を保持する。
+
+17. Existing Workflowへの影響
+
+Real failureまでの正常CLI更新により、Position repair authorization/reservation/result、Decision request/reservation/error PMP、Conclusion FAILED stateが追加された。Deliberation state/messagesのSHA-256は事前値と一致し、Conclusion outboxも不変。storage JSONの手動編集、reservation削除、既存checkpoint上書きは行っていない。
+
+18. Remaining Risk
+
+修正後のDecision Evaluatorを実OpenRouterで一回再実行し、複数ID配列とmaxItemsが実endpointで守られることを確認する必要がある。成功後のDecision IntegratorとConclusion Quality Reviewer、Human Selection、Playwright、Deliveryはまだproduction workflowで未完了。再試行が失敗した場合は再々送せず、新しいDebug Cycleとして停止・監査する。
+
+19. Plan Compliance Review / Result before E2E resume
+
+[YES] Root Causeまで特定した。
+[YES] 局所的な重複削除だけで終わらず、RD/schema/domain validation/recovery認可を整合させた。
+[YES] 22 rootsと一意性validatorのSibling Failureを監査した。
+[YES] 他Layerへの影響を確認した。
+[YES] Stateを確認した。
+[YES] Checkpointを確認した。
+[YES] Schemaを確認した。
+[YES] PMPを確認した。
+[YES] Reservationを確認した。
+[YES] Outboxを確認した。
+[YES] Regression Testを追加した。
+[YES] Recovery/Fault Testを行った。
+[YES] Debug Reportを書いた。
+[YES] 設計上の意味を説明した。
+[YES] 不必要なProvider Callを避けた。
+[YES] CLI E2E Execution & Stabilization Plan v2を再読し、準拠を確認した。
+
+Result before E2E resume: IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT PASS. PRODUCTION DEPLOYMENT AND ONE EXPLICIT DECISION EVALUATOR RETRY PENDING.
+
+20. Explicit Real Retry結果（2026-08-17追記）
+
+`--conclusion-provider-retry 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`を一回だけ実行した。保存済みPositionは再利用され、Decision Evaluatorは`conclusion_decision_evaluation_upstream_0_revision_0_operator_retry_1`で成功した。続くDecision Integratorも成功し、両Resultとreservationが保存された。
+
+この一回の局所再開におけるReal callはDecision Evaluator 1、Decision Integrator 1、Conclusion Quality Reviewer 1、automatic retry 0。Producer、Researcher、Deliberation、Position Generatorの再実行は0だった。
+
+Quality ReviewerはJSON objectを返したが、`status=approved_with_conditions` / `playwright_readiness=ready_with_conditions`と、`revision_scope=targeted` / internal revision targets / upstream revision requestを同時に返したため、既存runtime validatorが`approved review cannot route revisions`として正しく拒否した。ConclusionはPosition、Evaluation、Integrationを保持したFAILEDとなり、Cycle 018へ移行した。
+
+Result after E2E resume: DECISION EVALUATION CONTRACT PASS / INTEGRATION PASS / QUALITY REVIEW DECISION CONTRACT FAILURE CAPTURED. Cycle 018 required; no retry-of-retry was performed.

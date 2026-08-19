@@ -131,6 +131,9 @@ class DeliberationValidator:
         counterargument_ids = {
             item.counterargument_id for item in counterargument.counterarguments
         }
+        challenge_ids = {
+            item.challenge_id for item in counterargument.steelman_arguments
+        }
         required_revision_ids = {
             item.revision_id for item in counterargument.required_revisions
         }
@@ -198,6 +201,12 @@ class DeliberationValidator:
                 path,
                 "counterargument_ids",
                 set(entry.counterargument_ids) - counterargument_ids,
+            )
+            self._append_unknown_reference_finding(
+                findings,
+                path,
+                "challenge_ids",
+                set(entry.challenge_ids) - challenge_ids,
             )
             self._append_unknown_reference_finding(
                 findings,

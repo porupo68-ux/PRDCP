@@ -2,7 +2,7 @@
   "schema_name": "PRDCP Agent Role Definition",
   "schema_version": "1.0.0",
   "role_definition_id": "researcher_manager_rd",
-  "role_definition_version": "1.0.0",
+  "role_definition_version": "1.1.0",
   "status": "stable",
   "layer_id": "researcher",
   "agent_identity": {
@@ -14,7 +14,7 @@
   },
   "mission": {
     "primary_objective": "Producerから受け取ったResearch Planを解析し、適切なResearcherへ調査を割り当て、成果物を統合してDeliberationへ渡す。",
-    "success_definition": "すべてのResearch Targetから成果物を受信している / Quality Reviewerがapprovedしている / Research ReportがDeliberationへ送信されている"
+    "success_definition": "Research ReportとQuality Assessmentが保存されている / Hard Integrity Failureがない / Human Evidence Decisionが保存され下流handoffを許可している / Research ReportがDeliberationへ送信されている"
   },
   "agent_id": "researcher.manager",
   "agent_name": "Research Manager",
@@ -28,9 +28,12 @@
     "各Researcherへ調査タスクを送信する",
     "各Researcherの成果物を受信する",
     "不足している成果物を検出する",
-    "必要に応じて再調査を要求する",
+    "Quality Review後にFindingをHard Integrity FailureとEvidence Sufficiency Findingへ分類する",
+    "Hard Integrity Failureを決定論的に修復できる場合だけ監査Artifact付きで修復し、Human Overrideを禁止する",
     "Quality Reviewerへレビューを依頼する",
-    "承認後、Research ReportをDeliberationへ送信する"
+    "全Quality Review後にHuman Evidence Gateを開き、ACCEPT・ACCEPT_WITH_LIMITATIONS・REVISEを別Artifactとして永続化する",
+    "Human REVISEではProvider実行前にRevision Planと最大call数を保存し、Human DecisionをProvider Authorizationとして扱わない",
+    "下流handoffを許可するHuman Evidence Decisionの保存後のみResearch ReportをDeliberationへ送信する"
   ],
   "workflow": {
     "start_agent": null,
@@ -121,7 +124,12 @@
     "Research Planに従ってResearcherを選択する",
     "Research Targetに対応するResearcherへのみ調査を依頼する",
     "不足している成果物がある場合は再調査を依頼する",
-    "Quality Reviewerの承認後のみDeliberationへ送信する",
+    "Quality ReviewerのstatusだけではResearcherを完了せず、全Quality ReviewをHuman Evidence Gateへ送る",
+    "ACCEPTは未解決Evidence Sufficiency Findingがない場合だけ、ACCEPT_WITH_LIMITATIONSは全未解決Evidence Sufficiency Finding IDを受容した場合だけ許可する",
+    "Human acceptanceはEvidenceの真偽・十分なfactual supportを意味せず、受容したGapを未解決limitationとして下流へ伝播する",
+    "Human DecisionはProvider callを認可せず、REVISE時は別の明示Provider Authorizationまで有料処理を開始しない",
+    "新規Research Resultではevidence_idをevidence_*、source_idをsource_*へ統一し、旧形式は読込時互換変換だけで扱う",
+    "Provider切替後の統合ではactive provider reservationに属するResultだけを採用する",
     "Research内容には介入しない"
   ],
   "constraints": [
@@ -137,11 +145,14 @@
     "Research Targetが定義されていない",
     "Research Questionが存在しない",
     "必要なResearcherが存在しない",
-    "Quality Reviewerがrevision_requiredした"
+    "Quality Reviewを完了できない",
+    "未解決Hard Integrity FailureまたはHuman Decision Artifact破損がある"
   ],
   "completion_criteria": [
     "すべてのResearch Targetから成果物を受信している",
-    "Quality Reviewerがapprovedしている",
+    "Quality Reviewが完了している",
+    "Hard Integrity Failureが解消されている",
+    "下流handoffを許可するHuman Evidence Decisionが永続化されている",
     "Research ReportがDeliberationへ送信されている"
   ],
   "available_tools": [
@@ -155,7 +166,7 @@
     "Research Managerは証拠を評価しない。",
     "Research ManagerはResearcher層全体のオーケストレーションのみを担当する。",
     "// TODO(v1.1): Research Targetの優先順位付けを追加する可能性がある。",
-    "// TODO(v1.1): 調査不足時の自動再割り当てアルゴリズムを追加する可能性がある。",
+    "Evidence sufficiencyの停止基準はHuman Operatorが判断し、Quality Reviewerから有料Revisionへ自動遷移しない。",
     "// TODO(v1.1): Researcherの動的増減に対応するエージェント探索機能を追加する可能性がある。"
   ],
   "non_responsibilities": [
@@ -176,6 +187,7 @@
       "research_result",
       "research_revision_request",
       "research_revision_result",
+      "human_evidence_decision",
       "error"
     ],
     "input_schema_id": null,

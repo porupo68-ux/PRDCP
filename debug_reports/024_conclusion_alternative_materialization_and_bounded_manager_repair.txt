@@ -1,0 +1,247 @@
+PRDCP Debug Report
+
+ID: 024
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion / Package Synthesis / Revision Recovery
+Agent: conclusion.manager / conclusion.quality_reviewer
+Error Class: VALIDATION / STATE / REVISION / CHECKPOINT / RESERVATION
+
+1. 発生した症状
+
+Cycle 023の一回Real Recoveryでは、保存済みDecision Integrationとdeterministic validationは正常だったが、
+Quality Reviewerが`conclusion_package.alternatives=[]`を指摘して`revision_required`を返した。
+Decision Integrationにはviable候補が2件あり、primaryは`pc_targeted_transition_monitoring_001`、もう1件の
+`pc_enable_adapt_incentives_003`にはcomparison summary、conditional advantage、sensitivity analysisが存在した。
+
+2. 発生地点
+
+`ConclusionManager._build_package`はprimaryを`recommended_options[0]`、alternativesを
+`recommended_options[1:]`だけから構築していた。Real Integrationはviable候補を2件保持しつつ、明示的recommendationを
+primary 1件だけ返したため、2件目がPackageから脱落した。workflowはBLOCKED、revision_count=2、Playwright outboxなし。
+
+3. 再現条件
+
+- `viable_candidates`に2件以上ある。
+- `recommended_options`はprimary 1件だけである。
+- 非primary viable候補はcomparison/sensitivityに存在する。
+- Package builderがrecommended_optionsの残りだけをalternativesにする。
+- 旧ValidatorがPackage alternativesとviable集合をcross-checkしない。
+
+4. 根本原因
+
+Integratorの「viable判定」とManagerの「Packageで保持する候補」のauthoritative集合が別々だった。
+Managerはrecommendedという狭い部分集合をPackage完全性の根拠にしており、viableだがprimary recommendationではない候補を
+明示的なfallbackへ変換する責務が未実装だった。Validatorもcandidate数、evaluation、traceabilityは検査したが、
+`viable - primary == alternatives`という集合不変条件を持たず、passed=trueと空alternativesが両立した。
+
+5. なぜ既存テストで発見できなかったか
+
+Mock Integratorは全viable候補をrecommended_optionsにも列挙していたため、`[1:]`でも偶然全fallbackが残った。
+Package testは候補総数とHuman Gateを確認したが、viable集合との完全一致、理由、適用条件、metricsのcross-checkを検査していなかった。
+またrevision上限テストは上限後のProvider call 0を確認したが、専門Agentを呼ばずに修復可能なManager所有artifactを区別しなかった。
+
+6. 計画書との照合後に採用した修正計画
+
+1) viable集合をPackage alternatives完全性の唯一の基準にする。
+2) primary以外の全viable候補を、保存済みrecommendation、comparison、conditional advantage、sensitivityだけから決定論的に構築する。
+3) 除外候補は`excluded_candidates.reason`で保持し、comparison summaryは全viable候補を一度ずつ覆う契約にする。
+4) Validatorでcoverage、重複、reason、applicable conditions、件数metricsを同時に検査する。
+5) saved ReviewがManager単独を指し、local findingがalternative系だけで、再構築後に全検証PASSとなる場合だけ補修を許可する。
+6) 通常のrevision_count=2と上限を変更しない。同じupstream/revision epochにつきManager repairは最大1回とする。
+7) repair recordと専用Quality Review taskをProvider call前に永続化し、専門Agentを再実行しない。
+8) Reviewer fault時は自動再送せず、既存の明示one-shot provider retryだけで同checkpointから復旧する。
+
+7. 実装内容
+
+- `_build_alternatives`を追加し、全viable非primary候補を入力artifactからmaterializeする。
+- alternativeへcandidate_id、recommendation_type、reason、applicable_profile_ids、applicable_conditionsを保存する。
+- Conclusion ValidatorへIntegrator comparison/recommendation集合とPackage alternative集合の整合検査を追加した。
+- metricsへviable、expected alternatives、actual alternatives、missing alternativesを追加した。
+- `ConclusionManagerRepairRecord`を追加し、epoch、source review/finding、追加候補、review taskをappend-onlyで記録する。
+- `--conclusion-revise`内で厳格なstructural eligibilityを判定し、通常revision上限チェック前に一回だけManager repairを分岐する。
+- Quality Review taskは`..._revision_2_manager_repair_1`となり、ReservationとRecovery identityを通常revisionから分離する。
+- manager repair historyがある同epochではtask identityを復元でき、明示Provider retryも同じcheckpointを使用する。
+- Conclusion Manager RDを1.0.6へ更新し、READMEへ運用境界を記載した。
+
+8. 変更ファイル
+
+- conclusion/manager.py
+- conclusion/state.py
+- conclusion/validator.py
+- providers/mock/conclusion_fixtures.py
+- role_definitions/conclusion/manager.json
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_rd_loader.py
+- README.md
+- debug_reports/023_request_bound_reference_schema_and_saved_payload_recovery.txt
+- debug_reports/024_conclusion_alternative_materialization_and_bounded_manager_repair.txt
+- debug_reports/debug_summary.txt
+
+9. 修正の設計上の意味
+
+viableは「意思決定上まだ選択可能」、recommendedは「Integratorが明示推奨した部分集合」であり、同義ではない。
+Packageは人間とPlaywrightへ選択肢を渡す境界なので、全viable候補を保持しなければならない。今回の修正は、この意味差を
+集合不変条件として実装し、Managerが上流の比較情報を落とすことを防ぐ。
+
+Manager repairはrevision上限の緩和ではない。新Evidence、再評価、再統合を行わず、既に保存済みの正規artifactから
+欠落した表現を再materializeする限定的なstate repairである。回数、epoch、source finding、追加ID、review taskを保存し、
+独立Reviewerの再承認を必須とすることで、上限迂回や無限loopを防ぐ。
+
+10. 他Layerへの影響
+
+- Producer / Researcher / DeliberationのSchema、state、checkpoint、outboxは変更しない。
+- Position Generator / Decision Evaluator / Decision IntegratorのReal再実行は不要。
+- Conclusion Packageに情報が追加されるが、既存Playwright入力はdictとして受理し、5層Mock E2Eで互換性を確認した。
+- Human Selectionは引き続き明示操作であり、自動選択しない。
+- DeliveryはHuman Selection後まで生成されない。
+
+11. 同系統Failure Mode監査
+
+- 全層でalternatives、viable_candidates、recommended_options、`[1:]`による候補脱落を検索し、同じ構造はConclusionだけだった。
+- Integration coverageは`viable ∪ excluded == generated candidates`を維持する。
+- comparison summaryはexcluded候補へ重複説明を要求せず、全viable候補を一度ずつ要求する。
+- recommended optionは一意かつviable集合内でなければpassed=false。
+- Package alternativeは全viable非primary候補と完全一致し、重複・欠落・空reason/conditionsを拒否する。
+- unrelated deterministic finding、他Agent target、upstream request、再構築後validation failureはManager repair対象外。
+- 同epochの2回目repairはProvider call前に停止する。
+- Reviewer failureはFAILEDとなり、未認可recoverはProvider call前に停止する。
+
+12. Regression Test
+
+- 全viable非primary候補がPackage alternativesへ一度ずつ存在する。
+- alternativeがsaved Evaluation/Integrationのreasonとconditionsを保持する。
+- alternatives空のlegacy Packageはalternative_coverage findingとなりpassed=false。
+- metricsのexpected/actual/missing件数が実体と一致する。
+- revision_count=2でもeligible Manager repairはrevision_countを増やさずReviewerだけ1回呼ぶ。
+- Position/Evaluation/Integration call countがrepair前後で不変。
+- 同epochの2回目repairはProvider call 0でBLOCKED。
+- blocking candidateをexcludedにした既存経路は正常通過。
+- RD 1.0.6と設計文言を検査。
+
+13. Mock / Fault Injection / Recovery
+
+Mock Manager repair:
+- status: WAITING_HUMAN_SELECTION
+- revision_count: 2
+- Manager repair record: 1
+- Position / Evaluation / Integration / Quality Reviewer calls: 0 / 0 / 0 / 1
+- 同epoch再repair: Provider calls 0、BLOCKED
+
+Fault Injection:
+- repair計画と新Package保存後のQuality Reviewer応答をcontract failureにした。
+- stateはFAILED、repair record 1、deterministic passed=trueを保持した。
+- 通常recoverは明示認可不足でcall前停止した。
+- one-shot retry後は専門Agent 0、Quality Reviewerだけ再実行してWAITING_HUMAN_SELECTIONへ復旧した。
+
+Exact production clone:
+- production state、必要な既存authorization/reservation/compatibility ledgerを隔離領域へ読込コピーした。
+- provider_id=openrouterのMockで`revise()`を実行した。
+- status: WAITING_HUMAN_SELECTION / approved
+- added alternative: pc_enable_adapt_incentives_003
+- repair task: conclusion_quality_review_upstream_0_revision_2_manager_repair_1
+- Position / Evaluation / Integration / Quality Reviewer calls: 0 / 0 / 0 / 1
+- deterministic validation: passed=true
+
+14. Validation Ladder
+
+- Compile / Static: PASS
+- New targeted tests: 3 PASS
+- Related Conclusion/RD tests: 94 PASS
+- Full Unit: 374 PASS
+- Integration: 9 PASS
+- Full discovery: 394 PASS
+- 31 RD STRICT: PASS
+- Doctor Mock: READY
+- 5-layer Mock E2E Producer -> Delivery: PASS
+- Delivery artifacts: 6
+
+15. Provider Call数
+
+- Cycle 024 implementation/test Real API calls: 0
+- Exact production clone: Mock Quality Reviewer 1、specialists 0
+- automatic retry: 0
+- duplicate call: 0
+- prevented specialist calls for planned Real resume: 3
+- planned production Real action: Quality Reviewer 1 only
+
+16. API Cost
+
+Cycle 024 implementation/test: $0。planned Real Quality Reviewerのcostはreservationにusageが保存されないためunknown。
+
+17. Existing Workflowへの影響
+
+productionは本報告時点までread-onlyである。事前snapshot:
+- Conclusion state SHA-256: 1E68062F5EA36441CA11D574AFB6BE769E313CAD85F0E0CABD7BF77FA0D1921A
+- Deliberation state SHA-256: F0B8A84868E656EE7172807424512EC265CC0BE612F2D87A66E52AFC7A72DD7D
+- Conclusion outbox SHA-256: 674D69A13D99CBB34A6FE705728947B2BEE896EDAF15CA85DB28581352BEBA58
+- Deliberation result SHA-256: E6C088628BE26490BE311827BD5E5782A910569EFE2F9E08C2038FAE78B0A14A
+- status BLOCKED / revision_count 2 / message count 32 / QR request count 4
+- Playwright outbox: absent
+
+schemaのdefaultにより旧stateは`manager_repair_history=[]`として読める。既存JSONそのものはdeployで書き換えない。
+正規CLI実行時だけ、新Package、validation、repair history、PMP、reservation、review結果を追記・更新する。
+
+18. Remaining Risk
+
+Real Quality Reviewerが修復済みPackageへ新しい正当なfindingを返す可能性は残る。その場合はSafe Modeが自動loopを止め、
+新Debug Cycleとして扱う。OpenRouter認証、残高、外部障害が起きた場合はユーザー指示どおり停止する。
+
+19. Result
+
+PASS。Root Cause、Sibling Audit、Implementation、Static、Unit、Integration、Mock、Fault、Exact Saved-State
+Recovery、明示的一回Real Retryを完了した。Quality Gateはapprovedとなり、workflowはHuman Selection待ちへ到達した。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所的なalternatives追記だけで終わっていない
+[YES] Sibling Failureを全層横断監査した
+[YES] 他Layerへの影響を確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schema/Validatorを確認した
+[YES] PMPを確認した
+[YES] Reservationとlogical task identityを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full Real E2Eは再実行せず、保存済みConclusion checkpointでManager repairとQuality Reviewerだけを再開する。
+
+20. Production Real Retry Update
+
+11変更ファイルをproductionへ反映し、全hash一致を確認した。deploy対象に`storage/data`は含めず、実行前の4保護対象
+hashが不変であることを確認した。Doctorはprovider=openrouter / demo_safe_mode=true、API key、31 model、31 RD Strict、
+verified model bindingを確認してREADYだった。
+
+明示CLI:
+
+`py main.py --conclusion-revise 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`
+
+結果:
+- status: WAITING_HUMAN_SELECTION
+- review: approved / playwright_readiness=ready / findings=0
+- revision_count: 2（変更なし）
+- manager_repair_history: 1
+- repair task: conclusion_quality_review_upstream_0_revision_2_manager_repair_1
+- added alternative: pc_enable_adapt_incentives_003
+- deterministic metrics: candidates=3, viable=2, expected alternatives=1, actual alternatives=1, missing=0, findings=0
+- Position / Evaluation / Integration Real calls: 0 / 0 / 0
+- Quality Reviewer Real calls: 1
+- automatic retry / duplicate / upstream call: 0
+- PMP messages: 32 -> 34（QR request/resultの2件だけ）
+- OpenRouter reservations: 58 -> 59（repair QR taskの1件だけ）
+- Playwright outbox: absent（Human Selection前のため正常）
+
+実行後もDeliberation state、Conclusion outbox、Deliberation resultのSHA-256は実行前と一致した。Conclusion stateだけが
+正規CLIにより更新され、SHA-256はD13BB8138BC41C20B315E9DCDDE4D0375B56582641489AB5B3D9D5181BA41E77となった。
+usage/costはreservationへ保存されないため実測値はunknown。
+
+Cycle 024 Final Result: PASS / ONE EXPLICIT OPENROUTER QUALITY REVIEW COMPLETE / HUMAN SELECTION PENDING

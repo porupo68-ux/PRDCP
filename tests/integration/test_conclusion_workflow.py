@@ -7,6 +7,7 @@ from pathlib import Path
 from config.settings import Settings
 from discord_app.commands import run_conclusion, run_deliberation, run_producer, run_researcher
 from providers.mock_provider import MockModelProvider
+from researcher.schemas.human_evidence import HumanActorSource, HumanEvidenceDecisionType
 from runtime import build_all_managers, build_conclusion_manager
 
 
@@ -35,6 +36,13 @@ class ConclusionIntegrationTests(unittest.TestCase):
             researcher_state = asyncio.run(
                 run_researcher(researcher, workflow_id=producer_state.workflow_id)
             )
+            self.assertEqual(researcher_state.status, "WAITING_HUMAN_EVIDENCE_REVIEW")
+            researcher_state = researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
             deliberation_state = asyncio.run(
                 run_deliberation(deliberation, workflow_id=producer_state.workflow_id)
             )
@@ -59,6 +67,12 @@ class ConclusionIntegrationTests(unittest.TestCase):
                 run_producer(producer, topic="生成AIは人間の仕事を奪うのか")
             )
             asyncio.run(run_researcher(researcher, workflow_id=producer_state.workflow_id))
+            researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
             asyncio.run(run_deliberation(deliberation, workflow_id=producer_state.workflow_id))
             waiting = asyncio.run(run_conclusion(conclusion, workflow_id=producer_state.workflow_id))
 
@@ -74,6 +88,10 @@ class ConclusionIntegrationTests(unittest.TestCase):
             self.assertTrue(message["payload"]["supporting_claims"])
             self.assertTrue(message["payload"]["supporting_analysis"])
             self.assertTrue(message["payload"]["evidence_links"])
+            self.assertEqual(
+                message["payload"]["human_evidence_decision"],
+                message["payload"]["final_conclusion"]["human_evidence_decision"],
+            )
 
 
 if __name__ == "__main__":

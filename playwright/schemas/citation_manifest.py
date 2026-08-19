@@ -111,6 +111,7 @@ class CitationValidatedScript(BaseModel):
 class CitationEditingTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    task_id: str = Field(min_length=1)
     target_agent_id: str = Field(default="playwright.evidence_citation_editor")
     production_context: ProductionContext
     script_draft: ScriptDraft
@@ -122,3 +123,103 @@ class CitationEditingResult(BaseModel):
 
     citation_validated_script: CitationValidatedScript
     citation_manifest: CitationManifest
+
+    @model_validator(mode="after")
+    def require_linked_artifacts(self) -> "CitationEditingResult":
+        if (
+            self.citation_validated_script.source_script_draft_id
+            != self.citation_manifest.script_draft_id
+        ):
+            raise ValueError(
+                "Citation artifacts must reference the same Script Draft"
+            )
+        if (
+            self.citation_validated_script.citation_manifest_id
+            != self.citation_manifest.citation_manifest_id
+        ):
+            raise ValueError(
+                "Citation Validated Script must reference its returned Citation Manifest"
+            )
+        return self
+
+    @classmethod
+    def specialize_strict_output_schema(
+        cls,
+        schema: dict[str, Any],
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        from playwright.schemas.strict_references import (
+            bind_array_item_variants,
+            bind_strict_reference_fields,
+            unique_strings,
+        )
+
+        context = input_data.get("production_context") or {}
+        draft = input_data.get("script_draft") or {}
+        source_manifest = context.get("source_manifest") or []
+        evidence_to_source = {
+            item.get("evidence_id"): item.get("source_id")
+            for item in source_manifest
+            if isinstance(item, dict)
+            and isinstance(item.get("evidence_id"), str)
+            and isinstance(item.get("source_id"), str)
+        }
+        sections = draft.get("sections") or []
+        paragraphs = [
+            (section, paragraph)
+            for section in sections
+            if isinstance(section, dict)
+            for paragraph in section.get("paragraphs") or []
+            if isinstance(paragraph, dict)
+        ]
+        section_ids = unique_strings(
+            [section.get("section_id") for section in sections if isinstance(section, dict)]
+        )
+        paragraph_ids = unique_strings(
+            [paragraph.get("paragraph_id") for _section, paragraph in paragraphs]
+        )
+        claim_ids = unique_strings(list(context.get("must_include_claim_ids") or []))
+        evidence_ids = unique_strings(
+            list(context.get("must_include_evidence_ids") or [])
+        )
+        source_ids = unique_strings(list(evidence_to_source.values()))
+        script_draft_id = str(draft.get("script_draft_id") or "")
+
+        bind_strict_reference_fields(
+            schema,
+            list_fields={
+                "claim_ids": claim_ids,
+                "evidence_ids": evidence_ids,
+                "source_ids": source_ids,
+            },
+            scalar_fields={
+                "source_script_draft_id": [script_draft_id],
+                "script_draft_id": [script_draft_id],
+                "section_id": section_ids,
+                "paragraph_id": paragraph_ids,
+                "evidence_id": evidence_ids,
+                "source_id": source_ids,
+            },
+        )
+        mapping_variants = []
+        for _section, paragraph in paragraphs:
+            paragraph_id = str(paragraph.get("paragraph_id") or "")
+            paragraph_evidence = unique_strings(list(paragraph.get("evidence_ids") or []))
+            paragraph_sources = unique_strings(
+                [evidence_to_source.get(value) for value in paragraph_evidence]
+            )
+            mapping_variants.append(
+                {
+                    "scalar_fields": {"paragraph_id": [paragraph_id]},
+                    "list_fields": {
+                        "claim_ids": unique_strings(list(paragraph.get("claim_ids") or [])),
+                        "evidence_ids": paragraph_evidence,
+                        "source_ids": paragraph_sources,
+                    },
+                }
+            )
+        return bind_array_item_variants(
+            schema,
+            array_field="mappings",
+            variants=mapping_variants,
+        )

@@ -2,10 +2,16 @@ import unittest
 
 from pydantic import ValidationError
 
+from common.structured_outputs import strict_output_schema
 from researcher.schemas.research_result import ResearchResult
 from researcher.schemas.research_task import ResearchTask
-from researcher.schemas.review import ResearchQualityReviewOutput
+from researcher.schemas.review import (
+    ResearchQualityReviewInput,
+    ResearchQualityReviewOutput,
+    ResearchReviewFinding,
+)
 from researcher.schemas.source import ResearchSource
+from researcher.schemas.trace_ids import canonicalize_legacy_trace_ids
 from tests.researcher_helpers import valid_source
 
 
@@ -44,6 +50,28 @@ class ResearcherPayloadTests(unittest.TestCase):
         data.pop("evidence_id")
         with self.assertRaises(ValidationError):
             ResearchSource.model_validate(data)
+
+    def test_source_and_evidence_ids_require_canonical_namespaces(self):
+        for field, legacy_value in (
+            ("source_id", "src_legacy"),
+            ("source_id", "source-legacy"),
+            ("evidence_id", "ev_legacy"),
+            ("evidence_id", "evidence-legacy"),
+        ):
+            with self.subTest(field=field, legacy_value=legacy_value):
+                data = valid_source()
+                data[field] = legacy_value
+                with self.assertRaises(ValidationError):
+                    ResearchSource.model_validate(data)
+
+    def test_legacy_trace_ids_are_canonicalized_only_by_explicit_read_adapter(self):
+        legacy = valid_source(source_id="src_legacy", evidence_id="ev_legacy")
+        converted = canonicalize_legacy_trace_ids(legacy)
+
+        source = ResearchSource.model_validate(converted)
+        self.assertTrue(source.source_id.startswith("source_legacy_"))
+        self.assertTrue(source.evidence_id.startswith("evidence_legacy_"))
+        self.assertEqual(canonicalize_legacy_trace_ids(converted), converted)
 
     def test_invalid_source_type_is_rejected(self):
         with self.assertRaises(ValidationError):
@@ -133,6 +161,51 @@ class ResearcherPayloadTests(unittest.TestCase):
                 }
             )
 
+    def test_result_rejects_sources_outside_the_assigned_agent_category(self):
+        with self.assertRaisesRegex(ValidationError, "may return only ACADEMIC"):
+            ResearchResult.model_validate(
+                {
+                    "task_id": "task_1",
+                    "research_question_id": "rq_employment",
+                    "agent_id": "researcher.academic_researcher",
+                    "sources": [valid_source("GOVERNMENT")],
+                    "search_summary": "done",
+                    "coverage_status": "COMPLETE",
+                    "limitations": [],
+                }
+            )
+
+    def test_source_rejects_placeholder_identity_metadata(self):
+        source = valid_source("POLITICIAN")
+        source["source_specific_metadata"]["politician_name"] = "null"
+
+        with self.assertRaisesRegex(ValidationError, "blank or placeholder"):
+            ResearchSource.model_validate(source)
+
+    def test_strict_schema_is_specialized_to_the_research_task_category(self):
+        schema = strict_output_schema(
+            ResearchResult,
+            input_data={
+                "target_agent_id": "researcher.academic_researcher",
+                "research_target": "ACADEMIC",
+            },
+        )
+
+        self.assertEqual(
+            schema["properties"]["agent_id"]["enum"],
+            ["researcher.academic_researcher"],
+        )
+        source_schema = schema["$defs"]["ResearchSource"]
+        self.assertNotIn("anyOf", source_schema)
+        self.assertEqual(
+            source_schema["properties"]["source_type"]["enum"],
+            ["ACADEMIC"],
+        )
+        self.assertEqual(
+            source_schema["properties"]["source_specific_metadata"],
+            {"$ref": "#/$defs/AcademicMetadata"},
+        )
+
     def test_task_target_must_match_agent(self):
         with self.assertRaises(ValidationError):
             ResearchTask.model_validate(
@@ -160,6 +233,45 @@ class ResearcherPayloadTests(unittest.TestCase):
                     "approved_research_report": None,
                 }
             )
+
+    def test_quality_review_input_requires_logical_task_id(self):
+        task_field = ResearchQualityReviewInput.model_fields["task_id"]
+        self.assertTrue(task_field.is_required())
+
+    def test_quality_finding_can_target_manager_without_routing_provider_revision(self):
+        finding = ResearchReviewFinding.model_validate(
+            {
+                "finding_id": "finding_manager_contract",
+                "severity": "MAJOR",
+                "research_question_id": None,
+                "target_agent_id": "researcher.manager",
+                "issue": "The integrated report needs a traceability wording correction",
+                "required_action": "Correct the integrated report without new research",
+            }
+        )
+        self.assertEqual(finding.target_agent_id, "researcher.manager")
+
+        with self.assertRaises(ValidationError):
+            ResearchQualityReviewOutput.model_validate(
+                {
+                    "status": "revision_required",
+                    "reason": "Manager-only work is not a provider revision target",
+                    "findings": [finding.model_dump(mode="json")],
+                    "revision_targets": ["researcher.manager"],
+                    "approved_research_report": None,
+                }
+            )
+
+    def test_quality_finding_schema_exposes_manager_as_an_allowed_target(self):
+        schema = ResearchReviewFinding.model_json_schema()
+        target_schema = schema["properties"]["target_agent_id"]
+        target_ref = next(
+            item["$ref"]
+            for item in target_schema["anyOf"]
+            if "$ref" in item
+        )
+        enum_name = target_ref.rsplit("/", 1)[-1]
+        self.assertIn("researcher.manager", schema["$defs"][enum_name]["enum"])
 
 
 if __name__ == "__main__":

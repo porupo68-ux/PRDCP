@@ -32,6 +32,22 @@ class ConclusionUpstreamRevisionRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ConclusionManagerRepairRecord(BaseModel):
+    """Audited, deterministic repair of a Manager-owned package artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    iteration: int = Field(ge=1)
+    upstream_revision_count: int = Field(ge=0)
+    revision_count: int = Field(ge=0)
+    source_review_id: str = Field(min_length=1)
+    source_finding_ids: list[str] = Field(min_length=1)
+    repair_kind: str = Field(pattern=r"^alternative_materialization$")
+    added_alternative_candidate_ids: list[str] = Field(min_length=1)
+    reviewer_task_id: str = Field(min_length=1)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class ConclusionWorkflowState(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
 
@@ -55,10 +71,14 @@ class ConclusionWorkflowState(BaseModel):
     current_agent_ids: list[str] = Field(default_factory=list)
     revision_count: int = Field(default=0, ge=0)
     revision_history: list[ConclusionRevisionRecord] = Field(default_factory=list)
+    manager_repair_history: list[ConclusionManagerRepairRecord] = Field(
+        default_factory=list
+    )
     upstream_revision_count: int = Field(default=0, ge=0)
     upstream_revision_history: list[ConclusionUpstreamRevisionRecord] = Field(default_factory=list)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
+    provider_payload_recoveries: list[dict[str, Any]] = Field(default_factory=list)
     playwright_sent: bool = False
     limitations: list[str] = Field(default_factory=list)
     error: dict[str, Any] | None = None

@@ -7,6 +7,11 @@ from producer.manager import ProducerManager
 from producer.state import ProducerWorkflowState
 from researcher.manager import ResearcherManager
 from researcher.schemas.research_report import ResearchReport
+from researcher.schemas.human_evidence import (
+    HumanActorSource,
+    HumanEvidenceDecisionType,
+    HumanEvidenceGateSummary,
+)
 from researcher.state import ResearcherWorkflowState
 from conclusion.manager import ConclusionManager
 from conclusion.schemas.conclusion_package import ConclusionPackage
@@ -51,6 +56,35 @@ def load_researcher_result(
     workflow_id: str,
 ) -> ResearchReport:
     return manager.repository.load_report(workflow_id)
+
+
+def inspect_researcher_evidence(
+    manager: ResearcherManager,
+    workflow_id: str,
+) -> HumanEvidenceGateSummary:
+    return manager.inspect_human_evidence_gate(workflow_id)
+
+
+def decide_researcher_evidence(
+    manager: ResearcherManager,
+    workflow_id: str,
+    decision: HumanEvidenceDecisionType,
+    *,
+    reason: str,
+) -> ResearcherWorkflowState:
+    return manager.decide_human_evidence(
+        workflow_id,
+        decision,
+        reason=reason,
+        actor_source=HumanActorSource.DISCORD,
+    )
+
+
+def recover_researcher_evidence(
+    manager: ResearcherManager,
+    workflow_id: str,
+) -> ResearcherWorkflowState:
+    return manager.recover_human_evidence_gate(workflow_id)
 
 
 async def run_deliberation(

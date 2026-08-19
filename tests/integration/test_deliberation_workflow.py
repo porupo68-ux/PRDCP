@@ -7,6 +7,7 @@ from pathlib import Path
 from config.settings import Settings
 from discord_app.commands import run_deliberation, run_producer, run_researcher
 from providers.mock_provider import MockModelProvider
+from researcher.schemas.human_evidence import HumanActorSource, HumanEvidenceDecisionType
 from runtime import build_managers
 
 
@@ -32,6 +33,13 @@ class DeliberationIntegrationTests(unittest.TestCase):
             )
             research_state = asyncio.run(
                 run_researcher(researcher, workflow_id=producer_state.workflow_id)
+            )
+            self.assertEqual(research_state.status, "WAITING_HUMAN_EVIDENCE_REVIEW")
+            research_state = researcher.decide_human_evidence(
+                producer_state.workflow_id,
+                HumanEvidenceDecisionType.ACCEPT,
+                reason="Explicit integration-test Human Evidence decision",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
             )
             deliberation_state = asyncio.run(
                 run_deliberation(deliberation, workflow_id=producer_state.workflow_id)

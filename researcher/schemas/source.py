@@ -8,6 +8,8 @@ from typing import Any, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from typing_extensions import TypedDict
 
+from researcher.schemas.trace_ids import EvidenceId, SourceId
+
 
 class ResearchSourceType(str, Enum):
     EXPERT = "EXPERT"
@@ -65,17 +67,61 @@ REQUIRED_METADATA = {
     },
 }
 
+REQUIRED_IDENTITY_METADATA = {
+    ResearchSourceType.EXPERT: {"expert_name", "affiliation"},
+    ResearchSourceType.ACADEMIC: {"journal_name", "study_type"},
+    ResearchSourceType.GOVERNMENT: {"organization", "country"},
+    ResearchSourceType.NEWS: {"media_name", "article_type"},
+    ResearchSourceType.PUBLIC_OPINION: {"platform"},
+    ResearchSourceType.POLITICIAN: {"politician_name", "statement_type"},
+    ResearchSourceType.INDUSTRY: {"organization_name", "organization_type"},
+}
+
+# Only names which identify the person, publication, institution or platform
+# must be textually grounded in Retrieval.  Values such as study_type,
+# article_type and organization_type are analytical classifications; requiring
+# them to occur verbatim in a source confuses classification with quotation.
+GROUNDED_IDENTITY_METADATA = {
+    ResearchSourceType.EXPERT: {"expert_name", "affiliation"},
+    ResearchSourceType.ACADEMIC: {"journal_name"},
+    ResearchSourceType.GOVERNMENT: {"organization"},
+    ResearchSourceType.NEWS: {"media_name"},
+    ResearchSourceType.PUBLIC_OPINION: {"platform"},
+    ResearchSourceType.POLITICIAN: {"politician_name"},
+    ResearchSourceType.INDUSTRY: {"organization_name"},
+}
+# These fields describe source provenance rather than analytical conclusions.
+# Retrieval currently persists URL/title/content but does not persist a separate
+# author/publisher record.  The Provider must therefore not invent these values:
+# the Researcher adapter supplies a deterministic hostname/official-domain value,
+# or None when a person/affiliation cannot be established without inference.
+PROVENANCE_HYDRATED_METADATA = {
+    ResearchSourceType.EXPERT: {"expert_name", "affiliation"},
+    ResearchSourceType.ACADEMIC: {"journal_name"},
+    ResearchSourceType.GOVERNMENT: {"organization", "country"},
+    ResearchSourceType.NEWS: {"media_name"},
+    ResearchSourceType.PUBLIC_OPINION: {"platform"},
+    ResearchSourceType.POLITICIAN: {"politician_name", "party", "position"},
+    ResearchSourceType.INDUSTRY: {"organization_name"},
+}
+NULLABLE_UNVERIFIED_IDENTITY_METADATA = {
+    ResearchSourceType.EXPERT: {"expert_name", "affiliation"},
+    ResearchSourceType.GOVERNMENT: {"country"},
+    ResearchSourceType.POLITICIAN: {"politician_name"},
+}
+PLACEHOLDER_IDENTITY_VALUES = {"null", "none", "unknown", "n/a", "na", "-"}
+
 
 class MetadataExtensions(TypedDict, total=False):
-    merged_evidence_ids: list[str]
+    merged_evidence_ids: list[EvidenceId]
 
 
 class ExpertMetadata(MetadataExtensions):
     __pydantic_config__ = ConfigDict(extra="forbid")
 
-    expert_name: str
+    expert_name: str | None
     field: str
-    affiliation: str
+    affiliation: str | None
     statement_context: str
 
 
@@ -92,7 +138,7 @@ class GovernmentMetadata(MetadataExtensions):
     __pydantic_config__ = ConfigDict(extra="forbid")
 
     organization: str
-    country: str
+    country: str | None
     document_type: str
 
 
@@ -115,7 +161,7 @@ class PublicOpinionMetadata(MetadataExtensions):
 class PoliticianMetadata(MetadataExtensions):
     __pydantic_config__ = ConfigDict(extra="forbid")
 
-    politician_name: str
+    politician_name: str | None
     party: str | None
     position: str | None
     statement_type: str
@@ -191,8 +237,8 @@ class ResearchSource(BaseModel):
         json_schema_extra=_correlate_source_metadata_schema,
     )
 
-    source_id: str = Field(min_length=1)
-    evidence_id: str = Field(min_length=1)
+    source_id: SourceId
+    evidence_id: EvidenceId
     research_question_ids: list[str] = Field(min_length=1)
     source_type: ResearchSourceType
     title: str = Field(min_length=1)
@@ -228,10 +274,45 @@ class ResearchSource(BaseModel):
 
     @model_validator(mode="after")
     def validate_category_metadata(self) -> "ResearchSource":
-        required = REQUIRED_METADATA[ResearchSourceType(self.source_type)]
+        source_type = ResearchSourceType(self.source_type)
+        required = REQUIRED_METADATA[source_type]
         missing = sorted(required - self.source_specific_metadata.keys())
         if missing:
             raise ValueError(
                 f"{self.source_type} source_specific_metadata is missing: {', '.join(missing)}"
+            )
+        invalid_identity = sorted(
+            field_name
+            for field_name in REQUIRED_IDENTITY_METADATA[source_type]
+            if (
+                (
+                    self.source_specific_metadata.get(field_name) is None
+                    and field_name
+                    not in NULLABLE_UNVERIFIED_IDENTITY_METADATA.get(
+                        source_type,
+                        set(),
+                    )
+                )
+                or (
+                    isinstance(self.source_specific_metadata.get(field_name), str)
+                    and (
+                        not self.source_specific_metadata[field_name].strip()
+                        or self.source_specific_metadata[field_name].strip().lower()
+                        in PLACEHOLDER_IDENTITY_VALUES
+                    )
+                )
+                or (
+                    self.source_specific_metadata.get(field_name) is not None
+                    and not isinstance(
+                        self.source_specific_metadata.get(field_name),
+                        str,
+                    )
+                )
+            )
+        )
+        if invalid_identity:
+            raise ValueError(
+                f"{self.source_type} source identity metadata is blank or placeholder: "
+                + ", ".join(invalid_identity)
             )
         return self

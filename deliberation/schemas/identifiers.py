@@ -21,7 +21,8 @@ TASK_PREFIXES = ("delib_task_", "counter_task_")
 EVIDENCE_PREFIXES = ("evidence_",)
 SOURCE_PREFIXES = ("source_",)
 CLAIM_PREFIXES = ("claim_", "causal_claim_")
-COUNTERARGUMENT_PREFIXES = ("counterargument_", "counter_", "challenge_")
+COUNTERARGUMENT_PREFIXES = ("counterargument_", "counter_")
+CHALLENGE_PREFIXES = ("challenge_", "steelman_")
 
 
 def require_identifier_prefix(

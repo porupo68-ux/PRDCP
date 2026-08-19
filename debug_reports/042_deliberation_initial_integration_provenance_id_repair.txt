@@ -1,0 +1,207 @@
+Cycle 042 — Deliberation Initial Integration Provenance ID Repair
+Date: 2026-08-19 (Asia/Tokyo)
+Workflow: 4b837e0e-9e1c-4150-97e1-ac31ef87024e
+Status: IMPLEMENTATION AND MOCK VERIFICATION COMPLETE; PRODUCTION REAL RECOVERY AWAITS EXPLICIT AUTHORIZATION
+
+1. What happened
+
+The saved Deliberation failed while validating the paid Initial Integration response.
+InitialIntegratedAnalysis.stakeholder_structure.source_analysis_id contained an
+integration_initial_* value. That field represents the source analysis artifact,
+so the existing Pydantic validator correctly rejected the integration artifact ID.
+
+The three primary analyst Provider responses were already present in PMP history.
+Argument and Causal were accepted into state. Stakeholder had also completed, but
+its response used a non-canonical source alias for one specific fact and was
+temporarily excluded before the Manager invocation. The Manager was therefore
+called with Argument and Causal only, and its invalid response was persisted.
+
+2. Root cause
+
+The application model enforced analysis prefixes with a Pydantic field validator,
+but that semantic validator is not represented in the JSON Schema sent to the LLM.
+The Provider-visible source_analysis_id field was only a generic string. The
+Deliberation Manager prompt also embedded the unspecialized root schema. Thus the
+model could invent integration_initial_* as stakeholder provenance even though
+local validation correctly rejected it.
+
+A prefix check alone is insufficient: causal_analysis_* is syntactically an
+analysis ID but is still the wrong owner for stakeholder_structure. The previous
+Manager boundary did not cross-check the exact IDs in the request by role.
+
+3. Design meaning of the repair
+
+source_analysis_id now means exactly one thing: the role-owned analysis artifact
+that was present in the same Manager request. integration_id continues to identify
+the integration artifact itself. If a primary role is absent under the existing
+two-of-three continuation rule, deliberation.manager remains the explicit owner of
+the Manager-synthesized section. These meanings are not interchangeable.
+
+The saved invalid Manager payload is not repaired by replacing only its ID. The
+original Manager request did not contain the recovered Stakeholder analysis, so
+post-hoc rebinding would falsely claim provenance. Recovery first restores the
+saved Stakeholder result without a Provider call, then regenerates Initial
+Integration under the distinct existing contract_repair_1 task identity with all
+three analysis artifacts present.
+
+4. Code changes
+
+- Deliberation Initial and Final Integration strict schemas are specialized per
+  request. IntegratedClaim, CausalStructure, StakeholderStructure,
+  ProblemDefinition, Agreement/Conflict references, and Traceability analysis IDs
+  receive compact exact-ID allowlists.
+- The Deliberation Manager prompt now receives the same specialized schema as the
+  OpenRouter response_format boundary.
+- The Manager performs exact role-ownership validation after Pydantic validation.
+  A valid-prefix/wrong-role payload is persisted as a contract failure and cannot
+  silently enter a checkpoint.
+- Saved Manager payload recovery applies the same exact ownership check. It never
+  invents provenance for an artifact absent from the original generation.
+- Legacy mock-shape adapters preserve explicitly supplied provenance IDs.
+- The Deliberation mock fixture emits all authoritative primary IDs and preserves
+  them through Final Integration.
+- Added production-state clone verification script:
+  scripts/verify_cycle042_provenance_clone.py.
+
+5. Contract impact map
+
+Changed Contract:
+  Deliberation InitialIntegratedAnalysis provenance identity
+Canonical Owner:
+  deliberation/schemas/integrated_analysis.py
+Producer:
+  Deliberation Manager / per-request Structured Output schema / mock fixture
+Persistence:
+  Deliberation workflow state, invalid Manager payload, checkpoints, PMP messages
+Direct Consumer:
+  Deliberation deterministic validation and Quality Review
+Transitive Consumers:
+  Deliberation Result -> Conclusion -> Playwright -> Delivery
+
+No Researcher, Retrieval, Human Evidence Gate, model assignment, Conclusion
+selection logic, or Playwright decision logic was changed.
+
+6. Regression and fault verification
+
+Targeted Deliberation tests:
+  105 passed
+
+Full verification:
+  compileall PASS
+  566 tests PASS in 585.306 seconds
+  31 Role Definitions loaded in STRICT mode
+  22 OpenRouter root Structured Output schemas PASS recursive strict audit
+  Doctor READY (fail=0; optional dependency/config warnings only)
+  Five-layer Mock E2E PASS through six Delivery files
+
+New explicit coverage:
+  - role-owned stakeholder/causal/argument source_analysis_id
+  - integration_initial_* rejection
+  - valid-prefix but wrong-role rejection
+  - all primary analysis IDs in problem provenance
+  - persist -> reload
+  - Quality Review request preservation
+  - internal revision preservation
+  - Deliberation Result and Conclusion handoff preservation
+  - distinct contract repair identity after semantic provenance failure
+  - no primary-analysis replay during checkpoint recovery
+
+Existing Cycle 041 regressions also passed:
+  - complete Traceback remains in logs
+  - Discord receives a bounded operational summary
+  - execution failure closes RUNNING as ERROR
+
+7. Post-change ID audit
+
+The active runtime contains three scalar source_analysis_id owners:
+  IntegratedClaim -> Argument Analysis or explicit Manager fallback
+  IntegratedCausalStructure -> Causal Analysis or explicit Manager fallback
+  IntegratedStakeholderStructure -> Stakeholder Analysis or explicit Manager fallback
+
+List provenance fields (problem, agreement, conflict, traceability) are restricted
+to exact request IDs. Integration IDs remain in integration_id,
+previous_integration_id, and traceability.integration_ids. No active generation
+path assigns integration_initial_* to source_analysis_id.
+
+8. Production clone
+
+The exact saved FAILED Deliberation state and all workflow-addressed artifacts,
+messages, contexts, and reservations were copied to isolated storage.
+
+Results:
+  Researcher status: COMPLETED
+  Accepted unresolved gap preserved: fqrq_ai_emp_003_news_missing
+  Saved primary Provider calls re-executed: 0
+  Mock Deliberation recovery calls:
+    InitialIntegratedAnalysis
+    CounterargumentAnalysisResult
+    FinalIntegratedAnalysis
+    DeliberationQualityReviewOutput
+  Total five-layer Mock Provider calls: 12
+  Deliberation: COMPLETED
+  Deterministic validation: passed=true
+  stakeholder source ID:
+    stakeholder_analysis_delib_task_1a267310e4454218b1330ee2f3057e49
+  Conclusion Human Gate: WAITING_HUMAN_SELECTION
+  Clone selection: completed
+  Playwright: COMPLETED
+  Delivery: six expected files
+  Real Provider calls: 0
+  Retrieval calls: 0
+  Production source storage mutated: false
+
+9. Production boundary before real recovery
+
+Researcher state SHA-256:
+  6c12d9f85ce12adef2c68ebc31f98e93e604a20ddce8ec51ccd86d6518a1e9b3
+Research Report SHA-256:
+  52d2ec719cbd05d781e1e88d2dbd60fea79d5d100e46a14dea81da5cfb681fbb
+Researcher -> Deliberation handoff SHA-256:
+  0f567d0b1fb1d031c5524ddb404fdd835fe0a6e3f405f834b7716cda090f6159
+Human Decision SHA-256:
+  3ff9ae389c083b6db379a03b78b0900ab806daab834ee5d058ecc2973b18f7f8
+Deliberation FAILED state SHA-256:
+  6c7f7a3f85e7aee0ae7481c81128fddd7530e0690f2f3c79a95f38de249825fa
+OpenRouter Provider reservations: 19
+OpenRouter Retrieval reservations: 10
+
+The PRDCP Bot was restarted once after code verification. The old single process
+pair was replaced by one new process pair; no duplicate Bot remained.
+
+10. API accounting and current stop condition
+
+Cycle 042 implementation/test/clone:
+  Real Provider calls: 0
+  Real Retrieval calls: 0
+
+Production recovery attempt:
+  Real Provider calls: 0
+  Real Retrieval calls: 0
+  State writes: 0
+  New reservations: 0
+
+The production command was rejected before process creation because this workflow
+does not yet have an explicit user authorization covering paid OpenRouter calls
+and production state/messages/reservations mutation. No workaround was attempted.
+
+Expected authorized Deliberation recovery boundary:
+  Saved primary analyses: 0 calls
+  Retrieval: 0 calls
+  Initial Integration contract repair: at most 1 call
+  Counterargument: at most 1 call
+  Final Integration: at most 1 call
+  Quality Review: at most 1 call
+
+After authorization, stop immediately on any failure. If Deliberation completes,
+Conclusion may be run to WAITING_HUMAN_SELECTION; recording the final Human
+Conclusion Selection still requires the user's explicit choice.
+
+11. Prevention
+
+Every future ID contract change must be verified at all of these boundaries:
+  canonical owner -> generator -> provider schema -> local semantic validation ->
+  persistence -> reload -> direct reviewer -> revision -> downstream handoff ->
+  Delivery.
+
+The key rule is: source_*_id identifies the referenced artifact, not the artifact
+currently being created.

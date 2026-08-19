@@ -4,7 +4,7 @@
     "environment_key": "MODEL_PRODUCER_MANAGER"
   },
   "producer.topic_scout": {
-    "display_name": "Perplexity Sonar",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_PRODUCER_TOPIC_SCOUT"
   },
   "producer.topic_selector": {
@@ -12,11 +12,11 @@
     "environment_key": "MODEL_PRODUCER_TOPIC_SELECTOR"
   },
   "producer.general_opinion_analyst": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_PRODUCER_GENERAL_OPINION_ANALYST"
   },
   "producer.research_planner": {
-    "display_name": "Perplexity Sonar Pro",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_PRODUCER_RESEARCH_PLANNER"
   },
   "producer.quality_reviewer": {
@@ -28,31 +28,31 @@
     "environment_key": "MODEL_RESEARCHER_MANAGER"
   },
   "researcher.expert_researcher": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_EXPERT"
   },
   "researcher.academic_researcher": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_ACADEMIC"
   },
   "researcher.government_researcher": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_GOVERNMENT"
   },
   "researcher.news_researcher": {
-    "display_name": "Perplexity Sonar",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_NEWS"
   },
   "researcher.public_opinion_researcher": {
-    "display_name": "Perplexity Sonar",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_PUBLIC_OPINION"
   },
   "researcher.politician_researcher": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_POLITICIAN"
   },
   "researcher.industry_researcher": {
-    "display_name": "Perplexity Sonar Deep Research",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_RESEARCHER_INDUSTRY"
   },
   "researcher.quality_reviewer": {
@@ -60,23 +60,23 @@
     "environment_key": "MODEL_RESEARCHER_QUALITY_REVIEWER"
   },
   "deliberation.manager": {
-    "display_name": "Moonshot AI Kimi K3",
+    "display_name": "OpenAI GPT-5.5",
     "environment_key": "MODEL_DELIBERATION_MANAGER"
   },
   "deliberation.argument_analyst": {
-    "display_name": "DeepSeek R1",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_DELIBERATION_ARGUMENT"
   },
   "deliberation.causal_structural_analyst": {
-    "display_name": "DeepSeek R1",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_DELIBERATION_CAUSAL_STRUCTURAL"
   },
   "deliberation.stakeholder_response_analyst": {
-    "display_name": "DeepSeek R1",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_DELIBERATION_STAKEHOLDER_RESPONSE"
   },
   "deliberation.counterargument_analyst": {
-    "display_name": "DeepSeek R1",
+    "display_name": "Google Gemini 3.7 Flash",
     "environment_key": "MODEL_DELIBERATION_COUNTERARGUMENT"
   },
   "deliberation.quality_reviewer": {

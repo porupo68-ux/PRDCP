@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_99138732f470936b9e2e8c4f",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "task_id": "task_424faf70d1944c888726351e93afe2df_retrieval_reconstruction_1",
+  "agent_id": "researcher.industry_researcher",
+  "strategy": "INDUSTRY",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-17T17:55:07.392815+00:00"
+}

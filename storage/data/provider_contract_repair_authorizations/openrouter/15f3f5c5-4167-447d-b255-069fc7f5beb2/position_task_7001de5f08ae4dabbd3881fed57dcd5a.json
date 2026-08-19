@@ -1,0 +1,19 @@
+{
+  "authorization_id": "cceb49a6-1b3b-4819-907d-08c66dede3fe",
+  "workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "provider_id": "openrouter",
+  "agent_id": "conclusion.position_generator",
+  "original_task_id": "position_task_7001de5f08ae4dabbd3881fed57dcd5a",
+  "retry_task_id": "position_task_7001de5f08ae4dabbd3881fed57dcd5a_operator_retry_1",
+  "repair_task_id": "position_task_7001de5f08ae4dabbd3881fed57dcd5a_provider_contract_repair_1",
+  "source_retry_authorization_id": "3a133270-312e-4730-8549-aa9c13ce23ab",
+  "source_error_message_id": "6d0e9859-08c4-48a8-8e91-769686b16605",
+  "source_error_class": "ProviderResponseContractError",
+  "failed_model_id": "qwen/qwen3.5-flash-02-23",
+  "repair_model_id": "openai/gpt-5-mini",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-16T21:15:41.341013Z",
+  "consumed_at": "2026-08-16T21:15:41.513699Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\15f3f5c5-4167-447d-b255-069fc7f5beb2\\position_task_7001de5f08ae4dabbd3881fed57dcd5a_provider_contract_repair_1.json"
+}

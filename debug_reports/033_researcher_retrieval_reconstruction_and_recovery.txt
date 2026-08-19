@@ -1,0 +1,211 @@
+PRDCP v2 Debug Report
+Cycle: 033
+Title: Researcher Retrieval Reconstruction and Auditable Runtime Recovery
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: REAL RETRIEVAL 9/9 COMPLETE; FIRST REASONING STOPPED SAFELY; CONTINUED IN CYCLE 034
+
+1. What happened
+
+Cycle 032 correctly stopped the production Researcher recovery before any Provider call.
+All nine initial Research Tasks had a correlated old Perplexity HTTP 404 ERROR PMP and an
+original OpenRouter reasoning reservation, but none had a persisted Researcher Retrieval
+Context. The only Retrieval Context in the workflow belonged to Producer General Opinion.
+
+The operator then explicitly authorized a separate Cycle 033 to reconstruct the nine
+missing searches under new identities and continue the already-audited Gemini runtime
+model recovery. The fixed upper bound is:
+
+* Retrieval: 9 calls
+* Researcher Structured Reasoning: 9 calls
+* Researcher Quality Review: 1 call
+* Automatic retry: 0
+
+2. Root cause
+
+The production Researcher run was executed by an old, long-lived Discord runtime. That
+runtime used Perplexity models and did not execute the current Retrieval -> persisted
+Context -> Structured Reasoning boundary. As a result, changing the runtime model alone
+could not recover the workflow: Cycle 032 had no evidence checkpoint to reuse.
+
+This is not an ordinary retryable search failure. Reusing the old task ID for a new search
+would merge two materially different operations in one audit identity: the old failed
+reasoning call and a later operator-authorized Retrieval call. It would also make the old
+reservation history ambiguous.
+
+3. Repair design
+
+Added --researcher-retrieval-reconstruct WORKFLOW_ID. It requires Demo Safe Mode and the
+existing 31-agent Runtime Model Guard before any reservation or Provider call.
+
+For each incomplete task with missing Retrieval, the system now requires:
+
+* correlated original TASK and HTTP 404 capability ERROR PMP;
+* original reasoning Provider reservation matching workflow/task/agent/failed model;
+* a current runtime model different from the failed model;
+* COMPATIBLE current model capability metadata;
+* no saved original or reconstructed Retrieval Context;
+* one deterministic <original_task_id>_retrieval_reconstruction_1 identity.
+
+Every reconstruction writes a PENDING authorization. RetrievalCoordinator then writes a
+new Retrieval reservation, consumes the authorization, and only then invokes search. The
+returned Context is durably saved and its SHA-256 is written back to the authorization.
+The original task, original ERROR PMP, and old Provider reservation are never removed or
+rewritten.
+
+Runtime reasoning remains a separate identity:
+
+<original_task_id>_runtime_model_repair_1
+
+The reasoning PMP payload retains the original Research Task ID, while a protected
+retrieval_task_id extension points to the reconstructed Context. The ResearchResult is
+therefore integrated under the original plan task and traceability contract. An arbitrary
+caller cannot supply that extension; it is accepted only together with a runtime-model
+repair identity.
+
+4. Checkpoint and fault semantics
+
+* Search fails after authorization consumption: reservation and CONSUMED authorization
+  remain; no automatic or later duplicate search is allowed.
+* Process stops after Context write but before hash record: the next operator invocation
+  reconciles that exact saved Context and performs zero additional searches.
+* Some tasks complete before a later failure: completed Contexts and ResearchResults are
+  preserved and skipped.
+* Context bytes or identity change: recovery rejects the Context before reasoning.
+* Authorization/reservation identity changes: recovery stops before Provider invocation.
+* Reasoning fails: existing Cycle 032 repair-of-repair prohibition remains active.
+
+5. Same-family impact audit
+
+All seven Researcher Retrieval specialists use the shared ResearcherAgent adapter and
+RetrievalCoordinator, so the repair applies uniformly to Expert, Academic, Government,
+News, Public Opinion, Politician, and Industry tasks. Producer General Opinion continues
+to use its existing checkpoint/retry identities; it is not routed into Cycle 033.
+
+The common RetrievalCoordinator change is additive: ordinary Producer and Researcher
+calls pass no authorization callback and retain their previous behavior. Conclusion,
+Deliberation, Playwright, PMP serialization, strict Structured Output schemas, revision
+routing, Provider retry stores, and outbox formats are unchanged.
+
+6. Verification
+
+PASS  Static compile of maintained runtime and tests
+PASS  Cycle 032 regression: 8/8
+PASS  Cycle 033 unit/fault tests: 7/7
+PASS  CLI/maintainability targeted regression
+PASS  Researcher/Retrieval targeted regression: 83/83 before final test additions
+PASS  Full unit/integration suite: 464/464
+PASS  31 Role Definitions loaded in STRICT mode
+PASS  22 OpenRouter Structured Output root schemas
+PASS  Doctor mock READY, fail=0
+PASS  Five-layer Mock CLI E2E through Playwright COMPLETED
+
+Fault Injection:
+
+* one missing Context -> search 1, reasoning 1, review 1;
+* consumed search failure -> second invocation search 0;
+* post-Context/pre-hash fault -> second invocation search 0;
+* two-task second-search fault -> first Context preserved, duplicate search 0;
+* unauthorized retrieval_task_id override -> search 0, reasoning 0;
+* changed Context hash -> rejected;
+* old reasoning reservation bytes -> unchanged.
+
+Exact production clone:
+
+* initial Researcher status: FAILED
+* missing Researcher Retrieval Contexts: 9
+* Mock reconstruction Retrieval calls: 9
+* Mock reasoning calls: 9
+* Mock Quality Review calls: 1
+* reconstruction authorizations: 9
+* runtime repair authorizations: 9
+* duplicate calls: 0
+* final Researcher status: COMPLETED
+* production source state/messages unchanged: YES
+
+7. Why Mock/Doctor did not prevent the original failure
+
+The original workflow was produced by a stale Discord process. Doctor evaluated current
+configuration and capabilities, not the old live process and not a historical absence of
+Retrieval Contexts. Cycle 032 added the runtime guard and identified the missing Context
+precondition. Cycle 033 is deliberately an operator recovery path for that historical
+state, not a weakening of normal preflight or safe mode.
+
+8. State, PMP, reservation and outbox impact
+
+Before Real acceptance, production workflow state/messages, all 16 old Provider
+reservations, and the sole Producer Retrieval Context/reservation remain unchanged.
+Deployment changes code, README, tests, verification utility, and this report only.
+
+During authorized Real acceptance, expected new records are limited to:
+
+* 9 retrieval_reconstruction_authorizations;
+* up to 9 new Retrieval reservations and Contexts;
+* up to 9 runtime_model_repair authorizations/reservations;
+* corresponding Researcher TASK/RESULT or ERROR PMP entries;
+* Research Report, one Quality Review, and normal Researcher state/outbox updates if all
+  prior stages succeed.
+
+No old reservation, Context, workflow history, or Producer data is deleted or reset.
+
+9. Provider call and cost accounting
+
+Mock/Fault/clone Provider calls: non-billable
+Real Retrieval calls: 9/9
+Real Researcher reasoning calls: 1/9
+Real Quality Review calls: 0/1
+Real automatic retries: 0
+Observed API cost: OpenRouter billing metadata was not persisted by this runtime; exact cost
+must be read from the operator's OpenRouter account.
+
+10. Cycle self-audit before Real acceptance
+
+Root cause identified: YES
+Symptom-only patch avoided: YES
+Same failure mode audited across all 7 Researcher specialists: YES
+State/PMP/Schema/Checkpoint/Reservation/Outbox impact reviewed: YES
+Regression tests added: YES
+Recovery/Fault conditions verified: YES
+Exact production clone verified: YES
+Debug Report generated: YES
+Design meaning documented: YES
+Unnecessary Real Provider calls so far: NO (0)
+
+11. Real acceptance result
+
+After the operator explicitly authorized the bounded paid calls and storage updates, the
+production command reconstructed all nine missing Researcher Retrieval Contexts. Each
+Context, reservation and authorization was saved before the next call. Retrieval calls
+therefore completed 9/9 with no duplicate search.
+
+The first Gemini Structured Reasoning call then selected a valid source_id but returned a
+reformatted/paraphrased relevant_excerpt. Local output validation required the excerpt to
+be an exact substring of the persisted Retrieval Context and rejected the response:
+
+OUTPUT_CONTRACT_ERROR: excerpt is absent from retrieval context for
+source_008333aebcd976549e1a618a
+
+The failed one-shot task was:
+
+task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_repair_1
+
+The system stopped immediately. It did not retry that consumed identity, did not execute
+the remaining eight reasoning tasks, and did not call Quality Review. The production
+workflow remains recoverable because all nine Retrieval Contexts are durable and the
+eight untouched reasoning tasks have no runtime-repair reservation.
+
+Post-run evidence:
+
+* reconstruction authorizations: 9
+* workflow Retrieval Contexts: 10 (1 Producer + 9 Researcher)
+* workflow Retrieval reservations: 10
+* runtime model repair authorizations: 1
+* new runtime reasoning reservations: 1
+* ERROR PMP message_id: d9dad747-bc78-4d6b-9fc0-83650caf7a3e
+* Researcher state SHA-256:
+  e8984c340f6dd63071eebba29d998d8081428031eb25a05a98250670ea5de724
+* Researcher messages SHA-256:
+  68337d2d5cfc604331536870b7957d01d72573eff9f076508935d09a63d4dc2d
+
+Cycle 034 addresses this newly observed deterministic output-adapter failure. No further
+Real call was made in Cycle 033.

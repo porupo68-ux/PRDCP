@@ -1,0 +1,83 @@
+Cycle 039 Debug Report — Fresh Real E2E Completion
+Date: 2026-08-18 (Asia/Tokyo)
+Target workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+
+1. Completion outcome
+Fresh Real E2Eはprovider=openrouterの実運用workflowでProducer → Researcher → Deliberation → Conclusion → Playwright → Deliveryまで完走した。最終状態は全5層COMPLETED、active errorなし、active failed agentなし、Delivery 6成果物生成済みである。Human Evidence DecisionとHuman Conclusion Selectionはいずれもユーザーの明示判断を受けて永続化した。
+
+2. Scope and governing constraints
+本Cycleは新機能追加や非本質的リファクタリングを行わず、Cycle 038で実装済みのHuman Evidence GateからFresh Real E2Eを完遂することに限定した。保存済みRetrieval、Research Report、Quality Review、checkpoint、PMP、reservation、outboxを再利用し、Hard Integrity Failureのoverride、Safe Mode無効化、reservation回避、同一task identityの二重送信を行っていない。
+
+3. Human Evidence Gate
+Human DecisionはACCEPT_WITH_LIMITATIONS。decision_idはhuman_evidence_decision_07dc6a3942ad05617ae82ced、quality_review_idは2741cd30-a75e-456e-b7e9-828433ff812c、Evidence set SHA-256はba16904bf134fd05e77fabd03b2b35bb74280668be8ad70787e540976ddbe00eである。finding_qr_001〜finding_qr_005の5件をaccepted_unresolvedとして記録し、factual supportへ昇格させていない。Human Decision適用時のProvider call=0、Retrieval call=0。Hard Integrity Failureのoverride=0。
+
+4. Researcher final state
+ResearcherはCOMPLETED、source count=13、revision_count=0。保存済みResearch ReportとQuality Reviewを再利用し、qf006相当の政府系source分類は決定論的repairで処理した。State、Human Decision artifact、PMP、Deliberation handoff、outboxは同一DecisionとEvidence hashを参照している。
+
+5. Deliberation recovery and root failures
+Deliberationでは保存済み成果物を優先し、必要な未完了checkpointだけを進めた。実Providerで観測した主なFailure Modeは、DeepSeek/Gemini/KimiのStructured Output契約違反、Stakeholder source alias不整合、revision 0の保存済みFinal Integration payloadがrevision 1へ誤再生され得るcross-revision replay、Final Integrationの同一モデルRetry後の再契約失敗、Windows長パス下のauthorization atomic-write一時ファイル名超過であった。
+
+6. Deliberation local repairs
+保存済みpayloadの再利用はrevision identity一致を必須化し、誤再生で作られた未実行revision planだけを監査付きでrollbackした。完全な保存済みFinal Integrationは既知のID・Evidence・Sourceからだけ決定論的に再束縛し、不明値を推測しない。Stakeholderの旧source aliasもResearch Reportのexact Evidence→Source対応だけでread-repairした。Windows atomic-write一時名を短縮し、Provider送信前に失敗した孤立reservationは削除せずorphan監査ファイルとして保持した。Final IntegrationはKimi失敗、Gemini明示Retry失敗後、異なるGPT-5.5による一回限りcontract repairで成功した。
+
+7. Deliberation final state and gate
+DeliberationはCOMPLETED、internal revision=1、upstream revision=0、external revision=0。deterministic validation v2.0はpassed=true。検証実体はprimary analyses=3、analysis IDs=4、task IDs=4、integration IDs=2、claims=7、viewpoints=3、Evidence references=13、sources=13、counterarguments=4、required revisions=4、integration changes=8、unresolved=7、uncertainties=36。Quality Reviewはapproved_with_conditions、blocking finding=0、revision_scope=none、conclusion_readiness=ready_with_conditions。
+
+8. Conclusion failure
+Conclusion Position Generatorは3候補を正常保存したが、最初のDecision Evaluator responseはcomparison_matrixで3候補を列挙しながらcandidate_evaluationsを候補1の14基準分しか返さなかった。DecisionEvaluationResultのpost-validationが「candidate_evaluations and comparison_matrix must cover the same candidates」として拒否した。これは欠落28評価を既存データから捏造できないsemantic completeness failureであり、決定論的repair対象外と判断した。
+
+9. Why Mock and strict JSON Schema did not prevent it
+Mock fixtureは常に3候補×14基準の完全な42評価を返すため、実モデルの部分的な意味欠落を再現しない。strict JSON Schemaは各要素の型、候補ID enum、配列長上限を強制できるが、「入力候補集合の各要素について14基準をちょうど一度ずつ返す」という集合被覆・複合キー完全性を表現できない。既存Pydantic post-validatorがこの境界を正しくfail closedした。
+
+10. Conclusion recovery
+既存の監査付き--conclusion-provider-retryを一回だけ使用した。Position Generatorは再実行せず、同じ保存済み3候補に対してDecision Evaluatorだけをtask conclusion_decision_evaluation_upstream_0_revision_0_operator_retry_1で再送した。Retry responseは42評価を満たし、Decision IntegratorとConclusion Quality Reviewerへ正常に進んだ。追加の自動Retryは0。
+
+11. Human Conclusion Selection
+Conclusion deterministic validationはpassed=true（candidate=3、evaluation=42、blocking candidate=0、viable candidate=3、alternatives=2、finding=0）。Quality Reviewはapproved_with_conditions、playwright_readiness=ready_with_conditions、blocking finding=0。ユーザーはposition_candidate_003_phased_technical_contractual_hybrid（段階的技術・契約併用ハイブリッド）を明示選択した。selection_idはhuman_selection_219febf3220b47f4a3a734aa40badaa3、selection_authority=user、選択時刻は2026-08-18T11:34:14.55338Z。ConclusionはCOMPLETED。
+
+12. Playwright and Delivery
+PlaywrightはNarrative Architect → Scriptwriter → Evidence & Citation Editor → Visual Directorの順に各1回で完了した。deterministic validationはis_valid=true、errors=0、narrative sections=11、script sections=11、paragraphs=26、citation mappings=9、visual cues=26。Final GateはAPPROVED_WITH_LIMITATIONS、blocking finding=0、revision target=0、delivery_readiness=READY_WITH_LIMITATIONS。ConclusionのRaw履歴limitationsは台本本文の事実として扱わず、核心的制約だけを要約する既存条件を維持した。
+
+13. Final workflow states
+- Producer: COMPLETED、completed agents=5、revision=0、active errorなし。
+- Researcher: COMPLETED、completed agents=5、sources=13、revision=0、Human Decision=ACCEPT_WITH_LIMITATIONS、accepted gaps=5。
+- Deliberation: COMPLETED、completed agents=4、internal revision=1、upstream/external revision=0、active errorなし。
+- Conclusion: COMPLETED、completed agents=4、revision=0、Human Selection=候補3、active errorなし。
+- Playwright: COMPLETED、completed agents=4、revision=0、delivered=true、active errorなし。
+
+14. Real API call accounting
+Workflow全履歴のprovider_call_reservationsを監査し、Provider送信前失敗として明示退避したorphan reservation 1件を除外したOpenRouter Structured/Reasoning outbound attemptsは61件。層別はProducer 7、Researcher 23、Deliberation 22、Conclusion 5、Playwright 4。Retrieval outbound attemptsは10件（Producer 1、Researcher reconstruction 9）。合計外部attemptは71件。Cycle 039のHuman Decision適用後はStructured/Reasoning 31件（Deliberation 22、Conclusion 5、Playwright 4）、Retrieval 0件。reservation台帳には金額・usageが保存されていないため、実測API costは算出不能。404やcontract failureを含むattempt数であり、全件が課金成功したことを意味しない。
+
+15. Revision, retry, and repair accounting
+Workflow revisionはDeliberation internal 1件のみで、Producer/Researcher/Conclusion/Playwrightは0、全層upstream revisionは0。明示Provider retry authorizationは3件（Producer General Opinion、Deliberation Manager Final Integration、Conclusion Decision Evaluator）、すべてCONSUMED。正式なone-shot repair authorizationはProducer output repair 1、Deliberation cross-model contract repair 1、Researcher runtime model repair 9、runtime output/adapter/identity/provenance repair各1、Retrieval reconstruction 9で、すべてCONSUMED。自動再送による同一logical taskの二重呼び出しは0。
+
+16. Reservation, checkpoint, PMP, outbox integrity
+全Provider callはworkflow/task/agent/modelを持つreservationで追跡可能。送信前のWindows長パス失敗reservationはorphan-contract-repair-pre-provider-20260818T104143Z.jsonへ監査保存し、実call集計から除外した。完了済みcheckpointを再実行せず、各Recoveryは最初の未完了dependencyから再開した。Human Decision、Human Selection、Researcher→Deliberation、Deliberation→Conclusion、Conclusion→PlaywrightのPMPとoutboxは正本Stateに整合し、Delivery後のactive errorはない。
+
+17. Delivery artifacts
+- citation_manifest.json — 29,579 bytes — SHA-256 10822E382A6734148D801CC8DDD378D1C0C79AFC7D7BCD19CE47F2B10F5B7CC4
+- final_script_package.json — 128,767 bytes — SHA-256 4568E0CA742B42C27DF5B44CD6085A0CF6DBCF85BE8820485E399F7CC3CC57B9
+- production_notes.md — 15,422 bytes — SHA-256 F61E08F50B5E464DFC9BCC946E13935FE6AF34E630A27DFB47A32035A9FCD8BE
+- script.md — 11,561 bytes — SHA-256 67210FCFAF6AF808BA656E1108B9A60AC34786123B51D7AB29FBD8E5CE53A51F
+- source_list.md — 342 bytes — SHA-256 9A4C3448D25191E47BB80DF5EB88AF42DCF1811D5BD924056AE93EC2CD383ADA
+- visual_plan.md — 8,065 bytes — SHA-256 C6760B8A30376C40460C33B8B52FDD9D800DC34AFEDDAB3B72B148E7C1B51794
+Playwrightが固定したFinal Conclusion hashはsha256:79492fa1ab9a2cb1cd2e59312aff787c8e6c49eda2a3998d974d7b20236aca0d。
+
+18. Regression and fault verification
+Conclusion/Playwright対象回帰85 testsはOK。Structured Output/OpenRouter/RD対象60 testsはOK。scripts/verify.pyはcompileall、全546 tests（525.155s）、Mock Doctor、隔離Storageの5層Mock E2Eをすべて成功させた。DoctorはREADY、fail=0、31 RD STRICT、32 agent registry + delivery endpoint、31 model configuration、8/8 Mock Retrieval ready。Discord未導入/API key未設定のwarnはMock検証環境の非blocking warningである。
+
+19. Self-audit against the E2E plan
+根本原因まで特定した。欠落評価を埋める局所的捏造は行わず、semantic validatorを維持した。同系統Failure Modeとしてcandidate集合、comparison matrix、strict schema限界、Recovery dependency、reservation、Retry上限を既存回帰で確認した。State/PMP/Schema/Checkpoint/Reservation/Outbox/Deliveryへの影響を照合した。Recovery/Fault testsと全回帰を通した。Provider固有確認が必要な最小範囲だけReal APIを使用し、完了checkpointとRetrievalを再実行していない。安全機構は無効化していない。
+
+20. Remaining limitations
+- ACADEMIC必須Evidence 2件、INDUSTRY 1件、NEWS 1件、米国政府公式文書1件の計5 Evidence Gapはaccepted_unresolvedであり、Evidenceや確定事実ではない。
+- 分析は日本・EUおよび政府系資料に偏り、米国比較、独立学術検証、産業界実装率、報道による外部確認が不足する。
+- 技術的措置の標準化・長期実効性・非準拠クローラー抑止、対価還元の料率・分配方式・小規模クリエイターへの実効性は未検証。
+- 日本のプリンシプル・コードは案段階を含み、文化庁資料は法的拘束力を持たない解釈指針である。
+- Final GateはAPPROVED_WITH_LIMITATIONSであり、Delivery利用時にも上記を開示し、Raw debug historyを事実本文へ混入させない。
+
+21. Design meaning
+本完走は、失敗を無視して一本道を通したものではない。Providerの不完全出力をSchema/Post-validationで拒否し、reservationと一回限りauthorizationで再実行範囲を限定し、Human Gateを機械Gateから分離し、accepted gapをEvidenceへ変換せずDeliveryまで伝播した。これにより、Real Providerの不確実性があっても、再現可能なcheckpoint recoveryと監査可能なHuman authorityを保ったままE2Eを完遂できることを実証した。
+
+22. Final conclusion
+Fresh Real E2E completion criteriaを満たした。正常系、Human Evidence Decision、Deliberation internal revision、checkpoint recovery、explicit retry、Human Conclusion Selection、Playwright deterministic gate、Delivery生成が同一workflowで成立し、関連Regression/Fault testsが存在する。本Cycleをもって今回のデバッグを終了する。

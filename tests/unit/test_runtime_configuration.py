@@ -5,6 +5,7 @@ import io
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,10 +14,25 @@ from cli_app.diagnostics import run_doctor
 from config.settings import Settings, apply_runtime_overrides
 from providers.mock_provider import MockModelProvider
 from providers.openrouter_provider import OpenRouterModelProvider
+from providers.openrouter_capabilities import (
+    ModelCapabilityResult,
+    ModelCapabilityStatus,
+)
 from runtime import build_all_managers, build_provider
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    class _CompatibleCapabilityClient:
+        def inspect(self, model_id: str) -> ModelCapabilityResult:
+            return ModelCapabilityResult(
+                requested_model_id=model_id,
+                resolved_model_id=model_id,
+                status=ModelCapabilityStatus.COMPATIBLE,
+                reason="TEST_COMPATIBLE",
+                endpoint_count=1,
+                compatible_endpoint_count=1,
+            )
+
     def _settings(self, data_dir: Path, *, provider: str, safe: bool) -> Settings:
         with patch.dict(
             os.environ,
@@ -122,7 +138,10 @@ class RuntimeConfigurationTests(unittest.TestCase):
             settings = self._settings(
                 Path(temporary), provider="openrouter", safe=False
             )
-            checks = run_doctor(settings)
+            checks = run_doctor(
+                settings,
+                capability_client=self._CompatibleCapabilityClient(),
+            )
             effective = next(
                 check for check in checks if check.name == "Effective Runtime Configuration"
             )
@@ -131,6 +150,66 @@ class RuntimeConfigurationTests(unittest.TestCase):
             warning = next(check for check in checks if check.name == "Runtime safety")
             self.assertEqual(warning.level, "WARN")
             self.assertIn("additional provider calls", warning.action or "")
+            capability = next(
+                check for check in checks if check.name == "MODEL CAPABILITY PREFLIGHT"
+            )
+            self.assertEqual(capability.level, "PASS")
+            self.assertIn("Compatible: 31/31", capability.detail)
+
+    def test_environment_model_override_is_the_preflight_effective_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(
+                os.environ,
+                {"MODEL_PRODUCER_TOPIC_SCOUT": "override/strict-model"},
+            ):
+                settings = self._settings(
+                    Path(temporary), provider="openrouter", safe=True
+                )
+            self.assertEqual(
+                settings.models["producer.topic_scout"],
+                "override/strict-model",
+            )
+
+    def test_doctor_fails_closed_for_incompatible_and_unknown_models(self) -> None:
+        class SelectiveCapabilityClient:
+            def inspect(self, model_id: str) -> ModelCapabilityResult:
+                if model_id == "bad/model":
+                    status = ModelCapabilityStatus.INCOMPATIBLE
+                    reason = "REQUIRED_PARAMETERS_UNSUPPORTED"
+                elif model_id == "unknown/model":
+                    status = ModelCapabilityStatus.UNKNOWN
+                    reason = "METADATA_UNAVAILABLE:TimeoutError"
+                else:
+                    status = ModelCapabilityStatus.COMPATIBLE
+                    reason = "TEST_COMPATIBLE"
+                return ModelCapabilityResult(
+                    requested_model_id=model_id,
+                    resolved_model_id=model_id,
+                    status=status,
+                    reason=reason,
+                    endpoint_count=1,
+                    compatible_endpoint_count=(
+                        1 if status is ModelCapabilityStatus.COMPATIBLE else 0
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = self._settings(
+                Path(temporary), provider="openrouter", safe=True
+            )
+            models = dict(base.models)
+            models["producer.topic_scout"] = "bad/model"
+            models["producer.topic_selector"] = "unknown/model"
+            checks = run_doctor(
+                replace(base, models=models),
+                capability_client=SelectiveCapabilityClient(),
+            )
+        summary = next(
+            check for check in checks if check.name == "MODEL CAPABILITY PREFLIGHT"
+        )
+        self.assertEqual(summary.level, "FAIL")
+        self.assertIn("Unknown: 1", summary.detail)
+        self.assertIn("Failed: 1", summary.detail)
 
     def test_runtime_override_does_not_mutate_base_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

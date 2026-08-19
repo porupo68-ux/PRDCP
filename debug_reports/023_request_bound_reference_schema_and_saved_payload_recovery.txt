@@ -1,0 +1,200 @@
+PRDCP Debug Report
+
+ID: 023
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion / OpenRouter Structured Output / Recovery
+Agent: conclusion.decision_integrator
+Error Class: SCHEMA SEMANTICS / DYNAMIC REFERENCE / CHECKPOINT / RESERVATION
+
+1. 何が起きたか
+
+Cycle 021の明示`--conclusion-revise`は、保存済みPosition/Evaluationを再利用してDecision Integratorだけを
+OpenRouterへ送った。応答はPydantic shapeに適合したが、integrated_option.candidate_idsが次の4件だった。
+
+- pc_targeted_transition_monitoring_001（実在candidate ID）
+- integration_rationale（Schema/説明キー名）
+- integrated_elements_and_scope（Schema/説明キー名）
+- additional_risks_and_limitations（Schema/説明キー名）
+
+input-aware reference contractが後者3件をsuccess保存前に拒否し、workflowはFAILED / revision_count=2で停止した。
+Quality Reviewer call、automatic retry、upstream redispatchは0だった。Provider原文、validation error、request/error
+PMP、Integrator reservationは保存されている。
+
+2. 根本原因
+
+Decision Integrator RDは`single_candidate_selection`と`conditional_selection`を許可し、configurationの
+minimum_candidate_countも1だった。しかしPydantic IntegratedOption.candidate_idsだけがmin_length=2だった。
+Real応答は1候補のconditional selectionを構築したため、LLMはSchemaの最低件数を満たす埋め草として説明キー名を
+candidate_idsへ入れた。Prompt上の禁止とSchemaの件数制約が矛盾し、Schemaが優先された形である。
+
+また、従来のOpenRouter strict schemaはcandidate_idを単なるstringとして表現していた。requestごとに候補ID集合が
+変わるため静的Pydantic schemaだけではenumを記述できず、Cycle 021のlocal post-validationまで未知IDを拒否できなかった。
+
+3. なぜ既存テストで発見できなかったか
+
+Mock fixtureは常に2候補を統合するため、RDが許すsingle/conditional selectionとSchema min_length=2の矛盾を通らなかった。
+strict schema横断テストは全objectのrequired/additionalPropertiesを監査したが、入力依存IDがper-request enumへ
+specializeされることは検証していなかった。Fault testも未知IDの拒否と明示retryを確認し、課金済み原文から安全に
+再検証・昇格できるケースを持っていなかった。
+
+4. 計画書との照合後に採用した修正計画
+
+1) RDのsingle/conditional selectionとSchemaを一致させ、candidate_idsを1件以上にする。
+2) OpenRouterが既に持つinput_data schema specialization境界をConclusion全4出力へ適用する。
+3) Position/Evaluation/Integration/Quality Reviewの明示参照フィールドをrequest内canonical ID enumへ拘束する。
+4) local input-aware validatorはProvider非依存の第2防御として維持する。
+5) 課金済みinvalid_payloadは、未知の参照配列要素だけを除外して全契約を再検証できる場合に限り再利用する。
+6) 未知scalar、自由記述、件数不足、task/checkpoint/reservation不一致は自動修復しない。
+7) 復元Result PMPとstate auditをappend-onlyで追加し、元error/raw/reservationを保持する。
+8) production exact cloneでIntegrator 0 / QR 1を確認後、`--conclusion-recover`を一回だけReal実行する。
+
+5. 実装内容
+
+- `conclusion.schemas.strict_references`を追加し、per-request schema copyへstring enumを再帰的に束縛する。
+- Position Generationではtask/context、problem/stakeholder/claim/evidence/analysis参照を入力集合へ拘束する。
+- Decision Evaluationではtask/context、candidate/profile、claim/evidence/analysis参照を入力集合へ拘束する。
+- Decision Integrationではtask/evaluation、candidate、claim/evidence参照を入力集合へ拘束する。
+- Quality Reviewではreviewed result、candidate、affected claim参照を審査入力artifact集合へ拘束する。
+- empty optional allowlistはmaxItems=0、empty required allowlistはProvider呼出し前の設定エラーにする。
+- IntegratedOption.candidate_idsをmin_length=1へ修正し、Prompt/RDでsingle/conditionalとbounded integrationを区別した。
+- Conclusion stateへ`provider_payload_recoveries`監査列を追加した。旧stateはdefault空配列で読込互換。
+- Recoveryはrequest/error相関、保存reservation、model、task、Pydantic、checkpoint dependency、canonical refsを照合する。
+- 全errorがreference_integrityで、全違反が配列要素である場合だけdeep copyから該当要素を除去する。
+- 復元後にもう一度全検査を通し、Result PMPとauditを追加して次の未完了stageへ進む。
+- 復元済みfailed stageと次stageが異なる場合、前者の再送authorizationを要求せず後者から継続する。
+
+6. 設計上の意味
+
+OpenRouter Structured Outputを「静的な型」だけでなく「このrequestで許可された参照集合」まで拘束する。
+Provider側enumとlocal input-aware validationの二段構えにより、不正参照へAPI費用を払い続ける可能性を減らし、
+Provider実装に依存せずsuccess checkpointの意味整合性も保証する。
+
+保存原文Recoveryは値を推測・置換しない。実在しない配列要素を除去しても残りが正式Schemaと全domain contractを
+満たす場合だけ採用する。未知scalarはrecord全体の意味を変えずに直せないため停止する。この境界により、費用節約と
+artifactの意味保存を両立する。
+
+7. 同系統Failure Mode監査
+
+- Position新規candidate IDは生成対象なのでenum拘束しないが、context参照だけを束縛する。
+- Evaluationの全candidate_id、複数候補ID、profile ID、supporting IDを束縛する。
+- Integrationのviable/excluded/comparison/recommended/integrated candidateを同一集合へ束縛する。
+- Integrationのrelated_claim_ids/evidence_idsをDecision Context集合へ束縛する。
+- Quality Reviewのreviewed IDs、affected candidate/claimを審査入力へ束縛する。
+- task_id、decision_context_id、evaluation/integration result IDもrequest値へ束縛する。
+- 自由記述はenum走査・Recovery除去の対象外。
+- scalar unknownは非修復、必須配列が空になる修復も非修復。
+- Provider reservationがない原文、model不一致、別task rawは非修復。
+- Producer/Researcher/Deliberation/Playwrightのoutput schemaは変更しない。
+- strict schemaの全object required/additionalProperties監査は全22 rootで維持する。
+
+8. Regression Test
+
+- Conclusion全4 output schemaのrequest-bound enumを検査。
+- IntegratedOption candidate_ids minItems=1を検査。
+- unknown candidate/claim配列をsuccess保存前に拒否する。
+- 保存invalid_payloadをIntegrator call 0で復元し、QRだけを実行する。
+- 復元後candidate_idsが実在ID 1件で、未知参照0になる。
+- unknown scalar candidate_idは自動修復せず、明示retry authorization要求で停止する。
+- Reservationは元Integrator 1件のまま増えない。
+- Targeted tests: 6 PASS。
+- Related Conclusion/OpenRouter/RD/Safe Mode/Integration: 146 PASS。
+- Full Unit: 371 PASS。
+- Full discovery: 391 PASS。
+- 31 RD STRICT / common specification drift: PASS。
+- 5-layer Mock E2E / 6 delivery artifacts: PASS。
+
+9. Mock / Fault Injection / Exact Saved-State Recovery
+
+Fault 1: candidate_ids配列とtradeoff claim配列へ未知IDを注入。初回IntegratorでFAILED、QR 0。
+Recoveryは両未知要素を除去し、Integrator再送0、QR 1でWAITING_HUMAN_SELECTIONへ到達した。
+
+Fault 2: recommended_options.candidate_idというscalarへ未知IDを注入。Recoveryは意味を推測せず停止し、
+Integrator再送0、QR 0、明示provider retry authorization requiredを返した。
+
+Exact production clone 1: contract-repair authorizationを省略したcloneはProvider call前に停止した。
+これは過去binding再検証の安全機構が正常に働いた結果である。
+
+Exact production clone 2: state/messages、revision_2 Integrator reservation、必要な既存Position repair
+authorization/reservationを別領域へコピーした。provider_id=openrouterのMock Recovery結果は次のとおり。
+
+- status: WAITING_HUMAN_SELECTION
+- revision_count: 2
+- Position / Evaluation / Integrator calls: 0 / 0 / 0
+- Quality Reviewer calls: 1
+- integrated candidate IDs: [pc_targeted_transition_monitoring_001]
+- removed unknown refs: 3（Real観測値と完全一致）
+- unknown reference count: 0
+- deterministic validation: passed=true
+- review: approved
+- revision_2 reservations: 既存Integrator + 新規Quality Reviewerだけ
+
+10. Provider Call数 / Cost
+
+- Cycle 023を開始させたproduction Real attempt: Integrator 1、QR 0
+- Cycle 023 implementation/Regression/Fault: Real 0
+- Exact saved-state clone: Mock QR 1、Integrator 0
+- automatic retry / duplicate call / upstream call: 0
+- 実測cost: reservation/PMPにtoken usageがないためunknown
+- 次のproduction Real action: `--conclusion-recover`一回、期待QR 1だけ
+
+11. Storage保護
+
+productionで追加されたのはCycle 021の正規CLIによるrevision_2 state/history、Integrator request/error PMP、
+Integrator reservationだけである。既存raw/error/reservationは削除・変更しない。Cycle 023実装・Mock/Faultは
+productionをread-onlyで参照した。Deliberation state/messages、Conclusion outboxは従来hashを維持し、
+Playwright outboxは未作成である。
+
+12. Result
+
+PRE-REAL PASS。Root Cause / Sibling Audit / Implementation / Static / Unit / Integration / Mock / Fault /
+Exact Saved-State Recoveryを完了した。検証済み差分だけをproductionへ反映し、保存済みIntegrator原文を
+call 0でcheckpointへ昇格した後、Quality Reviewerだけを明示的一回Real実行する。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所的な3文字列削除だけで終わっていない
+[YES] 全Conclusion outputの動的参照Failure Modeを監査した
+[YES] 他Layerへの非影響を確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを生成した
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full Real E2Eは再実行せず、保存済みIntegrator rawの次のQuality Reviewerからだけ再開する。
+
+13. Production Real Recovery Update
+
+検証済み差分をproductionへ反映し、次のCLIを一回だけ実行した。
+
+`py main.py --conclusion-recover 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`
+
+保存済みIntegrator invalid_payloadは、未知の配列要素3件だけを除去して全契約を再検証し、Provider call 0で
+Decision Integration checkpointへ昇格した。その後、Quality Reviewerだけを新規logical task
+`conclusion_quality_review_upstream_0_revision_2`として一回呼び出した。
+
+- Position / Evaluation / Integration Real calls: 0 / 0 / 0
+- Quality Reviewer Real calls: 1
+- automatic retry / duplicate call / upstream call: 0
+- Structured Output schema error: 0
+- deterministic validation: passed=true
+- revision_count: 2
+- Result: BLOCKED（Safe Modeによる正常停止）
+
+Reviewerは上流Traceability問題の解消を確認した。一方、Integratorがviableとした
+`pc_enable_adapt_incentives_003`がConclusion Packageのalternativesへ保持されていないというManager所有の
+completeness findingを一件返した。Researcher returnは0、他Agent targetは0である。これはCycle 023修正の失敗ではなく、
+保存済み成果物の意味をReviewerが正常に検査した結果であり、Cycle 024の独立Failureとして扱う。
+
+Cycle 023 Final Result: PASS / ONE LOCALIZED REAL RECOVERY COMPLETE / NEW MANAGER ARTIFACT FAILURE CAPTURED

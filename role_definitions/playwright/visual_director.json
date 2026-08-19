@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "visual_director_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.1",
     "status": "stable",
     "agent_identity": {
       "agent_id": "playwright.visual_director",
@@ -1928,6 +1928,12 @@
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,
+      "request_bound_reference_contract": {
+        "section_paragraph_pairs": "exact request values",
+        "evidence_and_source_ids": "paragraph-local allowlists",
+        "asset_requirement_ids": "must resolve inside the same VisualPlan",
+        "factual_visual_requires_citation_display": true
+      },
       "allowed_tools": [],
       "prohibited_tools": [
         "web_search",

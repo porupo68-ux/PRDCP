@@ -1,0 +1,126 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 009
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation
+Agent: Deliberation Manager
+Error Class: DANGLING INTEGRATION CHANGE REFERENCE / STAGE-SCOPED LINEAGE
+
+1. 何が起きたか
+
+Cycle 008修正後の明示的一回Real Recoveryで、Initial Integration contract repairを
+OpenRouterへ1回送信した。約21分後に応答したが、traceability_indexの
+integration_change_idsへ`ichg_r2_*` 5件が入り、`change_*`だけを許可するSchemaで
+local validation failureとなった。Primary、Counterargument、Final、Quality Reviewの
+追加callは0、自動retryは0だった。
+
+Cycle 008で追加したManager raw checkpointにより、今回の応答全体、validation field path、
+logical task IDはstateへ保存された。
+
+2. なぜ起きたか
+
+InitialIntegratedAnalysisにはintegration_changes配列が存在しない。したがってInitial
+stageでintegration_change_idsを参照しても、参照先artifactは定義できない。実rawの
+`ichg_r2_*`はtraceabilityにだけ存在し、Initial/Finalの保存artifactにもraw payload内にも
+対応するchange_idがなかった。
+
+これは単なるprefix相違ではなく、stage上存在しないartifactへのdangling referenceだった。
+`ichg_`を許可prefixへ追加するとtraceabilityの意味を破壊する。
+
+3. 同系統Failure Modeと影響範囲
+
+- Initial Integrationはintegration_change_idsを常に空にすべき。
+- Final Integrationは同じpayloadのintegration_changes.change_idだけを参照すべき。
+- FinalのCounterargumentDisposition内change参照も同じ実在集合で検証すべき。
+- IntegrationChange.change_id自身も`change_*`を生成Schemaで強制すべき。
+- 保存Manager rawが有効化できる場合、同じlogical taskをProviderへ再送してはならない。
+
+4. v2との照合と修正計画
+
+- Initialモデルへstage-scoped禁止規則を追加する。
+- Finalモデルへchange_id uniquenessと全参照の実在集合cross-checkを追加する。
+- IntegrationChange.change_idをJSON Schema pattern付き`change_*`にする。
+- 保存済みInitial rawだけは、定義不能なchange参照を監査記録付きで除去する。
+- Provider呼び出し前raw再検証経路を使い、Initial call 0でcheckpoint化する。
+
+5. どう直したか
+
+- InitialIntegratedAnalysisが非空integration_change_idsを拒否するvalidatorを追加。
+- IntegrationChange.change_idへ`^change_` patternを追加。
+- FinalIntegratedAnalysisが重複change_id、traceabilityの未知change、Dispositionの未知changeを拒否。
+- Manager saved raw recoveryでInitialのdangling change IDsを除去し、除去ID全件を
+  manager_payload_recoveriesへ保存。
+- Manager Prompt、Role Definition、READMEへInitial/Finalのstage別規則を追記。
+
+6. Regression / Mock / Fault Injection / Recovery
+
+Compile: PASS
+Targeted Schema/Recovery/Strict Structured Output: 14 PASS
+Unit full: PASS
+Integration: 9 PASS
+
+Fault A: Initialへprefix不正`ichg_*`を入れるとFAIL。
+Fault B: Initialへprefix正規`change_*`を入れても、stage上定義不能なのでFAIL。
+Fault C: Finalのtraceabilityへ未定義`change_*`を入れるとFAIL。
+Fault D: FinalのDispositionへ未定義changeを入れるとFAIL。
+Fault E: 保存済み実OpenRouter rawからdangling 5件を除去すると、残りの全Schema検証PASS。
+
+本番Failure state read-only copy Mock Recovery:
+- Status: COMPLETED
+- Initial Provider calls: 0
+- Reused integration_id: integration_initial_wf15f3f5c5_rerun1
+- Removed dangling IDs: 5（全件監査履歴へ保存）
+- Counterargument calls: 1
+- Final Integration calls: 1
+- Quality Review calls: 1, approved_with_conditions
+- Total mock calls/reservations: 3
+- all revision 1 checkpoints: present
+
+7. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: 保存済みManager rawと旧markerを保持し、回復監査レコードを追記する。
+PMP: 変更なし。InitialはManager内部artifact、Counterargument以降は既存PMP経路。
+Schema: InitialとFinalでchange lineageの意味を明示分離。
+Checkpoint: Initial rawをProvider call 0でrevision 1 checkpointへ昇格。
+Reservation: 使用済みInitial contract repair reservationを再利用・再生成しない。
+Outbox: Mock copyでConclusion outbox生成。本番は配備前未生成。
+
+8. Provider CallとCost
+
+Cycle 009 failure capture Real calls: Initial Integration 1
+Primary/Counterargument/Final/Quality Review calls: 0
+Automatic retry: 0
+Response latency: 約21分
+API Cost: CLIから取得不能のためunknown
+
+次の局所Real RecoveryはInitial call 0、後続最大3 logical calls。Full E2E再実行はしない。
+
+9. 設計上の意味と再発防止
+
+Identifierのprefixが正しくても、参照先artifactが同じstageに実在しなければtraceabilityは
+無効である。Schemaは文字列型だけでなく、artifact lifecycleと集合包含まで検証する。
+保存raw互換処理は、定義不能な参照の除去を監査可能に記録し、内容本体を再生成しない。
+
+10. Storage Safety
+
+実装、Unit、Fault、Mock Recoveryでは本番storageを変更していない。本番変更は承認済み
+Real CLIが通常保存したstateとManager raw checkpoint、reservationだけである。
+
+11. Result
+
+IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS
+READY FOR LOCALIZED REAL DELIBERATION RECOVERY WITH INITIAL PROVIDER CALL 0
+
+Plan Compliance Review
+
+[YES] 保存rawと実在change集合を比較
+[YES] prefix緩和ではなくstage-scoped lineageを修正
+[YES] Initial/Final/Dispositionの同系統Failure Modeを監査
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outbox影響を確認
+[YES] Regression Testを追加
+[YES] 実rawのread-only copy Recoveryを確認
+[YES] Debug Reportを生成
+[YES] 設計上の意味と再発防止を説明
+[YES] Real callはInitial 1、自動retry 0
+[YES] Full E2Eを最初から再実行していない

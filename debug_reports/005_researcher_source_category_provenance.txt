@@ -1,0 +1,112 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 005
+Date: 2026-08-16 to 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher
+Agents: Researcher Manager / all specialist Researchers / Quality Reviewer
+Error Class: SCHEMA CONTRACT / PROVIDER PROVENANCE / REVISION CONTROL
+
+1. 何が起きたか
+
+Cycle 004の明示的一回OpenRouter retryは通信とStructured Output検証に成功したが、Quality Reviewerはrevision_requiredを返した。統合Reportには初期Mock実行のplaceholder Resultと後続OpenRouter Resultが混在し、OpenRouter specialistも担当外source_typeを返していた。そのため、NEWS / POLITICIAN / PUBLIC_OPINIONの実カバレッジが不足していた。
+
+2. なぜ起きたか
+
+全specialistが同一のResearchResult schemaを使い、送信schemaがagent_idとsource_typeの対応を固定していなかった。local validationにも同じ相関制約がなく、各Agentが担当外カテゴリを返しても保存できた。また、provider切替後に保存済みResultを再利用する設計に、active provider reservation namespaceによる採用条件がなかった。MockとOpenRouterのreservationは分離されていても、Manager統合がprovenanceを見ていなかった。
+
+3. 影響範囲と同系統Failure Mode監査
+
+実運用stateを変更せず再集計した結果:
+- Mock namespaceのsaved ResearchResult: 7件（新Reportへの統合対象外）
+- OpenRouter Result内の担当外source: 23件
+- blank/null identityまたはplaceholder: 3件
+- 契約に適合して再利用可能なOpenRouter source: 9件
+- 再調査が必要: POLITICIAN / NEWS / PUBLIC_OPINION
+- 再利用可能: ACADEMIC 1 / GOVERNMENT 5 / INDUSTRY 2 / EXPERT 1
+
+NEWS/POLITICIANだけの局所問題ではないため、全7 specialist、Structured Output送信、Prompt Builder、local validation、Manager integration、checkpoint recovery、Safe Mode、reservation、ERROR PMP serializationを監査した。
+
+4. v2と照合した改修計画
+
+- 22 root schema体系は維持し、ResearchResultだけをResearchTask入力に基づき送信直前に担当カテゴリへspecializeする。
+- local validationでもagent_idとsource_typeを一致させ、identity metadataのblank/null/unknown/example placeholderを拒否する。
+- Managerはactive provider reservation namespaceに属するResultのみを新Reportへ採用する。旧JSONは書き換えず、読込時に担当外・placeholderを除外する。
+- Safe Mode ONのまま、operatorが一度だけ明示実行するrevision CLIを追加する。対象taskをstateへ先に保存し、完了済みtaskは決定論的IDで再利用する。
+- local validation errorをPMP/stateへ必ずJSON保存できるよう、共通validatorのerror contextを正規化する。
+
+5. 実装
+
+- strict_output_schemaへinput_data対応specializer hookを追加し、OpenRouter request bodyとRD Prompt Builderの両方へ同じschemaを適用。
+- ResearchResultの$defs/ResearchSourceをtaskの一カテゴリだけに狭め、agent_idをconst化。
+- ResearchResult local validatorで担当source_typeを強制。
+- ResearchSource identity metadataのplaceholderを拒否。
+- Managerにprovider provenance filter、legacy read compatibility、担当外/placeholder除外とlimitations集計を追加。
+- evidence_id付きcross_source_observationsを動的生成。
+- `--researcher-revise WORKFLOW_ID`を追加。Safe Mode必須、一revision cycleのみ、決定論的task IDとcheckpoint recoveryを使用。
+- PayloadValidatorのPydantic errorをJSON-safe化。
+- 全7 Researcher promptへ担当カテゴリ限定とfabrication禁止を追加。
+
+6. Regression / Mock / Recovery / Fault Injection
+
+Compile: PASS
+Unit: 275 PASS（隔離data dir）
+Integration: 9 PASS
+Mock CLI E2E Producer -> Delivery: PASS
+Researcher/OpenRouter/schema/explicit revision targeted: PASS
+
+Fault 1: Academic ResearcherがGOVERNMENT sourceを返すpayloadを注入。local validationで拒否しagent_resultsへ保存しないことを確認。
+Fault 2: semantic validator内部ValueErrorを注入。validation_errorsとERROR PMPをJSON直列化できることを確認。
+Fault 3: specialist完了後のprocess interruptionを注入。再作成Managerが保存済みResultを再利用しspecialist call 0、Quality Reviewだけで完了することを確認。
+Fault 4: active providerと異なるnamespace、担当外source、placeholder sourceを統合から除外し、旧JSON自体を変更しないことを確認。
+
+7. 明示的一回Real Revision結果
+
+Command: `py main.py --researcher-revise 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`
+Result: PASS
+Started tasks: POLITICIAN 1 / NEWS 1 / PUBLIC_OPINION 1 / Researcher Quality Reviewer 1
+Automatic retries: 0
+Reused categories: ACADEMIC / GOVERNMENT / INDUSTRY / EXPERT
+Integrated report: 22 sources
+Coverage: ACADEMIC 1 / GOVERNMENT 5 / INDUSTRY 2 / EXPERT 1 / POLITICIAN 5 / NEWS 3 / PUBLIC_OPINION 5
+Quality Review: approved（MINOR findings 3件、revision targets 0）
+Researcher status: COMPLETED_REVISION
+External revision status: COMPLETED_REVISION
+Completed agents: 7/7
+Outbox: Deliberation宛てrevision resultを保存済み
+API Cost: CLIから実測値を取得できないためunknown
+
+8. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: revision_count=1、external_revision_count=1。ResearcherはCOMPLETED_REVISION。
+PMP: message historyは52件。revision TASK/RESULT/Review/Replyを通常経路で記録。
+Schema: 22 root schemaを維持。ResearchResultだけtask categoryへspecializeし、全object strict条件を送信前検証。
+Checkpoint: revision taskをdispatch前に保存。完了済みtaskはtask_idで再利用可能。
+Reservation: 新規4 logical taskごとにOpenRouter reservationが1件。削除・上書きなし、自動retryなし。
+Outbox: Deliberation宛てoutboxを2026-08-17 00:02:46 JSTに保存。
+
+9. Storage Safety
+
+既存workflow JSON、messages、results、checkpoint、reservationを手動編集・削除・初期化していない。コード配備時にstorage/dataをコピー対象にしていない。実データ更新はユーザー承認済みの正規CLI経路だけで行った。Deliberationの保存済みcheckpointはこのCycle中変更していない。
+
+10. 設計上の意味と再発防止
+
+Agent責務をpromptだけでなく、task -> sent schema -> local schema -> Manager integrationの四境界で同じ不変条件にした。Provider切替時の再利用は「古い結果を消す」のではなくreservation provenanceで採用Resultを決めるため、監査証跡とRecovery可能性を両立する。Safe Modeはrevisionを無効化せず、自動dispatchをoperator明示一回へ変換する責務として維持した。
+
+11. Result
+
+PASS - IMPLEMENTATION / MOCK / FAULT / RECOVERY / ONE EXPLICIT REAL REVISION COMPLETE
+
+Plan Compliance Review
+
+[YES] 根本原因を共通schemaとprovenance規則まで特定
+[YES] 局所症状だけでなく全7 Researcherと共通層を監査
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outboxを確認
+[YES] Regression Testを追加し全テスト通過
+[YES] Recovery/Fault条件を確認
+[YES] Debug Reportを生成
+[YES] 設計上の意味を説明
+[YES] Real API前にStatic/Unit/Targeted/Integration/Mock/Recoveryを完了
+[YES] 完了済み4カテゴリを再利用
+[YES] Real callは明示対象3 specialist + 1 review、自動retry 0
+[YES] 既存storageを手動変更せず正規CLI更新だけを許可

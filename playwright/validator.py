@@ -173,7 +173,16 @@ class PlaywrightValidator:
                 add("UNSUPPORTED_CLAIM_REMAINS", "Unsupported claim remains in the citation artifact", target="playwright.scriptwriter", details={"paragraph_id": mapping.paragraph_id})
         for paragraph in validated_paragraphs.values():
             if paragraph.citation_required and paragraph.paragraph_id not in mappings_by_paragraph:
-                add("CITATION_MAPPING_MISSING", f"Citation-required paragraph has no mapping: {paragraph.paragraph_id}", target="playwright.evidence_citation_editor")
+                add(
+                    "CITATION_MAPPING_MISSING",
+                    f"Citation-required paragraph has no mapping: {paragraph.paragraph_id}",
+                    target="playwright.evidence_citation_editor",
+                    details={
+                        "paragraph_id": paragraph.paragraph_id,
+                        "claim_ids": paragraph.claim_ids,
+                        "evidence_ids": paragraph.evidence_ids,
+                    },
+                )
             if set(paragraph.claim_ids) - claim_ids:
                 add("SCRIPT_UNKNOWN_CLAIM", "Script paragraph references an unknown claim", target="playwright.scriptwriter", details={"paragraph_id": paragraph.paragraph_id})
             if set(paragraph.evidence_ids) - evidence_ids:
@@ -181,7 +190,16 @@ class PlaywrightValidator:
         if citation_manifest.unsupported_claims:
             add("UNSUPPORTED_CLAIM_LIST_NOT_EMPTY", "Citation Manifest contains unsupported claims", target="playwright.scriptwriter")
         if citation_manifest.missing_locators:
-            add("CITATION_LOCATOR_MISSING", "Citation Manifest contains missing locators", target="playwright.evidence_citation_editor")
+            add(
+                "CITATION_LOCATOR_MISSING",
+                "Citation Manifest contains missing locators",
+                target="playwright.evidence_citation_editor",
+                details={
+                    "paragraph_ids": [
+                        item.paragraph_id for item in citation_manifest.missing_locators
+                    ]
+                },
+            )
         missing_limitations = set(production_context.limitations_to_disclose) - set(validated_script.limitations)
         if missing_limitations:
             add(
@@ -200,11 +218,33 @@ class PlaywrightValidator:
             if cue.section_id not in {item.section_id for item in validated_script.sections}:
                 add("VISUAL_UNKNOWN_SECTION", f"Visual Cue references unknown section {cue.section_id}", target="playwright.visual_director")
             if set(cue.evidence_ids) - set(paragraph.evidence_ids):
-                add("VISUAL_FACT_ADDITION", "Visual Cue introduces evidence not present in its paragraph", target="playwright.visual_director")
+                add(
+                    "VISUAL_FACT_ADDITION",
+                    "Visual Cue introduces evidence not present in its paragraph",
+                    target="playwright.visual_director",
+                    details={
+                        "visual_cue_id": cue.visual_cue_id,
+                        "paragraph_id": cue.paragraph_id,
+                        "unknown_evidence_ids": sorted(
+                            set(cue.evidence_ids) - set(paragraph.evidence_ids)
+                        ),
+                    },
+                )
             if set(cue.source_ids) - source_ids:
                 add("VISUAL_UNKNOWN_SOURCE", "Visual Cue references an unknown source", target="playwright.visual_director")
             if set(cue.asset_requirement_ids) - asset_ids:
-                add("VISUAL_UNKNOWN_ASSET", "Visual Cue references an unknown asset requirement", target="playwright.visual_director")
+                add(
+                    "VISUAL_UNKNOWN_ASSET",
+                    "Visual Cue references an unknown asset requirement",
+                    target="playwright.visual_director",
+                    details={
+                        "visual_cue_id": cue.visual_cue_id,
+                        "paragraph_id": cue.paragraph_id,
+                        "unknown_asset_requirement_ids": sorted(
+                            set(cue.asset_requirement_ids) - asset_ids
+                        ),
+                    },
+                )
             if cue.factual_visual and not cue.citation_display_required:
                 add("FACTUAL_VISUAL_WITHOUT_CITATION", "Factual visual must display a citation", target="playwright.visual_director")
         for chart in visual_plan.chart_requests:
@@ -232,4 +272,3 @@ class PlaywrightValidator:
                 "errors": error_count,
             },
         )
-

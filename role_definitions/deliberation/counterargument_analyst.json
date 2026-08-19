@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "counterargument_analyst_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.2",
     "status": "stable",
     "agent_identity": {
       "agent_id": "deliberation.counterargument_analyst",
@@ -176,6 +176,16 @@
         "principle_id": "CA-P18",
         "name": "no_final_decision",
         "rule": "最終結論、政策選択、道徳的判決または動画上の主張を決定しない。"
+      }
+      ,{
+        "principle_id": "CA-P19",
+        "name": "compact_context_equivalence",
+        "rule": "Treat each merged research_report.evidence_items record as the canonical evidence, source, URL, excerpt, quality, and limitation view; agreements, conflicts, and unresolved items are read from initial_integration without duplicate top-level copies."
+      }
+      ,{
+        "principle_id": "CA-P20",
+        "name": "schema_visible_revision_routing",
+        "rule": "Use counterargument_analysis_* and the supplied counter_task_* identity. revision_target_agent_ids contains only internal Deliberation agents; Researcher need uses research_gap_required. required_revision=false requires an empty target list."
       }
     ],
     "responsibilities": {

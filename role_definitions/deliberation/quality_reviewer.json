@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "deliberation_quality_reviewer_rd",
-    "role_definition_version": "1.0.1",
+    "role_definition_version": "1.0.3",
     "status": "stable",
     "agent_identity": {
       "agent_id": "deliberation.quality_reviewer",
@@ -114,6 +114,11 @@
         "principle_id": "DQR-P11",
         "name": "repairability_first",
         "rule": "Repairability First: Findingのseverityだけでblockedを選ばず、既存Workflow Revisionで修復可能なら必ずrevision_requiredとして修正先へRoutingする。blocking findingとWorkflow status=blockedは別概念である。"
+      }
+      ,{
+        "principle_id": "DQR-P12",
+        "name": "runtime_view_equivalence",
+        "rule": "A trace-ID-merged Research Context and a current-route PMP trace are audit views of unchanged stored artifacts, not missing evidence or missing history. Validate their declared IDs and checkpoints without demanding duplicate tables or unrelated historical messages."
       }
     ],
     "responsibilities": {
@@ -2049,6 +2054,7 @@
       ]
     },
     "_design_notes": {
+      "_contract_decision_readiness": "Conclusion readiness uses the RD-defined lowercase values ready, ready_with_conditions, not_ready, and undetermined. Uppercase values are accepted only by runtime read adapters for legacy checkpoints.",
       "_comment_01": "このAgentはDeliberation層の最終品質ゲートであり、一次分析Agentではない。",
       "_comment_02": "Quality ReviewerはCounterargument Analystの後に実行する。Counterargument Analystを一次並列分析Agentへ移動しない。",
       "_comment_03": "Argument Analyst、Causal & Structural Analyst、Stakeholder & Response Analystは並列に実行する。",

@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "conclusion_quality_reviewer_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.2",
     "status": "stable",
     "agent_identity": {
       "agent_id": "conclusion.quality_reviewer",
@@ -621,7 +621,7 @@
           ]
         },
         {
-          "status": "rejected",
+          "status": "revision_required",
           "definition": "重大な品質問題があり、修正完了前にPlaywrightへ渡してはならない。",
           "required_when": [
             "criticalまたはmajorのIssueが存在する",
@@ -646,7 +646,7 @@
           ]
         }
       ],
-      "approval_rule": "一つでもcritical Issueが存在する場合はapprovedまたはapproved_with_conditionsにしてはならない。major Issueは原則rejectedとし、Playwrightへ渡しても結論の意味や信頼性が変化しない場合に限りConclusion Managerが例外処理を検討できる。",
+      "approval_rule": "一つでもcritical Issueが存在する場合はapprovedまたはapproved_with_conditionsにしてはならない。修正可能なmajor Issueはrevision_requiredとし、修正経路を指定する。審査または修正経路を確定できない場合だけblockedとする。",
       "no_self_approval_rule": "Quality Reviewer自身が修正案を成果物へ適用し、その修正済み成果物を同一処理内で承認してはならない。修正は対象Agentが実施し、再審査を行う。"
     },
     "issue_severity_policy": {
@@ -1149,7 +1149,7 @@
           "revision_cycle": "integer"
         },
         "review_summary": {
-          "overall_status": "approved|approved_with_conditions|rejected|blocked",
+          "overall_status": "approved|approved_with_conditions|revision_required|blocked",
           "reviewed_quality_dimension_count": "integer",
           "pass_count": "integer",
           "conditional_pass_count": "integer",
@@ -1163,9 +1163,9 @@
           "summary_reason": "string"
         },
         "approval_decision": {
-          "status": "approved|approved_with_conditions|rejected|blocked",
+          "status": "approved|approved_with_conditions|revision_required|blocked",
           "approval_reason": "string|null",
-          "rejection_reason": "string|null",
+          "revision_reason": "string|null",
           "blocking_reason": "string|null",
           "conditions": "array",
           "playwright_handoff_allowed": "boolean",
@@ -1451,7 +1451,7 @@
       "approval_statuses": [
         "approved",
         "approved_with_conditions",
-        "rejected",
+        "revision_required",
         "blocked"
       ],
       "numeric_quality_score_enabled": false,
@@ -1467,6 +1467,7 @@
       "maximum_review_cycles": 3
     },
     "_design_notes": {
+      "_contract_decision_readiness": "Playwright readiness uses the RD-defined lowercase values ready, ready_with_conditions, not_ready, and not_applicable. Uppercase values are accepted only by runtime read adapters for legacy checkpoints.",
       "stable_decisions": [
         "Conclusion Quality ReviewerはConclusion層最後の品質Gatekeeperである",
         "結論の思想的方向や好ましさではなく品質を審査する",

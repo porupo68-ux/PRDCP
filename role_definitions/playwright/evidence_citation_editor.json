@@ -2,7 +2,7 @@
   "role_definition": {
     "role_definition_id": "prdc-playwright-evidence-citation-editor-rd",
     "role_definition_name": "Evidence & Citation Editor Role Definition",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.1",
     "status": "stable",
     "language": "ja",
     "layer_id": "playwright",
@@ -1997,6 +1997,13 @@
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,
+      "request_bound_reference_contract": {
+        "paragraph_ids": "exact request values",
+        "claim_evidence_source_ids": "paragraph-local allowlists",
+        "citation_required_mapping_coverage": "required",
+        "missing_locator_output_allowed": false,
+        "canonical_disclosure_metadata_owner": "playwright.manager"
+      },
       "allowed_tools": [],
       "prohibited_tools": [
         "web_search",

@@ -1,0 +1,171 @@
+Cycle 040 — Research Report Deterministic Integrity Repair
+Date: 2026-08-18 JST
+Workflow: 4b837e0e-9e1c-4150-97e1-ac31ef87024e
+
+1. What happened
+
+The saved Researcher Quality Review returned three findings. Two were machine-
+repairable integrity findings and one was a real evidence coverage gap:
+
+- fqr_limitations_duplication (HARD): Report-level research_limitations repeated
+  source-level disclosures verbatim.
+- fqr_source_classification_expert_news (HARD):
+  source_134a53bf88dcde074747e0a5 was EXPERT even though both expert identity fields
+  were null and its saved xtech.nikkei.com context explicitly described reporting.
+- fqrq_ai_emp_003_news_missing (EVIDENCE_SUFFICIENCY): rq_ai_emp_003 requires NEWS,
+  but no saved NEWS source is linked to that Research Question.
+
+The workflow was BLOCKED although the first two findings did not require new
+Retrieval or another LLM review.
+
+2. Why it happened
+
+The Report aggregation collected specialist limitations and source limitations into
+the top-level list. Its previous order-preserving dedupe removed repeats inside that
+list, but it did not distinguish a global Report limitation from the same disclosure
+already owned by a source. The production Report therefore had 54 unique top-level
+strings, 40 of which exactly matched the 40 source-level strings.
+
+The xtech source was retrieved successfully and assigned to the Expert Researcher.
+ResearchResult correctly enforced the assigned task category, while Cycle 037
+provenance hydration correctly refused to invent expert_name or affiliation. Manager
+aggregation then enforced the assigned EXPERT type but had no narrow canonical rule
+for a recognized media URL plus a saved reporting context. The result was a
+mechanically inconsistent EXPERT record with no expert identity.
+
+The target source is linked only to rq_ai_emp_002. It is not linked to
+rq_ai_emp_003. Reclassifying it as NEWS therefore must not satisfy the third finding.
+
+3. How it was fixed
+
+- New Report aggregation removes only exact Unicode-equal source-level copies and
+  exact repeated Report strings. It preserves first order, source-level disclosures,
+  and every non-identical limitation. It performs no semantic merge or rewrite.
+- Human Evidence recovery can persist two typed zero-call repair artifacts:
+  report_limitation_exact_deduplication and
+  recognized_media_source_reclassification.
+- The media rule is deliberately narrow: EXPERT, both expert identity fields absent,
+  recognized xtech.nikkei.com host, saved reporting/news context, and a valid NEWS
+  metadata contract. A domain alone is insufficient.
+- EXPERT compatibility remains intact for anonymous or institution-based expert
+  material that is not proven to be recognized reporting.
+- Classification repair changes only source_type and category-specific metadata.
+  source_id, evidence_id, Research Question IDs, URL, title, content, timestamps,
+  retrieval provenance, quality assessment, and limitations remain unchanged.
+- Coverage, evidence_gaps, unresolved_questions, category references, and category
+  counts are recomputed from Research Plan requirements and repaired sources.
+- A missing-category finding is resolved only when the repaired source itself has the
+  required category and is linked to the same Research Question. An unrelated source
+  cannot satisfy it.
+- The original revision_required Quality Review and all three original findings are
+  preserved. Current status is represented through resolved_integrity_findings and
+  the effective Human Evidence Gate view.
+
+4. Design meaning
+
+The repair keeps the Human Evidence Gate boundary intact:
+
+  hard integrity -> deterministic system repair or block
+  evidence sufficiency -> explicit Human decision
+
+Category ownership now combines the specialist task contract with a very small,
+saved-metadata canonicalization rule. The system does not ask an LLM to reclassify a
+source and does not introduce a general media taxonomy. Repair artifacts form an
+auditable Evidence Set hash chain, so a later Human Decision is bound to the repaired
+Evidence Set rather than silently replacing the pre-repair identity.
+
+5. Same-family audit and prevention
+
+The new aggregation path prevents the limitation duplication in future workflows.
+The recognized-media rule runs before assigned-category filtering, so all Researcher
+aggregation uses the same rule. Ten fault tests cover exact versus semantic dedupe,
+missing expert identity detection, zero-call NEWS repair, identity preservation,
+same-question and unrelated-question coverage, Gate eligibility, unresolved Hard
+failure, and reservation/call invariants.
+
+The first full verification exposed a separate test-isolation defect: LLM Provider
+was forced to mock but PRDCP_RETRIEVAL_PROVIDER could leak from the operator .env and
+attempt a real search. Verification and the CLI integration test now force both LLM
+and Retrieval providers to mock. This prevents accidental paid/network calls during
+regression tests.
+
+6. Verification
+
+- Active Python compile: PASS
+- Targeted Researcher/Human Gate/Payload suite: 79 PASS
+- New Cycle 040 fault tests: 10 PASS
+- Read-only exact production clone recovery: PASS
+- Full unit/integration suite: 556 PASS
+- 31 Role Definitions STRICT preload/Doctor: PASS
+- 22 OpenRouter Structured Output recursive schema audit: PASS
+- Five-layer Mock E2E and six delivery artifacts: PASS
+- Production --status after recovery: Producer COMPLETED; Researcher
+  WAITING_HUMAN_EVIDENCE_REVIEW
+- Ruff was not available in the installed workspace runtime; compile and the complete
+  Python verification suite were used. No package installation or network access was
+  attempted.
+
+7. Production state audit
+
+Before:
+- State file SHA-256:
+  0e6af0c73889c5fd7f5887ae0ca0f48af8c12eb9e9d5d54e6079ef3516447cbe
+- Report file SHA-256:
+  e8fa7ce525b914c1217da40ae03a4f5e3e24243ad4f9a7838a7b66cb8a9fb196
+- Evidence Set SHA-256:
+  3c1a32f3608bb7d5289d01e6fce1a71cc0dd2403ea8af5d0ca8f0f952bf18cb5
+- Sources: 27; Report limitations: 54; Hard: 2; Evidence gaps: 1
+- Provider reservations: 15; Retrieval reservations: 10; contexts: 10
+
+After one explicit --researcher-recover with provider=openrouter and Safe Mode:
+- State file SHA-256:
+  f7a8322098fbe7613cb9ecb71f82b6839bdfa5fa1c6e276731993885d6d15f89
+- Report file SHA-256:
+  52d2ec719cbd05d781e1e88d2dbd60fea79d5d100e46a14dea81da5cfb681fbb
+- Sources: 27; Report limitations: 14; source-level limitations unchanged
+- Target source: EXPERT -> NEWS; Research Question IDs remain [rq_ai_emp_002]
+- Original Quality Review: revision_required, three findings, unchanged
+- Resolved integrity findings: 2; Hard: 0; Unclassified: 0
+- Remaining Evidence Sufficiency findings: 1
+- Human Gate eligible: YES
+- Human Decision: not recorded
+- deliberation_sent: false
+- Provider reservations: 15; Retrieval reservations: 10; contexts: 10 (unchanged)
+
+Repair hash chain:
+- limitation repair: report 7d6aacf3... -> 06d3b8cc...;
+  Evidence Set 3c1a32f3... -> 04d04ef9...
+- media repair: report 06d3b8cc... -> 8489a119...;
+  Evidence Set 04d04ef9... -> f9ccdea0...
+
+8. Provider cost and retry audit
+
+- OpenRouter Structured Reasoning calls: 0
+- OpenRouter Retrieval calls: 0
+- Quality Review calls: 0
+- Provider retries/revisions: 0
+- New Provider reservations: 0
+- New Retrieval reservations: 0
+- API cost: USD 0.00
+
+The command used the OpenRouter runtime configuration only to prove that the local
+recovery path remains zero-call. It did not send an HTTP request.
+
+9. Stop condition and next action
+
+The repair stopped at WAITING_HUMAN_EVIDENCE_REVIEW because the remaining
+rq_ai_emp_003 NEWS gap is real. The system has not inferred or recorded a Human
+Decision. The operator must explicitly choose ACCEPT_WITH_LIMITATIONS or REVISE;
+ACCEPT is not valid while this Evidence Sufficiency finding remains.
+
+10. Self-audit against the implementation plan
+
+[YES] Root cause identified at aggregation/classification ownership boundaries.
+[YES] No symptom-only field patch and no semantic dedupe.
+[YES] Same-family aggregation, coverage, Gate, reservation, and provider isolation audited.
+[YES] State, PMP review, Schema, checkpoint, reservation, context, and handoff effects checked.
+[YES] Ten regression/fault tests added.
+[YES] Exact production clone recovery completed before production mutation.
+[YES] Full regression and Mock E2E completed.
+[YES] Debug Report generated with design meaning and prevention controls.
+[YES] No unnecessary Provider or Retrieval call occurred.

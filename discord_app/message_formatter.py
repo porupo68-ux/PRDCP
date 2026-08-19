@@ -12,6 +12,7 @@ from producer.workflow import AGENT_ORDER, DISPLAY_NAMES
 from researcher.state import ResearcherWorkflowState
 from researcher.workflow import DISPLAY_NAMES as RESEARCHER_DISPLAY_NAMES
 from researcher.workflow import QUALITY_REVIEWER_ID
+from researcher.schemas.human_evidence import HumanEvidenceGateSummary
 from conclusion.state import ConclusionWorkflowState
 from conclusion.workflow import DISPLAY_NAMES as CONCLUSION_DISPLAY_NAMES
 from conclusion.workflow import (
@@ -51,6 +52,11 @@ def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
 
 def format_status(state: ProducerWorkflowState) -> str:
     completed = set(state.completed_agents)
+    pending = [
+        agent_id
+        for agent_id in AGENT_ORDER
+        if agent_id not in completed and agent_id != state.current_agent_id
+    ]
     lines = [
         f"Workflow: {state.workflow_id}",
         f"Status: {state.status}",
@@ -59,9 +65,25 @@ def format_status(state: ProducerWorkflowState) -> str:
         "",
         "Completed:",
     ]
-    for agent_id in AGENT_ORDER:
-        marker = "✓" if agent_id in completed else ("→" if state.current_agent_id == agent_id else "·")
-        lines.append(f"{marker} {DISPLAY_NAMES[agent_id]}")
+    if completed:
+        lines.extend(
+            f"✓ {DISPLAY_NAMES[agent_id]}"
+            for agent_id in AGENT_ORDER
+            if agent_id in completed
+        )
+    else:
+        lines.append("(none)")
+    lines.extend(["", "Current:"])
+    lines.append(
+        f"→ {DISPLAY_NAMES[state.current_agent_id]}"
+        if state.current_agent_id in DISPLAY_NAMES
+        else "(none)"
+    )
+    lines.extend(["", "Pending:"])
+    if pending:
+        lines.extend(f"· {DISPLAY_NAMES[agent_id]}" for agent_id in pending)
+    else:
+        lines.append("(none)")
     if state.error:
         lines.extend(["", f"Error: {state.error.get('message', state.error)}"])
     return "\n".join(lines)
@@ -99,6 +121,48 @@ def format_researcher_status(state: ResearcherWorkflowState) -> str:
         lines.append(f"{marker} {RESEARCHER_DISPLAY_NAMES[agent_id]}")
     if state.error:
         lines.extend(["", f"Error: {state.error.get('message', state.error)}"])
+    if state.status == "WAITING_HUMAN_EVIDENCE_REVIEW":
+        lines.extend(
+            [
+                "",
+                "Human Evidence Gate: decision required",
+                "Use !researcher_evidence <workflow_id> before deciding.",
+            ]
+        )
+    if state.human_evidence_decision:
+        lines.append(
+            "Human Evidence Decision: "
+            f"{state.human_evidence_decision.decision}"
+        )
+    return "\n".join(lines)
+
+
+def format_researcher_evidence(summary: HumanEvidenceGateSummary) -> str:
+    lines = [
+        f"Human Evidence Gate: {summary.workflow_id}",
+        f"Quality Review: {summary.quality_review_status}",
+        f"Sources: {summary.source_count}",
+        f"Evidence Set SHA-256: {summary.evidence_set_sha256}",
+        f"Hard Integrity Findings: {len(summary.hard_integrity_findings)}",
+        f"Evidence Sufficiency Findings: {len(summary.evidence_sufficiency_findings)}",
+        f"Resolved Integrity Findings: {len(summary.resolved_integrity_findings)}",
+        f"Unclassified Findings: {len(summary.unclassified_findings)}",
+        f"Human decision eligible: {'yes' if summary.eligible else 'no'}",
+    ]
+    for item in summary.hard_integrity_findings:
+        lines.append(f"HARD {item.finding_id}: {item.issue}")
+    for item in summary.evidence_sufficiency_findings:
+        lines.append(f"GAP {item.finding_id}: {item.issue}")
+    for item in summary.resolved_integrity_findings:
+        lines.append(f"REPAIRED {item.finding_id}: {item.resolution}")
+    if summary.eligible:
+        lines.extend(
+            [
+                "",
+                "Choices: ACCEPT / ACCEPT_WITH_LIMITATIONS / REVISE",
+                "A Human Evidence Decision never authorizes Provider calls.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -277,6 +341,7 @@ def format_playwright_status(state: PlaywrightWorkflowState) -> str:
             f"Paragraphs: {len(paragraphs)}",
             f"Citations mapped: {len(mappings)} / {citation_required}",
             f"Revision: {state.revision_count} / 2",
+            f"Deterministic Repairs: {state.deterministic_repair_count} / 1",
             f"Upstream Revision: {state.upstream_revision_count}",
         ]
     )

@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "provider_id": "openrouter",
+  "agent_id": "conclusion.position_generator",
+  "output_schema_id": "conclusion.schemas.position_candidate.PositionGenerationResult",
+  "incompatible_model_id": "qwen/qwen3.5-flash-02-23",
+  "compatible_model_id": "openai/gpt-5-mini",
+  "source_workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "source_authorization_id": "cceb49a6-1b3b-4819-907d-08c66dede3fe",
+  "source_repair_task_id": "position_task_7001de5f08ae4dabbd3881fed57dcd5a_provider_contract_repair_1",
+  "source_result_message_id": "1c4d9abe-b30a-43b2-b814-d51c0c448ee1",
+  "verification": "pydantic_output_validated",
+  "verified_at": "2026-08-16T23:08:14.045130Z"
+}

@@ -1,0 +1,15 @@
+{
+  "authorization_id": "252d6041-5cba-4bae-a03f-7a094460b596",
+  "workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "provider_id": "openrouter",
+  "agent_id": "conclusion.position_generator",
+  "original_task_id": "conclusion_position_generation_upstream_0_revision_1",
+  "retry_task_id": "conclusion_position_generation_upstream_0_revision_1_operator_retry_1",
+  "source_error_message_id": "78813a89-cb1e-4df2-a1b3-03a780a798ab",
+  "source_error_class": "ProviderResponseContractError",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-16T23:08:14.001570Z",
+  "consumed_at": "2026-08-16T23:08:14.331858Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\15f3f5c5-4167-447d-b255-069fc7f5beb2\\conclusion_position_generation_upstream_0_revision_1_operator_retry_1.json"
+}

@@ -46,6 +46,10 @@ class DeliberationWorkflowState(BaseModel):
     counterargument_analysis: dict[str, Any] | None = None
     final_integration: dict[str, Any] | None = None
     deterministic_validation: dict[str, Any] | None = None
+    manager_invalid_payloads: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    manager_payload_recoveries: list[dict[str, Any]] = Field(default_factory=list)
+    counterargument_payload_recoveries: list[dict[str, Any]] = Field(default_factory=list)
+    manager_provider_failures: list[dict[str, Any]] = Field(default_factory=list)
     deliberation_result: dict[str, Any] | None = None
     review_result: dict[str, Any] | None = None
     checkpoint_revisions: dict[str, int] = Field(default_factory=dict)

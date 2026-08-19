@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from researcher.schemas.human_evidence import AcceptedEvidenceGap, HumanEvidenceDecision
 
 
 class ProductionContext(BaseModel):
@@ -28,6 +29,8 @@ class ProductionContext(BaseModel):
     accepted_risks: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     limitations_to_disclose: list[str] = Field(default_factory=list)
+    human_evidence_decision: HumanEvidenceDecision | None = None
+    accepted_evidence_gaps: list[AcceptedEvidenceGap] = Field(default_factory=list)
     tone_constraints: list[str] = Field(default_factory=list)
     format_constraints: list[str] = Field(default_factory=list)
     source_manifest: list[dict[str, Any]] = Field(min_length=1)
@@ -39,4 +42,3 @@ class ProductionContext(BaseModel):
         if len(self.must_include_evidence_ids) != len(set(self.must_include_evidence_ids)):
             raise ValueError("must_include_evidence_ids must be unique")
         return self
-

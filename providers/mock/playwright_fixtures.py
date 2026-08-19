@@ -244,6 +244,7 @@ def _key_message(section_type: str, context: dict) -> str:
     return {
         "HOOK": "身近な問いとして提示する",
         "QUESTION": context["central_question"],
+        "CONTEXT": "判断に必要な背景を整理する",
         "GENERAL_OPINION": "広く共有される見方を確認する",
         "EVIDENCE": "根拠を順番に確認する",
         "ANALYSIS": "根拠から言える範囲を整理する",
@@ -251,6 +252,7 @@ def _key_message(section_type: str, context: dict) -> str:
         "DECISION": context["final_recommendation"],
         "LIMITATION": "残る限界と不確実性を開示する",
         "CONCLUSION": "判断と提言をまとめる",
+        "CTA": "視聴者が次に取れる行動を示す",
     }[section_type]
 
 
@@ -258,6 +260,7 @@ def _speaker_text(section_type: str, context: dict) -> str:
     return {
         "HOOK": f"今回扱うテーマは、{context['topic']}です。",
         "QUESTION": f"中心となる問いは、{context['central_question']}です。",
+        "CONTEXT": "まず、この問いを判断するために必要な背景と前提を整理します。",
         "GENERAL_OPINION": "まず、広く共有されている見方が何を前提にしているのか確認します。",
         "EVIDENCE": "ここからは、上流で確認された証拠を使って事実関係を見ていきます。",
         "ANALYSIS": "証拠から直接言えることと、解釈として述べることを分けて考えます。",
@@ -265,4 +268,5 @@ def _speaker_text(section_type: str, context: dict) -> str:
         "DECISION": f"人間が選択した最終方向は、{context['final_recommendation']}です。",
         "LIMITATION": "この判断には、明示しておくべき不確実性と制限があります。",
         "CONCLUSION": "以上を踏まえ、判断の条件と今後確認すべき点をまとめます。",
+        "CTA": "皆さんの経験や考えも確認し、次に検証すべき点を共有してください。",
     }[section_type]

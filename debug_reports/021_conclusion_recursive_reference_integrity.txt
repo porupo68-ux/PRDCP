@@ -1,0 +1,188 @@
+PRDCP Debug Report
+
+ID: 021
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion
+Agents: Position Generator / Decision Evaluator / Decision Integrator / Quality Reviewer / Manager
+Error Class: SCHEMA / TRACEABILITY / VALIDATION / REVISION / CHECKPOINT
+
+1. 発生した症状
+
+Cycle 020のReal Quality Reviewerは、Decision IntegrationとConclusion Packageに存在する
+`claim_task_reorganization_observed`をDecision Contextのcanonical claim集合へ追跡できず、
+revision_requiredを返した。保存済みdeterministic validationは同時にpassed=trueだった。
+
+実stateを再帰走査すると、この未知IDは次の2箇所だけに存在した。
+
+- decision_integration.major_tradeoffs[0].related_claim_ids[1]
+- conclusion_package.key_tradeoffs[0].related_claim_ids[1]
+
+Position GenerationとDecision Evaluationには存在しなかった。しかしReviewのrevision_targetsは
+Position Generator、Decision Integrator、Managerであり、最初の不正生成段階より上流まで対象に含めていた。
+
+2. 根本原因
+
+JSON Schemaは文字列や配列の形を検証できるが、出力されたIDがDecision Contextのcanonical集合に
+実在するかは検証できない。従来のConclusionValidatorはPositionのsupporting IDとIntegratorの
+一部evidence参照だけを個別検査し、`related_claim_ids`のようなprefix付き参照、Evaluation、Package、
+candidate/source/analysis/problem/stakeholder参照を一つの規則で再帰検証していなかった。
+
+さらにAgentはPydantic validation後すぐsuccess PMP/Resultとして保存され、input-awareなdomain contractを
+検証する共通境界がなかった。したがってschema-validだが存在しないIDがcheckpointへ確定し、後段Reviewer
+だけが検出した。
+
+保存済みDecision Context自体にも、tradeoffs内だけに存在しkey_claim_idsへ登録されていない次のlegacy参照が
+あった。Integratorは入力に含まれるため、promptでallowlistを指示してもこれを複写できた。
+
+- claim_observed_limited_displacement
+- claim_perception_divergence
+- claim_task_reorganization_observed
+
+別の同系統不整合として、integrated_option.candidate_idsへcandidate IDだけでなく候補名と理由文が混入していた。
+
+3. なぜ既存テストで発見できなかったか
+
+既存テストはPydantic shape、候補のmatrix coverage、一部evidence参照、Reviewerのrouting整合を個別に確認していた。
+任意のnested model、array、package複製を含め、明示的IDフィールドをcanonical集合と照合する横断テストがなかった。
+またlegacy保存Decision Contextをそのまま複製したRecovery testが、provider-facing inputの不正参照まで含めていなかった。
+
+4. 計画書との照合後に採用した修正計画
+
+1) claim/evidence/analysis/source/candidate/stakeholder/problemの明示IDフィールドを再帰走査する。
+2) 自由記述をIDとして誤検査せず、`*_id` / `*_ids`とviable_candidatesだけを対象にする。
+3) Pydantic/schema validation後、success PMP/Result保存前にinput-aware contractを適用する。
+4) Position、Evaluation、Integration、Packageの全artifactをdeterministic validationの同一集合で検査する。
+5) legacy Decision Contextは保存JSONを変更せず、Provider送信用viewの明示IDフィールドだけを正規化する。
+6) 保存済みReviewのtraceability findingはsaved artifactを再検証し、最初の不正生成段階へrevisionを絞る。
+7) Safe Modeの明示revisionは設定された各slotを一回ずつ許し、上限超過はProvider call前に停止する。
+8) automatic revision、PMP、Reservation、Outbox、Human Selectionは既存契約を維持する。
+
+5. 実際の修正内容
+
+- 共通StructuredAgentに、Pydantic後・success保存前の`validate_output_contract` hookを追加した。
+- Conclusion Agentだけがhookをoverrideし、入力Decision Contextと出力IDの実在性を照合する。
+- 違反時は正確なJSON pathを持つPayloadValidationErrorとなり、error PMPは保存するがsuccess Result、
+  completed checkpoint、Quality Reviewer呼出しは作らない。
+- ConclusionValidatorへ全artifact共通の再帰reference validatorを追加した。
+- Decision Contextのprovider-facing copyで、未知IDを明示IDフィールドからだけ除去する。
+  narrative、description、自由形式payload、および保存済みDeliberation Resultは変更しない。
+- legacy trace-only ReviewはPosition → Evaluation → Integration → Packageの順に再検証し、
+  最初に不正なartifactのproducerへrevision targetを絞る。
+- 現workflowの有効targetはDecision Integratorだけとなる。依存関係によりQuality Reviewerだけが後続実行される。
+- explicit revision上限を実行前に検査し、max_revisions=2ならrevision_1とrevision_2を各一回許す。
+  3回目はReservation/Provider call前に停止する。automatic loopは変更していない。
+- Evaluator/Integrator schema説明、Prompt、RDをcanonical ID allowlistに一致させた。
+
+6. 修正の設計上の意味
+
+Structured Outputの責務を「JSONとして正しい」から「そのworkflow入力に対して参照整合性がある」まで拡張した。
+ただし共通hookの既定はno-opであり、Conclusionだけが明示的domain contractを実装するため、他Layerの既存挙動を
+暗黙変更しない。LLMが作った不正参照を後段Reviewerへ委ねず、最初の生成境界で確定前に拒否できる。
+
+provider-facing viewはlegacy保存物の非破壊compatibility adapterである。自由記述を削らず、明示ID配列だけを
+canonical集合へ射影するため、意味のあるpayloadを機械的に破壊しない。
+
+7. 同系統Failure Mode監査
+
+- Position: candidate定義IDは自身の出力集合、context参照はDecision Context集合で検査する。
+- Evaluation: candidate/claim/evidence/analysis/source参照を入力集合で検査する。
+- Integration: candidate、tradeoff、profile、traceabilityのnested/array参照を再帰検査する。
+- Package: Integrationから複製された参照も独立に再検査する。
+- free text: `id`らしい語が文章に含まれても検査・削除しない。
+- legacy context: 保存JSONを変更せずprovider viewだけ正規化する。
+- revision routing: Reviewerの広いtargetをblindに採用せず、saved artifactで最初の不正producerを確定する。
+- checkpoint: 完了済みPosition/Evaluationは再実行しない。
+- reservation: revision_2 taskを新しいlogical taskとして一度だけ予約する。
+- outbox: Human Selection完了前のConclusion/Playwright outboxは変更しない。
+- 他Layer: 共通hookはdefault no-op。Producer/Researcher/Deliberation/Playwrightの実行契約は不変。
+
+8. Regression Test
+
+- 全reference kindをnested model / array / packageで再帰検出する。
+- unknown IDのexact pathを返す。
+- Decision Context viewが未知明示IDだけを除去し、narrativeを保持する。
+- schema-valid unknown candidate/claimをIntegrator成功保存前に拒否する。
+- 拒否後の明示retryが失敗stageとQuality Reviewerだけを実行する。
+- legacy revision_1 stateをrevision_2としてDecision Integratorからだけ再開する。
+- max revision超過がProvider call前に停止する。
+- RD/Promptのcanonical allowlist記述を固定する。
+- Full Unit: 369 tests PASS。Full discovery: 389 tests PASS。
+- 31 RD STRICT: PASS。
+- Common specification drift audit: PASS。
+- 5-layer Mock E2E Producer → Delivery: PASS。
+- 6 delivery artifacts: PASS。
+- Doctor mock/safe-mode: READY（fail=0）。
+
+9. Mock / Fault Injection / Saved-State Recovery
+
+Fault A: Mock Integratorがschema-validなunknown candidate IDとunknown claim IDを一回返す。
+結果はIntegratorのPayloadValidationErrorで停止し、Quality Reviewer callは0。明示retryではIntegrator 1、
+Quality Reviewer 1だけを実行し、upstream call 0で回復した。
+
+Fault B: production Conclusion state/messagesを隔離コピーし、authorizationなしでrevisionを試行した。
+安全機構がProvider call前に停止し、暗黙の再送を許さないことを確認した。
+
+Fault C: 同じ隔離コピーへ既存の正規authorizationだけを含めたところ、legacy Decision Context由来の未知claimを
+新validatorが拒否した。これにより入力側compatibility欠落を発見し、provider-facing canonical viewを追加した。
+
+最終Exact Saved-State Recovery: production state/messagesと必要な既存authorizationだけを別領域へコピーし、
+provider_id=openrouterのMockで明示revision相当を実行した。結果はWAITING_HUMAN_SELECTION、revision_count=2、
+deterministic_validation.passed=true、Quality Review approved、unknown reference 0。callはDecision Integrator 1、
+Quality Reviewer 1、Position 0、Evaluation 0だった。taskは次の2件だけである。
+
+- conclusion_decision_integration_upstream_0_revision_2
+- conclusion_quality_review_upstream_0_revision_2
+
+10. Provider Call数 / Cost
+
+- Implementation / Unit / Integration / Mock / Fault: Real 0
+- Exact Saved-State Recovery: Mock 2 calls、Real 0
+- automatic retry: 0
+- duplicate calls: 0
+- production explicit CLI: `--conclusion-revise`を一回だけ実行
+- Real Provider calls: Decision Integrator 1、Quality Reviewer 0、upstream 0
+- automatic retry / duplicate call: 0
+- API cost: reservation/PMPにusageがないため実測unknown
+
+11. Existing Workflow / Storage保護
+
+Cycle 021実装・Mock/Fault中はproduction storageをread-onlyで参照した。本番反映後の正規CLIだけがConclusion
+revision_2 state/messagesとDecision Integrator reservationを追加した。Deliberationのprimary analyses、initial
+integration、counterargument、final integration、deterministic validationおよび既存PMPは不変であり、
+Conclusion outboxも不変、Playwright outboxは未作成である。
+
+12. Result
+
+PASS / NEW FAILURE CAPTURED。Implementation / Static / Unit / Integration / Mock / Fault /
+Exact Saved-State Recovery / production限定反映 / 明示的一回Real実行を完了した。
+
+Real Decision Integratorは、未知claimを解消した有用なpayloadを返したが、integrated_option.candidate_idsへ
+候補ID 1件に加えて`integration_rationale`、`integrated_elements_and_scope`、
+`additional_risks_and_limitations`という3つのキー名を入れた。Cycle 021の新しいinput-aware contractが
+success checkpoint保存前に正しく拒否し、Quality Reviewer、自動retry、upstream再実行は0だった。
+この新Failureは、Decision Integrator RDがsingle candidateを許す一方でPydanticがcandidate_idsを2件以上に
+固定した契約矛盾と、strict schemaが動的input IDをenum拘束しない問題としてCycle 023へ移行する。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所パッチだけで終わっていない
+[YES] Sibling Failureを監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full Real E2Eは再実行せず、保存済みrevision_1の次の未完了stageだけを実行する。

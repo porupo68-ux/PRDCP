@@ -1,0 +1,108 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 003
+Date: 2026-08-16
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher
+Agent: researcher.quality_reviewer
+Error Class: PROVIDER
+
+1. 発生した症状
+
+Cycle 002の全Regression Gate通過後、保存済みQUALITY_REVIEWING checkpointからcontract-v2 Quality Reviewを1回だけOpenRouterへ送った。応答待機中に接続がWinError 10054で強制切断され、WorkflowはFAILEDへ戻った。
+
+2. 発生地点
+
+OpenRouterModelProvider._post()のHTTPS通信中。Structured Output JSONの受信・Local Schema validation・PMP Review生成より前。
+
+3. 再現条件
+
+provider=openrouter、demo_safe_mode=true、model=moonshotai/kimi-k3でresearch_quality_review_external_1_contract_v2を実行。リモートホスト側または通信経路が既存接続を強制切断した。
+
+4. 根本原因
+
+Pythonが記録したroot_exception_typeはConnectionResetErrorであり、リモートホストまたはその手前の通信経路によるTCP接続リセットである。Local Schema、PMP、Checkpoint、Reservationの不整合ではない。OpenRouter、上流model gateway、途中networkのどこが切断したかはCLI取得情報だけでは特定不能だが、Failure ClassはPROVIDER transportで確定している。
+
+5. なぜこの問題が発生したか
+
+外部Provider通信はPRDCPの制御外にあり、長時間のStructured Output生成中に接続が切断された。PRDCPはConnectionResetErrorをRetryableAgentErrorへ分類したが、Demo Safe Modeでは自動retryを0回にするため、安全に停止した。
+
+6. なぜ既存テストで発見できなかったか
+
+既存テストはConnectionResetErrorをRetryableAgentErrorへ分類することを確認しているが、外部サービスが実際に接続を切断する時刻や頻度はMockで予測できない。これは未検出のLocal code bugではなくReal Provider境界の可用性事象である。
+
+7. 修正計画
+
+計画書の停止条件「外部Provider自体の障害」に従い、コード変更、自動retry、別Task ID発行、Safe Mode解除を行わない。認証・残高・Doctor設定は直前にREADYだったため、ユーザー判断または外部状態変化を待つ。
+
+8. 実際の修正内容
+
+コード修正なし。既存の安全動作を維持した。Failure Capture、state/reservation/outbox監査、既存transport regression確認、Debug Report生成だけを行った。
+
+9. 変更したファイル
+
+debug_reports/003_openrouter_connection_reset.txt
+debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+外部障害をE2E通過のためにSafe Mode回避やTask ID変更で再送しないという運用境界を守った。Reservationは「応答が保存されていない」だけで削除してよい記録ではなく、Providerへ送信を試みた事実を保持する監査証跡である。
+
+11. 他Layerへの影響
+
+Producer / Researcher / Deliberation / Conclusion / Playwrightの全Agentが同じOpenRouterModelProviderと共通retry policyを使用するため、ConnectionResetErrorの分類とSafe Mode停止は全Layerで同じ。個別Layerに局所パッチを入れる理由はない。
+
+12. 同系統Failure Mode監査結果
+
+OpenRouter providerはURLError.reasonがConnectionErrorの場合をRetryableと分類する。ConnectionResetErrorはConnectionErrorの派生であり、今回もRetryableAgentError、retry_count=0として保存された。HTTP 408/429/5xx、Timeout、DNS temporary failureも既存テストで分類済み。Safe Mode OFF時だけ最大1回、Safe Mode ON時は0回という共通policyを確認した。
+
+13. Regression Test
+
+既存test_openrouter_providerはConnectionResetError → RetryableAgentErrorを検証済み。既存test_agent_retry_policyはDemo Safe Modeでretryable errorを1回も再試行しないことを検証済み。Cycle 002直前の全Unit 257件、Integration 9件はPASS。
+
+14. Recovery / Fault Test
+
+今回の実FailureでstateはFAILED / QUALITY_REVIEWING、external_revision_count=1、source_count=37、manager research_revision_result=0を維持した。contract-v2 reservationは1件、retry_count=0。専門Researcher再dispatch、Outbox生成、External count増加は発生していない。
+
+15. Provider Call数
+
+Real API Calls: 1 attempt
+Automatic Retries: 0
+Researcher specialist calls: 0
+Duplicate Provider Calls: 0
+Reused Results: 14 ResearchResult、37-source Research Report
+
+16. API Cost
+
+unknown。応答完了前の接続リセットであり、OpenRouter側の課金有無・実測額はCLIから取得不能。
+
+17. Existing Workflowへの影響
+
+正規CLI実行によりcontract-v2 task request、error PMP、reservationが追加された。既存specialist results、Research Report、external revision history、Deliberation待機stateは保持されている。Storage手動編集、reservation削除、Outbox上書きは行っていない。
+
+18. Remaining Risk
+
+現在のcontract-v2 logical taskは送信試行済みとして予約されている。再開には、同じTask再送を明示的に許可する新しい運用設計または外部応答の回収手段が必要であり、これはユーザー判断を要する。現状のまま同じCLIを再実行するとSafe Modeが正しく遮断する。
+
+19. Result
+
+PARTIAL - EXTERNAL PROVIDER STOP CONDITION
+
+Plan Compliance Review
+
+[YES] Root CauseをProvider transport resetまで特定した
+[YES] 局所パッチを追加していない
+[YES] Sibling Failureを全Layer共通transportとして監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaへ到達していないことを確認した
+[YES] PMP error correlationを確認した
+[YES] Reservationを確認した
+[YES] Outbox未生成を確認した
+[YES] 既存Regression Testを確認した
+[YES] 実FailureをFault条件として確認した
+[YES] Debug Reportを書いた
+[YES] 設計上の停止の意味を説明した
+[YES] 不必要なProvider Callを避けた
+

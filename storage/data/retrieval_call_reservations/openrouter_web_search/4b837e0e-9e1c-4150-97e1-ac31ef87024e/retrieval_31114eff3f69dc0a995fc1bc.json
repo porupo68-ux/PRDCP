@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_31114eff3f69dc0a995fc1bc",
+  "workflow_id": "4b837e0e-9e1c-4150-97e1-ac31ef87024e",
+  "task_id": "task_0935b1dd9cc043249ba8d5070ee9947f",
+  "agent_id": "researcher.government_researcher",
+  "strategy": "GOVERNMENT",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-18T12:20:19.753786+00:00"
+}

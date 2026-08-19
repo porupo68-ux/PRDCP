@@ -25,6 +25,7 @@ class MessageType(str, Enum):
     RESEARCH_RESULT = "research_result"
     RESEARCH_REVISION_REQUEST = "research_revision_request"
     RESEARCH_REVISION_RESULT = "research_revision_result"
+    HUMAN_EVIDENCE_DECISION = "human_evidence_decision"
     DELIBERATION_TASK_ASSIGNMENT = "deliberation_task_assignment"
     DELIBERATION_TASK_RESULT = "deliberation_task_result"
     DELIBERATION_RESULT = "deliberation_result"

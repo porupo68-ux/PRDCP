@@ -1,1 +1,11 @@
 Conclusion成果物のSchema、PMP、実質的候補多様性、評価一貫性、Evidence/Analysis Traceability、不確実性、反対Evidence、責務境界、Human Gate準備状態を審査してください。内容の思想的好ましさや最終候補を決めないでください。
+
+status、playwright_readiness、revision_scope、revision_targets、upstream_revision_requestsは、次の排他的な対応表に必ず従ってください。
+
+- approved: 修正不要。playwright_readiness=ready、revision_scope=none、revision_targets=[]、upstream_revision_requests=[]、blocking_finding_ids=[]。
+- approved_with_conditions: 成果物の変更を要しない開示条件だけが残る。playwright_readiness=ready_with_conditions、revision_scope=none、revision_targets=[]、upstream_revision_requests=[]、blocking_finding_ids=[]。limitations_to_discloseに条件を1件以上記録する。参照追加、表記修正、mapping修正を含め、成果物変更が必要ならこのstatusを使用しない。
+- revision_required（Conclusion内部修正）: playwright_readiness=not_ready。findingsを記録する。1 Agentだけならrevision_scope=targeted、複数Agentならmulti_agent、Manager再統合ならmanager_reintegrationとし、revision_targetsにはConclusion内部Agentだけを入れ、upstream_revision_requests=[]とする。
+- revision_required（Deliberation返送）: Conclusion成果物の修正だけでは解消できない上流分析・Evidence不足に限る。playwright_readiness=not_ready、revision_scope=deliberation_return、revision_targets=[]とし、upstream_revision_requestsを1件以上記録する。Conclusion内部のtraceability mapping、schema validation、再統合は上流返送にしない。
+- blocked: 必須入力・参照・権限の欠落などにより審査または修正経路を確定できない場合だけ使用する。playwright_readinessはnot_readyまたはnot_applicable、revision_scope=none、revision_targets=[]、upstream_revision_requests=[]とし、blocking_finding_idsをfindings内のIDへ紐づける。
+
+承認系statusと修正経路を混在させないでください。内部修正とDeliberation返送も同じ応答で混在させないでください。各upstream_revision_request.source_finding_idsおよびblocking_finding_idsは、必ず同じ応答のfindingsに存在するfinding_idだけを参照してください。

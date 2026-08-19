@@ -45,7 +45,15 @@ class PromptBuilder:
                 "# Review Target Role Boundaries\n"
                 + json.dumps(reviewer_context, ensure_ascii=False, indent=2, sort_keys=True)
             )
+        # OpenRouter receives this already-validated schema in response_format.
+        # Repeating the entire schema in the system message consumes context twice
+        # and does not add a second enforcement boundary. Keep the precedence
+        # section, but make the API-level contract authoritative.
         sections.append(
-            "# Output Schema\n" + json.dumps(output_schema, ensure_ascii=False, indent=2, sort_keys=True)
+            "# Output Schema\n"
+            "Return exactly one JSON object that conforms to the strict JSON Schema "
+            "supplied by the runtime in response_format. Include every required key, "
+            "use empty arrays for required collections with no items, and add no "
+            "undeclared properties."
         )
         return "\n\n".join(sections).strip() + "\n"

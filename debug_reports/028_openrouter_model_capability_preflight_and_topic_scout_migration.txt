@@ -1,0 +1,315 @@
+PRDCP v2 Debug Report
+Cycle: 028
+Title: OpenRouter Model Capability Preflight & Topic Scout Model Migration
+Result: PARTIAL PASS / REAL E2E BLOCKED BY 9 RESEARCH MODEL CAPABILITY FAILURES
+Date: 2026-08-17
+Target: C:\Users\kpi01\OneDrive\デスクトップ\PRDCP_v2
+
+1. Observed Failure
+
+Fresh Discord Real E2E workflow 6c18e466-fce5-403b-bb68-6432b735dd9d は、
+Producer最初の producer.topic_scout で停止した。
+
+保存済み事実:
+- workflow status: FAILED
+- completed_agents: 0
+- provider: openrouter
+- configured model: perplexity/sonar
+- error: HTTP 404 "No endpoints found that can handle the requested parameters"
+- request contract:
+  response_format.type=json_schema
+  json_schema.strict=true
+  provider.require_parameters=true
+
+Failure Capture state SHA256:
+26BD96CAC0659485977DAA3FD47CEEAAC3CECB2B189ED7CCA1CFA373D30E6605
+
+2. Root Cause
+
+PRDCPのstrict Structured Output契約は正しかったが、実行modelとOpenRouter Endpoint能力の
+対応確認がchat completion送信時まで行われていなかった。perplexity/sonarの現行Endpointは
+response_format/structured_outputsの要求を同時に扱えず、require_parameters=trueが
+非対応Endpointを正しく除外した結果、routing先0件で404になった。
+
+したがって原因はDiscord、PMP、Schema strict化ではなく、
+「effective modelとEndpoint capabilityの不整合を予約前に検出する層がなかったこと」である。
+
+3. Why Mock Did Not Detect It
+
+Mock ProviderはAgentのmodel slugやOpenRouterのlive Endpoint metadataを参照しない。
+Schema形状、PMP、Checkpoint、Revision、Reservationの論理契約は検証できるが、
+外部Providerのper-model supported_parametersは再現しない。
+そのためMock E2EがPASSでも、live OpenRouter routing capabilityだけが失敗し得た。
+
+4. Affected Agents / Sibling Audit
+
+PRDCPの全31 Agentについて、process environment/.envを優先したeffective modelを取得し、
+verified provider-model compatibility bindingを適用したうえで横断監査した。
+
+Topic Scout移行後のDoctor結果:
+- Compatible: 22/31
+- Unknown: 0
+- Failed: 9
+- MODEL CAPABILITY: NOT READY
+
+今回修復済み:
+- producer.topic_scout
+  perplexity/sonar -> google/gemini-3.7-flash
+  compatible endpoints: 6/6
+
+残る非互換9 Agent:
+- producer.general_opinion_analyst: perplexity/sonar-deep-research
+- producer.research_planner: perplexity/sonar-pro
+- researcher.expert_researcher: perplexity/sonar-deep-research
+- researcher.academic_researcher: perplexity/sonar-deep-research
+- researcher.government_researcher: perplexity/sonar-deep-research
+- researcher.news_researcher: perplexity/sonar
+- researcher.public_opinion_researcher: perplexity/sonar
+- researcher.politician_researcher: perplexity/sonar-deep-research
+- researcher.industry_researcher: perplexity/sonar-deep-research
+
+5. Model Capability Matrix
+
+PASS:
+- producer.manager: moonshotai/kimi-k3 (9/13)
+- producer.topic_scout: google/gemini-3.7-flash (6/6)
+- producer.topic_selector: moonshotai/kimi-k3 (9/13)
+- producer.quality_reviewer: moonshotai/kimi-k3 (9/13)
+- researcher.manager: moonshotai/kimi-k3 (9/13)
+- researcher.quality_reviewer: moonshotai/kimi-k3 (9/13)
+- deliberation.manager: moonshotai/kimi-k3 (9/13)
+- deliberation.argument_analyst: deepseek/deepseek-r1 (1/1)
+- deliberation.causal_structural_analyst: deepseek/deepseek-r1 (1/1)
+- deliberation.stakeholder_response_analyst: deepseek/deepseek-r1 (1/1)
+- deliberation.counterargument_analyst: deepseek/deepseek-r1 (1/1)
+- deliberation.quality_reviewer: openai/gpt-5.5 (6/7)
+- conclusion.manager: qwen/qwen3.5-flash-02-23 (1/1)
+- conclusion.position_generator: openai/gpt-5-mini via verified binding (4/4)
+- conclusion.decision_evaluator: qwen/qwen3.6-35b-a3b (5/9)
+- conclusion.decision_integrator: qwen/qwen3.6-35b-a3b (5/9)
+- conclusion.quality_reviewer: qwen/qwen3.6-35b-a3b (5/9)
+- playwright.manager: moonshotai/kimi-k2.5 (7/10)
+- playwright.narrative_architect: ~google/gemini-flash-latest
+  -> google/gemini-3.7-flash (6/6)
+- playwright.scriptwriter: ~anthropic/claude-sonnet-latest
+  -> anthropic/claude-sonnet-5 (6/9)
+- playwright.evidence_citation_editor: openai/gpt-5-mini (4/4)
+- playwright.visual_director: openai/gpt-5-mini via verified binding (4/4)
+
+FAIL:
+- 上記4節のPerplexity 9 Agentはいずれもcompatible endpoints 0/1
+
+判定条件は、同一の稼働Endpointがsupported_parametersに
+response_formatとstructured_outputsの両方を持つことである。
+model不存在、alias異常、metadata取得不能はPASSにせずUNKNOWN/FAILとする。
+
+6. Topic Scout Migration
+
+変更:
+- production .env の MODEL_PRODUCER_TOPIC_SCOUT
+  perplexity/sonar -> google/gemini-3.7-flash
+- config/models.json display_name
+  Perplexity Sonar -> Google Gemini 3.7 Flash
+- .env.exampleの推奨model ID更新
+- config/README.mdとREADME.mdへeffective modelの正本とDoctor手順を追記
+
+OpenRouter公開metadata上でgoogle/gemini-3.7-flashは6/6 Endpointが
+response_formatとstructured_outputsを扱うことを確認した。
+秘密情報はログ、Report、テストartifactへ保存していない。
+
+7. Code Changes
+
+- providers/openrouter_capabilities.py
+  公開/model catalogとEndpoint metadataを読むread-only clientを追加。
+  alias_targetを実体modelまで解決し、COMPATIBLE/INCOMPATIBLE/UNKNOWNを返す。
+- providers/openrouter_provider.py
+  strict schema生成・context budget・reservation・有料POSTより前に
+  capability preflightを実施。失敗時はProviderCapabilityError。
+- common/agents/base.py
+  errorへagent_idを含めるため共通preflightへ実効Agent identityを渡す。
+- deliberation/registry.py
+  Manager直呼び出しもpreflightをreservationとSafe Mode invocation markより前に移動。
+- cli_app/diagnostics.py
+  --doctorで31 Agentを監査し、Unknown/Failedが1件でもあればBLOCKED。
+- discord_app/message_formatter.py
+  Completed/Current/Pendingを保存済みProducerWorkflowStateから分離表示。
+- cli_app/commands.py
+  Windows code pageに依存せず日本語CLI出力をUTF-8へ統一。
+- README/config/providers/discord文書と回帰テストを更新。
+
+8. State / PMP Impact
+
+Cycle 028の実装・Mock・Fault・Doctorでは既存workflow JSON、message history、
+checkpoint、result、outboxを編集していない。
+
+Failure workflow 6c18e466-fce5-403b-bb68-6432b735dd9d:
+- status FAILEDを維持
+- SHA256はFailure Capture時と同一
+- PMP message 2件、completed_agents 0を維持
+
+既存完走workflow 15f3f5c5-4167-447d-b255-069fc7f5beb2:
+- Producer COMPLETED
+- Researcher COMPLETED_REVISION
+- Deliberation COMPLETED
+- Conclusion COMPLETED
+- Playwright COMPLETED
+を維持した。
+
+9. Reservation Impact
+
+新Preflightはreservation生成より前に動く。
+非互換、model不存在、metadata UNKNOWNの場合:
+- paid chat completion POST: 0
+- provider reservation: 0
+- Deliberation Managerのin-memory invocation mark: 0
+
+既存Failure workflowのproducer.topic_scout reservationはFailure Captureとして保持し、
+削除・初期化・再利用していない。
+
+10. Regression Tests
+
+最終Validation Ladder:
+- Static/Compile: PASS（staging active surface）
+- Targeted OpenRouter/Doctor/Discord/Safe Mode: PASS
+- Full discovery: 429 tests PASS
+- Integration: PASS
+- 31 RD STRICT: PASS
+- 22 Structured Output root recursive audit: PASS
+- Mock 5-layer E2E: PASS
+- Delivery artifacts 6件: PASS
+- Windows cp932強制下の --help UTF-8: PASS
+- production source/config/doc/test対象差分: staging検証済み内容と一致
+  （既存production追加テストを保持）
+
+production直下でのcompile/testは__pycache__およびRD access logへのsandbox書込みが
+拒否されたため、workflow/storageへ権限拡張して続行しなかった。
+同一hashのstagingと隔離data directoryで検証した。
+
+11. Fault Injection
+
+A. Endpointなし/必要parameterなし
+- INCOMPATIBLE
+- paid POST 0
+- reservation 0
+
+B. model slug不存在
+- MODEL_NOT_FOUND
+- paid POST 0
+
+C. Structured Output非対応
+- REQUIRED_PARAMETERS_UNSUPPORTED
+- strict/json_schema/require_parametersを弱めず停止
+
+D. environment override
+- Settingsのeffective modelとしてDoctor/Providerへ反映
+
+E. metadata取得不能
+- UNKNOWN
+- PASS扱いしない
+- Real workflow開始禁止
+
+F. alias
+- alias_targetを実体modelへ解決して実体Endpointを検査
+
+G. Discord表示
+- completed_agents=[]はCompleted: (none)
+- 未完了AgentをPendingへ表示
+
+H. Deliberation Manager
+- 最初のmetadata障害後もreservation/invocation markなし
+- capability回復後の正規再判定を重複扱いしない
+
+12. Doctor Result
+
+productionの実効.envと、productionからread-onlyで複製した2件のverified bindingを使用し、
+隔離PRDCP_DATA_DIRでDoctorを実行した。
+
+結果:
+- provider=openrouter
+- demo_safe_mode=true
+- API key configured（値は非表示）
+- OpenRouter model IDs 31/31 configured
+- Compatible 22/31
+- Unknown 0
+- Failed 9
+- Result BLOCKED
+
+最初のsandbox内Doctorはnetwork metadata取得が遮断され全31 UNKNOWNになった。
+これはfail closedが正しく動いたFault結果である。
+承認済みnetwork executionで再実行し、上記22/9の確定結果を取得した。
+
+13. Mock E2E Result
+
+Producer -> Researcher -> Deliberation -> Conclusion -> Playwright:
+- 全Layer完了
+- 6 delivery artifacts生成
+- Schema/PMP/Checkpoint/Reservation/Outbox回帰なし
+- Real API 0
+
+14. Real API Calls / Cost
+
+Cycle 028 paid chat completion calls: 0
+Automatic retry: 0
+Duplicate provider call: 0
+Estimated generation cost: $0
+
+OpenRouter公開Model/Endpoint metadata GETのみ実行した。
+chat/completionsは呼び出していない。
+
+15. Remaining Risks / Stop Decision
+
+残る9 Agentは情報探索を担うPerplexity系である。
+これらをGemini等へmodel slugだけ置換すると、strict output 404は消えても、
+検索、最新情報、出典取得というResearcherの意味を失う可能性がある。
+これは局所404修正ではなくProvider search capabilityの設計変更である。
+
+よって添付計画のReal API再開条件
+Doctor READY / Failed 0 / Unknown 0
+を満たさないためFresh Real Discord E2Eは開始していない。
+
+次Cycleではユーザー判断のもと、次のいずれかを設計する必要がある。
+- strict Structured Output対応model + 明示OpenRouter web-search pluginへ移行する
+- strict Structured Outputと必要な検索能力を同時に持つ別model/Endpointを選定する
+
+9 Agentを一括で無根拠にGeminiへ置換することは禁止する。
+
+16. Plan Compliance Review
+
+参照:
+- Cycle 028 attachment SHA256:
+  FD25AF7C0F21229461FE8D58649FB0E3FB11C4B2C940641942E5D5494F8B3429
+- E2E Plan v2 SHA256:
+  BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+Self Audit:
+- Failure Capture: YES
+- Root Cause: YES
+- 症状だけでなく31 Agent sibling audit: YES
+- 他Layer影響確認: YES
+- State/PMP/Schema/Checkpoint/Reservation/Outbox確認: YES
+- Regression Test追加: YES
+- Fault/Recovery確認: YES
+- Debug Report生成: YES
+- 設計上の意味を説明: YES
+- 不必要なProvider生成呼び出しなし: YES
+- Existing workflows/storage保護: YES
+- Doctor READY前のReal E2E禁止: YES
+- Real Fresh E2E completion: NO（Failed 9の停止条件により意図的に未実施）
+
+17. Design Meaning
+
+この修正により、OpenRouterの404は「課金済み可能性のある実行後Failure」ではなく、
+可能な限り「公開metadataで予約前に判定できる設定Failure」へ移動した。
+strict schemaを弱めて通すのではなく、model選択とProvider能力の不整合を明示し、
+State、PMP、Reservationを汚さず停止する。
+
+またDiscord表示はWorkflow定義ではなく保存済みStateをsource of truthとした。
+障害時に未実行Agentを完了済みと誤認するControl Plane上の不整合を除去した。
+
+18. Resume Condition
+
+Cycle 028はPARTIAL PASS。
+実装・Topic Scout移行・Preflight・Doctor・Discord修正・全Mock回帰は完了した。
+Fresh Real E2Eを再開できる条件は、残る9 Agentの検索能力を保持するmodel/tool設計を決定し、
+Doctor Compatible 31/31、Unknown 0、Failed 0へ到達することである。
+

@@ -1,0 +1,134 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 002
+Date: 2026-08-16
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher
+Agent: researcher.quality_reviewer
+Error Class: SCHEMA / VALIDATION / RECOVERY
+
+1. 発生した症状
+
+Cycle 001の修正後、OpenRouterはExternal Revision #1のQuality Reviewを返したが、ResearchQualityReviewOutputのfindings.2、findings.3、findings.4がLocal Pydantic validationで拒否された。3件ともtarget_agent_idが専門Researcherではないという同じ理由だった。WorkflowはFAILED / QUALITY_REVIEWINGで停止した。
+
+2. 発生地点
+
+OpenRouterからstrict Structured Output JSONを受信した後、共通PayloadValidatorがResearchQualityReviewOutputをPydantic modelへ変換する境界。
+
+3. 再現条件
+
+Quality Reviewerが、追加調査ではなくResearch Reportの統合・表現・追跡構造に関するfindingの責任先としてresearcher.managerを返す。旧ResearchReviewFindingはtarget_agent_idを専門Researcher 7種だけに制限していたため拒否する。
+
+4. 根本原因
+
+Findingの「修正責任先」とrevision_targetsの「Providerで再実行する専門Agent」を同じAgent集合として扱っていた。Researcher Managerが担うReport統合修正は正当なfinding targetだが、専門Researcherの再調査先ではない。この二つの意味をSchemaが区別していなかった。
+
+5. なぜこの問題が発生したか
+
+RDは不足や不備をResearch Managerへ返す責務を定義していた一方、Pydanticはfinding targetを専門Researcherだけに限定していた。Promptもmanager-level findingとspecialist revision targetの区別を明示していなかったため、実モデルの自然な応答とruntime contractが不一致になった。
+
+6. なぜ既存テストで発見できなかったか
+
+Mock Quality Reviewerのapproved_with_conditions findingはtarget_agent_id=Noneだけを返し、manager-level findingを生成しなかった。revision_requiredテストは専門Researcher targetだけを確認しており、「findingはManager、revision_targetsは空または専門Agent」という組合せがなかった。また、Provider出力がLocal validationで拒否された際の原文保存テストがなかった。
+
+7. 修正計画
+
+ResearchReviewFindingのtargetをResearcher Manager + 7専門Researcherの明示Enumにする。revision_targetsは7専門Researcherだけの別Enumに維持する。PromptとRDへ責務差を明記する。共通PayloadValidationErrorへinvalid_payloadとvalidation_errorsを保存し、将来のSchema修正後はProviderを再呼出しせず保存原文を再検証する。今回の旧errorには原文がないため、同じcycle内で1回だけ使える決定論的contract_v2 taskを導入する。
+
+8. 実際の修正内容
+
+- ResearchFindingTargetにresearcher.managerと7専門Researcherを定義した。
+- ResearchRevisionTargetは7専門Researcherだけに限定した。
+- PromptとRDにfinding targetとrevision targetの違いを明記した。
+- PayloadValidatorがPydantic拒否時にProvider原文と構造化validation errorsを保持するようにした。
+- 共通Agent error PMPへinvalid_payloadを保存するようにした。
+- Researcher resumeが保存済みinvalid_payloadを現行Schemaで再検証し、有効ならProvider call 0でReviewを復元するようにした。
+- 原文が保存されていない旧Failureだけ、research_quality_review_external_1_contract_v2を使用する。contract_v2 requestが既に存在する場合は同じIDを再利用し、Safe Modeを迂回し続けることはできない。
+
+9. 変更したファイル
+
+researcher/schemas/review.py
+researcher/manager.py
+researcher/prompts/quality_reviewer.md
+role_definitions/researcher/quality_reviewer.json
+common/models/errors.py
+common/validation/payload_validator.py
+common/agents/base.py
+tests/unit/test_researcher_payloads.py
+tests/unit/test_researcher_manager.py
+tests/unit/test_agent_retry_policy.py
+debug_reports/002_research_quality_finding_target_contract.txt
+
+10. 修正の設計上の意味
+
+品質指摘の責任所在と、高コストなProvider再実行routingを別の型に分離した。Managerが内部で修正できる問題を専門Agent再調査へ誤送信せず、同時にQuality Reviewerは責任先を失わず表現できる。またLocal Schema rejectionを破棄せず永続化することで、Schema修正を「再生成」ではなく「保存済み応答の再検証」で回復できる共通基盤になった。
+
+11. 他Layerへの影響
+
+invalid_payload永続化は全StructuredAgentへ共通適用される。Producer / Deliberation / Conclusion / Playwrightでも、Providerが返したJSONをLocal Pydanticが拒否した場合、以後のDebug Cycleで原文を調査・再検証できる。各Layerのfinding責任先とrevision execution先を監査し、今回と同じ直接的混同はResearcher固有と確認した。共通PMP envelopeの既存必須フィールドやSafe Mode予約規則は変更していない。
+
+12. 同系統Failure Mode監査結果
+
+- Researcher: finding targetとrevision targetを別Enumへ分離。
+- Deliberation: QualityFindingのaffected agentsとrevision_targets/upstream requestsは既に別フィールド。
+- Conclusion: finding対象とrevision_targetsは別構造。
+- Producer:単一revision_targetで、Manager内部修正findingの配列構造はない。
+- Playwright: deterministic gateのrepair targetとAgent実行順はManagerが分離管理。
+- 全Layer共通: Local validation rejection時のProvider原文消失をcommon層で修正。
+
+13. Regression Test
+
+Targeted 30件 PASS。
+Researcher Manager / strict Structured Output / OpenRouter provider関連50件 PASS。
+Compile PASS。
+RD STRICT 31件 PASS、Doctor READY。
+Manager finding許可、Manager revision target拒否、JSON Schema enum露出を明示テスト。
+
+14. Recovery / Fault Test
+
+- 保存済みinvalid_payloadを現行Schemaで再検証しProvider call 0でCOMPLETED_REVISIONへ復旧。
+- invalid_payloadのない旧validation errorからcontract_v2を1回だけ生成し、external_revision_count=1のまま復旧。
+- 実workflowのFailure後コピーで、7/7再dispatchなし、37-source Report再利用、contract_v2だけをMock実行し、manager research_revision_result 1件、COMPLETED_REVISIONを確認。
+
+15. Provider Call数
+
+Real API Calls: 1（Failure CaptureとなったExternal #1 Review）
+修正検証の追加Real API Calls: 0
+Mock contract_v2 Calls: 1
+Researcher specialist redispatch: 0
+Reused Results: 14 ResearchResult、37-source Research Report
+Prevented Duplicate Calls: 保存済みinvalid_payload回復テストでQuality Reviewer 1回
+
+16. API Cost
+
+実測値はCLIから取得不能のためunknown。OpenRouter callは1回だけで、再試行は0。
+
+17. Existing Workflowへの影響
+
+CLI実行により本番workflowへExternal #1 Quality Review request、error message、research_quality_review_external_1 reservationが正規に追加された。specialist results、37-source Report、external_revision_count=1は保持されている。手動Storage編集、reservation削除、Outbox上書きは行っていない。
+
+18. Remaining Risk
+
+旧Failureはinvalid_payloadを保存していないため、実OpenRouterでcontract_v2を1回実行する必要がある。その結果がrevision_requiredの場合は、Safe Modeの仕様により自動specialist redispatch前で停止する。これはFailureではなく安全動作であり、次のOperator actionを状態から判断する。
+
+19. Result
+
+PASS
+
+Plan Compliance Review
+
+[YES] Root Causeまで特定した
+[YES] 局所パッチだけで終わっていない
+[YES] Sibling Failureを監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた

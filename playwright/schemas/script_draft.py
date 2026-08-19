@@ -78,6 +78,7 @@ class ScriptDraft(BaseModel):
 class ScriptWritingTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    task_id: str = Field(min_length=1)
     target_agent_id: str = Field(default="playwright.scriptwriter")
     production_context: ProductionContext
     narrative_blueprint: NarrativeBlueprint

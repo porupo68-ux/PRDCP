@@ -1,0 +1,15 @@
+{
+  "authorization_id": "eec31f84-be5a-407a-a4bf-5c915b432094",
+  "workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "provider_id": "openrouter",
+  "agent_id": "playwright.scriptwriter",
+  "original_task_id": "playwright.scriptwriter",
+  "retry_task_id": "playwright.scriptwriter_operator_retry_1",
+  "source_error_message_id": "54b0cac8-0aa4-4a88-9781-a02f0b657d1e",
+  "source_error_class": "RetryableAgentError",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-17T04:01:52.006114Z",
+  "consumed_at": "2026-08-17T04:01:52.149731Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\15f3f5c5-4167-447d-b255-069fc7f5beb2\\playwright.scriptwriter_operator_retry_1.json"
+}

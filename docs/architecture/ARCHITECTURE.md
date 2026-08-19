@@ -10,8 +10,18 @@ every layer at once.
 Producer -> Researcher -> Deliberation -> Conclusion -> Playwright
 ```
 
-Conclusion always stops at the human-selection gate. `--demo-e2e` is the only
-operator command that auto-selects the first mock candidate for testing.
+Researcher always stops at the Human Evidence Gate after its Quality Review.
+Only an explicit `ACCEPT`, `ACCEPT_WITH_LIMITATIONS`, or `REVISE` decision can
+advance the control plane. Conclusion separately stops at the human-selection
+gate. `--demo-e2e` may cross both gates only with explicit Mock fixtures.
+
+Human Evidence Governance separates three concepts. Quality Review classifies
+machine-observed findings; a Human Decision accepts, accepts with disclosed
+limitations, or requests revision; Provider authorization is a separate,
+audited permission. Human acceptance never converts an unresolved evidence gap
+into evidence or factual support, and cannot override schema, PMP, provenance,
+or other hard integrity failures. The decision and accepted gaps are preserved
+across every downstream handoff through Playwright.
 
 ## Standard layer shape
 

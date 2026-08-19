@@ -3,6 +3,8 @@ from .errors import (
     NonRetryableAgentError,
     PayloadValidationError,
     PMPValidationError,
+    ProviderCapabilityError,
+    ProviderResponseContractError,
     RetryableAgentError,
     WorkflowError,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "PayloadValidationError",
     "PMPMessage",
     "PMPValidationError",
+    "ProviderCapabilityError",
+    "ProviderResponseContractError",
     "RetryableAgentError",
     "WorkflowError",
     "WorkflowStatus",

@@ -1,0 +1,188 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 013
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation
+Agent: deliberation.manager / deliberation.quality_reviewer
+Failure Stage: deterministic_validation after final_integration
+Error Class: SCHEMA CONTRACT / TRACEABILITY / CHECKPOINT RECOVERY
+
+1. What happened
+
+Cycle 012's explicitly authorized one-time OpenRouter retry succeeded. The saved Primary Analyses, Initial Integration, and Counterargument were reused. OpenRouter produced one Final Integration and one Quality Review response without a Strict Structured Output or transport error. Demo Safe Mode then stopped before automatic internal revision, as designed.
+
+The deterministic validator correctly rejected the new Final Integration. Its traceability_index[0].counterargument_ids contained challenge_a. The saved Counterargument artifact proves that challenge_a is a Steelman Challenge ID. The three actual Counterargument IDs are counter_employment_impact_1, counter_polarization_1, and counter_policy_response_1.
+
+2. Root cause
+
+The code used one prefix family for two different concepts:
+
+- Steelman Challenge IDs, such as challenge_a
+- actionable Counterargument IDs, such as counter_employment_impact_1
+
+COUNTERARGUMENT_PREFIXES included challenge_. Therefore the Pydantic model and the OpenRouter-visible JSON Schema allowed challenge_a inside counterargument_ids. The deterministic validator used the persisted Counterargument artifact as the source of truth and rejected it later. The generation boundary and the cross-artifact validation boundary did not express the same contract.
+
+This was not an Evidence shortage and could not be fixed by Researcher Return. It was also not appropriate to consume the last normal Deliberation revision or rerun Initial Integration and Counterargument.
+
+3. Cycle 013 plan and v2 comparison
+
+Plan A: separate Challenge and Counterargument namespaces in every affected Structured Output model.
+v2 comparison: matches qf_002's typed traceability requirement and the strict-schema design. It does not weaken the deterministic validator.
+
+Plan B: preserve the meaning of the saved challenge_a reference by adding challenge_ids, rather than deleting it or relabeling it as a Counterargument.
+v2 comparison: matches traceability preservation and read-time compatibility rules.
+
+Plan C: permit compatibility repair only when an ID exactly matches a Steelman Challenge persisted in the same Counterargument checkpoint. Unknown IDs must not be guessed or moved.
+v2 comparison: matches fail-closed schema validation and avoids a destructive storage migration.
+
+Plan D: invalidate only downstream Deterministic Validation and Quality Review. Reuse Primary, Initial, Counterargument, and Final provider results. Give the corrected Quality Review a new deterministic logical task ID.
+v2 comparison: matches checkpoint recovery, persistent reservation, no duplicate provider call, and cost-control requirements.
+
+Plan E: Static -> targeted Unit/Fault -> related regression -> full Unit -> Integration -> exact read-only workflow clone -> deployment -> one localized Real continuation.
+v2 comparison: matches the E2E implementation plan's validation ladder.
+
+4. Implementation
+
+- Split CHALLENGE_PREFIXES from COUNTERARGUMENT_PREFIXES.
+- Added schema-visible item patterns for ChallengeId and CounterargumentId.
+- Added TraceabilityEntry.challenge_ids.
+- Applied typed Counterargument IDs to source_counterargument_ids, dispositions, and integration changes.
+- Kept old Counterargument payload compatibility only for the identifiable legacy challenge_id field shape; it is canonicalized to counter_legacy_* before validation. A new payload that explicitly puts challenge_* in counterargument_id is rejected.
+- Added cross-artifact checks for traceability Counterargument IDs, Challenge IDs, dispositions, and integration-change sources.
+- Added a saved-checkpoint-only adapter. It moves only exact persisted Steelman Challenge IDs from counterargument_ids to challenge_ids, records the entry and ID, and reports provider_call_count=0.
+- The adapter clears only Deterministic Validation, Quality Review, and the provisional Deliberation result. It preserves Final Integration content and ID except for the typed traceability bucket.
+- The replacement Quality Review uses delib_review_task_revision_1_recovery_1_traceability_contract_repair_1, so the prior reservation and PMP exchange remain immutable and auditable.
+- Manager RD was advanced to 1.0.4 with DM-P13. README documents the contract and recovery behavior.
+
+5. Same-family failure-mode audit
+
+- Nested and array object strictness remains covered by the 22-root recursive Structured Output suite.
+- Challenge IDs and Counterargument IDs now have different schema item patterns.
+- Counterargument result, required revisions, Final dispositions, integration changes, alternative explanations, evidence asymmetry, and traceability were checked for the same namespace leak.
+- Prefix-valid but artifact-unknown Challenge IDs are rejected by cross-artifact validation.
+- Unknown challenge_* values are not moved by the saved-checkpoint adapter.
+- Initial Integration, Counterargument, revision routing, Provider reservation, explicit retry authorization, saved Quality Review reuse, and Researcher Return suites remain passing.
+
+6. Regression / Fault / Recovery results
+
+- Compile: PASS
+- Cycle 013 targeted schema/recovery/fault: 5 PASS
+- Related Deliberation/Strict/Provider/RD suite: 135 PASS
+- Full Unit suite: 309 PASS (246.378s, isolated short data path)
+- Full Integration suite: 9 PASS (25.283s)
+- Role Definitions: 31 loaded in STRICT mode
+- Structured Output 22-root recursive audit: PASS within related suite
+- Doctor: READY with provider=mock and Safe Mode=true; no provider call
+- CLI help: --deliberation-recover and provider controls present
+
+Fault A: challenge_* in counterargument_ids is rejected by Pydantic and has an OpenRouter-visible pattern mismatch.
+Fault B: an unknown challenge_* in a saved Final is not guessed or moved.
+Fault C: a prefix-valid but artifact-unknown challenge_ids entry is rejected by Manager cross-artifact validation.
+Fault D: the exact saved workflow clone moves challenge_a losslessly, recomputes validation to passed=true, and calls only DeliberationQualityReviewOutput once.
+
+Exact read-only production workflow clone result:
+
+- status: COMPLETED
+- revision_count: 1 (unchanged)
+- provider calls: DeliberationQualityReviewOutput only
+- Primary calls: 0
+- Initial Integration calls: 0
+- Counterargument calls: 0
+- Final Integration calls: 0
+- deterministic validation: passed=true
+- counterargument_ids: the three persisted counter_* IDs
+- challenge_ids: challenge_a
+- compatibility adapter: saved_final_challenge_reference_segregation
+- review task: delib_review_task_revision_1_recovery_1_traceability_contract_repair_1
+
+7. State / PMP / Schema / Checkpoint / Reservation / Outbox impact
+
+State: no pre-deployment production mutation. On explicit Recovery, one compact audit record is appended and downstream checkpoint values are replaced through the normal repository save path.
+
+PMP: prior Quality Review request/response remain unchanged. A corrected-artifact request receives a distinct logical task and parent-linked PMP exchange.
+
+Schema: challenge_ids and counterargument_ids are distinct typed arrays. Strict additionalProperties/required recursion is unchanged and remains passing.
+
+Checkpoint: Primary 3, Initial, Counterargument, and the provider-produced Final are not rerun. Only the typed in-memory Final representation, Deterministic Validation, and Quality Review advance.
+
+Reservation: no reservation is deleted or overwritten. The corrected review gets one new task-specific reservation.
+
+Outbox: no outbox is changed during implementation or clone verification. A Conclusion handoff is written only if the corrected Real Quality Review approves the workflow.
+
+Production hashes before deployment/Real continuation:
+
+- state: F759AA4F6E002E2BBC71A5F42B895B0D8AF036F006BB3E064E6B788769BF8A2A
+- messages: 3838051D32CD44F26B0EF53C8B9282FC71EA9C4CA22462507E97C3FC35B8125B
+
+8. Provider calls and cost
+
+Cycle 013 implementation and validation Real calls: 0
+Mock calls: unbilled
+Automatic retries: 0
+Duplicate logical-task calls: 0
+API cost: $0 for Cycle 013 validation
+
+Cycle 012 explicit Real retry closure:
+
+- Counterargument: 0
+- Final Integration: 1
+- Quality Review: 1
+- automatic retries: 0
+- result: communication and schema success; legitimate deterministic traceability finding reached Safe Mode boundary
+- measured cost: not exposed by the CLI, therefore unknown
+
+9. Design meaning
+
+An identifier's prefix is part of its type, but a prefix check alone is not referential integrity. PRDCP now enforces both layers: the JSON Schema prevents category mixing at generation time, and deterministic cross-artifact validation proves that the referenced object actually exists. Recovery is allowed to repair old data only when the persisted artifacts make the transformation unambiguous and meaning-preserving.
+
+10. Debug Cycle self-audit
+
+[YES] Root cause identified at the generation/validation contract mismatch.
+[YES] No local symptom-only deletion or relabeling.
+[YES] Same-family ID fields and all 22 Structured Output roots audited.
+[YES] Other layers and Researcher Return behavior covered by full regression.
+[YES] State, PMP, Schema, Checkpoint, Reservation, and Outbox impacts checked.
+[YES] Regression tests added.
+[YES] Mock Recovery and three Fault conditions checked.
+[YES] Debug Report generated.
+[YES] Design meaning explained.
+[YES] No unnecessary Real Provider call.
+[YES] Existing workflow/storage not mutated during implementation and validation.
+[YES] E2E plan re-read after the Debug Cycle.
+
+11. Result / next action
+
+IMPLEMENTATION / MOCK / FAULT / REGRESSION / READ-ONLY RECOVERY PASS
+
+Deploy only the Cycle 013 code, RD, README, tests, and reports. Verify production hashes are unchanged by deployment. Then run exactly one localized Real command from the existing checkpoint:
+
+py main.py --deliberation-recover 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode
+
+Expected Real provider calls: Quality Reviewer 1; every high-cost upstream Deliberation stage 0. A new external/provider failure starts a new Debug Cycle. A legitimate revision decision may stop at Safe Mode and must not be treated as transport failure.
+
+Cycle 013 Real Continuation Addendum (2026-08-17)
+
+The localized command was executed exactly once with provider=openrouter and Safe Mode. It completed successfully.
+
+- Primary Analysis calls: 0
+- Initial Integration calls: 0
+- Counterargument calls: 0
+- Final Integration calls: 0
+- Deliberation Quality Reviewer calls: 1
+- automatic retries: 0
+- duplicate calls: 0
+- deterministic validation: passed=true, findings=0
+- Quality Review: approved_with_conditions
+- Deliberation: COMPLETED
+- Conclusion handoff: persisted
+- new reservation: delib_review_task_revision_1_recovery_1_traceability_contract_repair_1.json
+- revision_count: 1 (unchanged)
+- measured cost: not exposed by the CLI, therefore unknown
+
+The trace now retains challenge_a in challenge_ids and only the three persisted counter_* values in counterargument_ids. The adapter audit records provider_call_count=0 and the invalidated prior review ID. Production state and messages changed only through the authorized Recovery command:
+
+- state after Real continuation: F0B8A84868E656EE7172807424512EC265CC0BE612F2D87A66E52AFC7A72DD7D
+- messages after Real continuation: 00840360578040317B1F2580874560F3D166EC1A3EDCA2CACC1686E9C90D8CDB
+
+FINAL CYCLE 013 RESULT: PASS

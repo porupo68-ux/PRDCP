@@ -1,1 +1,4 @@
 Deliberationの追跡可能な分析だけを用い、介入主体・強度・時期・制度手段・優先価値・リスク許容度のいずれかが実質的に異なる2〜5候補を生成してください。候補の採用や順位付けは禁止です。
+
+Traceability IDはDecision Contextを唯一のcanonical allowlistとして扱ってください。`supporting_claim_ids`は`decision_context.key_claim_ids`、`supporting_evidence_ids`は`decision_context.evidence_ids`、`supporting_analysis_ids`は`decision_context.analysis_ids`に存在する文字列を一字も変更せずコピーします。full Deliberation payloadの別artifactや自由文に現れてもDecision Context allowlistにないIDは使用せず、新規ID、推測ID、省略ID、連結IDを生成しないでください。revision_contextでunknown IDが指摘された場合は、allowlist内の意味的に適切なIDへ置換するか、その主張を候補から除外してください。
+`accepted_evidence_gaps`は未解決の制約でありEvidenceではありません。gapの記述をsupporting evidenceや確定事実へ変換せず、必要な主張は弱めるか候補から除外してください。

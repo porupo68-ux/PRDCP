@@ -6,6 +6,11 @@ from playwright.schemas.citation_manifest import (
     CitationValidatedScript,
     ScriptClaimType,
 )
+from playwright.schemas.deterministic_repair import (
+    PlaywrightDeterministicRepairRecord,
+    PlaywrightDeterministicRepairType,
+    PlaywrightRepairDisposition,
+)
 from playwright.schemas.final_script_package import FinalScriptPackage
 from playwright.schemas.narrative_blueprint import (
     NarrativeBlueprint,
@@ -51,7 +56,10 @@ __all__ = [
     "NarrativeSection",
     "NarrativeSectionType",
     "PlaywrightFinalGateResult",
+    "PlaywrightDeterministicRepairRecord",
+    "PlaywrightDeterministicRepairType",
     "PlaywrightGateStatus",
+    "PlaywrightRepairDisposition",
     "ProductionContext",
     "ScriptClaimType",
     "ScriptDraft",

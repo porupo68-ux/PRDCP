@@ -2,7 +2,7 @@
   "role_definition": {
     "role_definition_id": "prdc-playwright-manager-rd",
     "role_definition_name": "Playwright Manager Role Definition",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.4",
     "status": "stable",
     "language": "ja",
     "layer_id": "playwright",
@@ -46,7 +46,8 @@
         "上流差し戻し判断",
         "最終成果物の状態確定",
         "PMPによるFinal Script Packageの出力",
-        "実行履歴、判断履歴、修正履歴の保持"
+        "実行履歴、判断履歴、修正履歴の保持",
+        "allowlist対象の決定論的artifact修復と監査記録の保持"
       ],
       "secondary_functions": [
         "処理コストと修正回数の監視",
@@ -136,7 +137,9 @@
         "修正による他成果物への影響範囲を判定する",
         "修正後に依存成果物の再生成が必要か判定する",
         "修正履歴をrevision_historyへ記録する",
-        "最大修正回数を超えた場合は自動継続せずblockedとして報告する"
+        "最大修正回数を超えた場合は自動継続せずblockedとして報告する",
+        "LLM Revision Budgetとzero-provider deterministic repair budgetを分離する",
+        "deterministic repairはallowlist、内容不変、冪等、Fail Closedの条件をすべて満たす場合だけ実行する"
       ],
       "upstream_escalation": [
         "Conclusion Package自体の不足または矛盾を検出する",
@@ -201,6 +204,10 @@
           "condition": "修正の影響範囲が局所的であり、上流成果物を無効化しない場合"
         },
         {
+          "decision": "保存済みcanonical traceabilityから欠落したCitation Mappingを決定論的に再構成する",
+          "condition": "allowlist対象であり、既存Paragraph、Evidence、Source locator、保存済み意味分類が一意に一致し、Provider呼び出し、新Evidence、内容変更を必要としない場合"
+        },
+        {
           "decision": "非阻害的問題を残したまま完成させる",
           "condition": "Quality Reviewerがapproved_with_conditionsと判定し、問題が正確性、結論整合性、証拠追跡性に影響しない場合"
         },
@@ -231,7 +238,7 @@
         "不確実性の強度が定義されていない場合",
         "禁止解釈と台本要件が競合する場合",
         "ユーザー指定条件とConclusionの意味が競合する場合",
-        "最大修正回数を超過した場合",
+        "最大修正回数を超過し、allowlist対象のdeterministic artifact repairでも解消できない場合",
         "公開上重大な倫理的または表現上の問題が解消できない場合"
       ]
     },
@@ -543,6 +550,7 @@
           "execution_summary": {
             "agents_executed": [],
             "revision_count": 0,
+            "deterministic_repair_count": 0,
             "warnings": [],
             "errors": []
           }
@@ -577,6 +585,10 @@
         {
           "artifact_type": "revision_history",
           "description": "修正要求、対象、理由、結果を記録する。"
+        },
+        {
+          "artifact_type": "playwright_deterministic_repair",
+          "description": "allowlist対象のlocal artifact修復についてfinding、traceability、前後hash、zero-provider実績を記録する。"
         },
         {
           "artifact_type": "final_script_package",
@@ -1321,6 +1333,9 @@
         "revision_requested",
         "revision_completed",
         "upstream_revision_requested",
+        "deterministic_repair_started",
+        "deterministic_repair_completed",
+        "deterministic_repair_rejected",
         "final_validation_started",
         "final_script_delivered"
       ],
@@ -1330,6 +1345,7 @@
         "再試行判定",
         "修正担当決定",
         "上流差し戻し判定",
+        "deterministic repair適格性判定",
         "非阻害的issue受容判定",
         "最終完了判定"
       ],
@@ -1339,6 +1355,7 @@
         "parallel_task_count",
         "automatic_retry_count",
         "internal_revision_count",
+        "deterministic_repair_count",
         "upstream_revision_count",
         "quality_review_reject_count",
         "artifact_validation_failure_count",
@@ -1640,6 +1657,34 @@
       "technical_retry_limit": 2,
       "revision_limit": 2,
       "parallel_execution_allowed": false,
+      "checkpoint_recovery": {
+        "logical_task_identity": "stage + upstream_revision_count + revision_count",
+        "reuse_completed_stages": true,
+        "restore_validated_saved_result_before_redispatch": true,
+        "unanswered_request_redispatch_allowed": false,
+        "provider_retry_requires_explicit_operator_authorization": true,
+        "operator_retry_limit_per_logical_task": 1,
+        "provider_capability_failure_requires_distinct_model": true,
+        "provider_capability_repair_limit_per_logical_task": 1,
+        "verified_provider_agent_output_schema_binding_reuse": true,
+        "same_model_capability_retry_allowed": false,
+        "safe_mode_automatic_internal_revision_allowed": false,
+        "safe_mode_explicit_revision_command": "--playwright-revise",
+        "explicit_revision_cycles_per_command": 1,
+        "persist_revision_plan_before_provider_call": true,
+        "legacy_agent_id_reservation_read_compatibility": true,
+        "resume_boundary": "new_conclusion_handoff_only",
+        "recover_boundary": "failed_checkpoint_or_allowlisted_blocked_local_artifact",
+        "deterministic_repair_allowlist": [
+          "CITATION_MAPPING_MISSING"
+        ],
+        "deterministic_repair_limit": 1,
+        "deterministic_repair_consumes_revision_limit": false,
+        "deterministic_repair_provider_calls_allowed": false,
+        "deterministic_repair_retrieval_calls_allowed": false,
+        "deterministic_repair_requires_content_immutability": true,
+        "deterministic_repair_requires_idempotency": true
+      },
       "allowed_tools": [],
       "prohibited_tools": [
         "web_search",

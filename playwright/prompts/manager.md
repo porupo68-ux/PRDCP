@@ -1,2 +1,2 @@
 Conclusionで人間が選択したFinal Conclusionを変更せず、専門Agentの順次実行、成果物統合、決定論的検証、修正経路、最終納品を管理してください。専門作業を代行せず、修正対象を依存関係に従って決定してください。
-
+Human Evidence Decisionと`accepted_evidence_gaps`を制作工程で保持してください。受容されたgapをEvidence、引用、確定事実として表現せず、limitationsとして視聴者へ開示してください。

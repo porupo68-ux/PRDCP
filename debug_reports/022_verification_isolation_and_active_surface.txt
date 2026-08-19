@@ -1,0 +1,92 @@
+PRDCP Debug Report
+
+ID: 022
+Date: 2026-08-17
+Workflow: validation infrastructure（production workflow変更なし）
+Layer: Verification / Test Harness
+Error Class: WINDOWS PATH / TEST ISOLATION / RESERVATION
+
+1. 何が起きたか
+
+Cycle 021の全検証で`scripts/verify.py`を実行したところ、最初は`compileall .`がarchive配下の深い旧Prototypeを
+走査し、Windows WinError 206（パス長超過）で停止した。active sourceの構文エラーではなかった。
+
+対象をactive sourceへ絞った後、全テストの初期部分で複数Layerが既存Reservationと衝突した。verify.pyは
+Mock用の隔離PRDCP_DATA_DIRをDoctor/CLI E2Eにしか渡さず、unittest processには渡していなかった。
+
+2. なぜ起きたか
+
+検証対象の境界がrepository root全体になっており、保守対象外のarchiveとstorageを含めていた。また検証の
+後半だけを一時storageへ隔離し、単体・統合テストは親processのdata directory設定を継承していた。
+Reservationの永続・重複防止機構は正常に働いたが、検証側が過去の論理taskと同じ領域を再利用した。
+
+3. 影響範囲 / 同系統Failure Mode
+
+- archive: active codeでないためcompile対象外にすべき。
+- storage: 実行JSONでありPython compile対象外、かつ検証から分離すべき。
+- rootの一時debug scripts: 保守対象でないためcompile対象外。
+- unit/integration: Mockでもpersistent Reservationを使うため必ず隔離data directoryが必要。
+- Doctor/Mock E2E: unit/integrationと同じ領域を使うと納品directory件数が混ざるため別領域が必要。
+- CI/Linux: パス長症状が出なくてもarchive誤走査とstorage非隔離は同じ設計欠陥である。
+
+4. どう直したか
+
+- verify.pyへmaintained runtime/test surfaceの明示一覧`ACTIVE_PYTHON_TARGETS`を追加した。
+- compileallはmain/runtimeと現行package、scripts、testsだけを対象にした。
+- archive、storage、作業用一時scriptは対象外にした。
+- `isolated_environment`を追加し、Mock provider、専用PRDCP_DATA_DIR、空Discord tokenを一元設定した。
+- unit/integration用とDoctor/Mock E2E用に別々のTemporaryDirectoryを割り当てた。
+- 検証対象一覧と隔離環境を固定する回帰テストを2件追加した。
+- 既存Reservationやproduction storageの削除・初期化は行っていない。
+
+5. 設計上の意味
+
+検証を「repositoryに存在する全ファイル」ではなく「現在保守する実行surface」へ限定し、実行状態もテストrunごとに
+隔離した。これにより安全機構であるReservation重複防止を無効化せず、その機構を本番と同じ条件で検証できる。
+過去データを消してテストを通すのではなく、テストidentityの保存境界を分離する修正である。
+
+6. Regression / Fault結果
+
+- active compile target test: PASS。
+- Mock isolated environment test: PASS。
+- 以前失敗した代表Integration testを新規隔離領域で再実行: PASS。
+- 以前失敗した代表Deliberation normal-flow testを新規隔離領域で再実行: PASS。
+- verify.py全体再実行: PASS。
+- Full Unit: 369 tests PASS。Full discovery: 389 tests PASS。
+- Doctor: READY（fail=0）。
+- 5-layer Mock E2E: Producer → Researcher → Deliberation → Conclusion → selection → Playwright PASS。
+- 6 delivery artifacts: exact set PASS。
+
+7. Provider Call数 / Cost
+
+- OpenRouter Real calls: 0
+- Mock calls: test suiteおよび一回のMock E2Eのみ
+- automatic Real retry: 0
+- API cost: $0
+
+8. Storage影響
+
+production workflow/storageへのwrite 0。隔離領域は検証用TemporaryDirectoryのみで、既存workflow、messages、
+results、checkpoint、reservation、outboxには触れていない。
+
+9. Result
+
+PASS。検証基盤の2つのFailure Modeを修正し、Cycle 021の全検証を最後まで完走した。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所的な症状だけを修正していない
+[YES] 同系統Failure Modeを調査した
+[YES] 他Layerのテストstorage境界を確認した
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outboxへの非影響を確認した
+[YES] Regression Testを追加した
+[YES] Fault条件を再現し修正後に再検証した
+[YES] Debug Reportを生成した
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを行っていない
+
+NO項目なし。検証済みのCycle 021 production差分反映へ戻る。

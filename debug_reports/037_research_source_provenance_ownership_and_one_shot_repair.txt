@@ -1,0 +1,333 @@
+PRDCP v2 Debug Report
+Cycle: 037
+Title: Research Source Provenance Ownership and One-Shot Repair
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: DEPLOYED / FAULT / FULL REGRESSION / MOCK E2E / PRODUCTION REAL RECOVERY SAFE-MODE STOP
+
+1. What happened
+
+The freshly authorized Cycle 036 continuation invoked exactly one Gemini Structured
+Reasoning task and stopped without retry on:
+
+OUTPUT_CONTRACT_ERROR: ungrounded source identity metadata for
+source_008333aebcd976549e1a618a: 内閣官房知的財産戦略推進事務局
+
+The consumed task is:
+
+task_1abf9d163f0f4c20980e4221ca960e1e_runtime_identity_repair_1
+
+The correlated ERROR PMP is 5a399b35-a4db-4397-894a-c6dd579d6d09 and its parent request
+is b54d3c45-1488-456f-8636-b4aa8d19dfae. Authorization
+09f7078a-8816-4b0e-83d3-a2318f51c4fa is CONSUMED and the independent Provider
+reservation is durable. The runtime model was google/gemini-3.7-flash.
+
+The command stopped immediately. Retrieval, the other eight Researcher tasks and Quality
+Review were not called.
+
+2. Root cause
+
+Cycle 036 removed the redundant source_name and author_or_organization fields from the
+Provider schema, but their value still came from the Provider-generated typed identity,
+GovernmentMetadata.organization. Gemini merged the official cas.go.jp publisher identity
+with a document organization into one new string. That string does not occur in the saved
+title, URL or PDF text and is not an official-domain alias, so the deterministic validator
+correctly rejected it.
+
+The remaining design error was ownership. Source identity is provenance. The saved
+Retrieval Context, not the reasoning model, owns provenance. Hydrating two aliases from a
+third generated spelling reduced duplication but did not eliminate generative ownership.
+
+The same boundary existed in all seven Researcher types: expert_name/affiliation,
+journal_name, organization/country, media_name, platform, politician_name/party/position
+and organization_name could still be generated even though Retrieval did not contain
+separate authoritative provenance columns.
+
+3. Why Mock and Doctor did not detect it
+
+Cycle 036 Mock fixtures generated one deliberately grounded primary identity and then
+verified alias hydration. They did not inject a Provider-generated concatenation into the
+remaining primary field. Doctor checks configuration, RD and model capabilities; it
+cannot prove ownership of semantic fields inside an otherwise valid schema.
+
+Cycle 037 adds schema-level assertions and hydration Fault Injection for all seven source
+types, including a cross-category case where an Academic source is hosted on
+copyright.gov. Production-clone Fault Injection initially found that a government-friendly
+domain label was being applied to this Academic source. The repair now limits friendly
+official labels to GOVERNMENT; other categories use the exact saved hostname.
+
+4. Repair design
+
+All Provider-bound ResearchResult schemas now remove Retrieval-owned top-level fields:
+
+* title, source_name, URL and author_or_organization;
+* published_at, retrieved_at and relevant_excerpt.
+
+They also remove type-specific provenance fields:
+
+* EXPERT: expert_name, affiliation;
+* ACADEMIC: journal_name;
+* GOVERNMENT: organization, country;
+* NEWS: media_name;
+* PUBLIC_OPINION: platform;
+* POLITICIAN: politician_name, party, position;
+* INDUSTRY: organization_name.
+
+The Provider still selects a saved source_id and produces analytical fields. Before
+Pydantic and local contract validation, the shared Researcher adapter restores immutable
+fields and provenance from the selected saved source.
+
+GOVERNMENT sources may receive a friendly organization label only from a closed official
+hostname mapping. Other categories use the exact normalized hostname, which is directly
+present in the immutable URL. Country is derived only from a closed country-code domain
+mapping. EXPERT and POLITICIAN person/affiliation values are None when the saved Context
+cannot establish them without inference. Existing persisted strings remain readable;
+existing workflow JSON is not migrated or overwritten.
+
+The post-hydration validator remains active. Tampering a hydrated organization or country
+to an ungrounded value is still rejected. The repair therefore removes hallucination
+opportunity without weakening evidence grounding.
+
+5. Recovery identity and billing safety
+
+A new explicit command is provided:
+
+py main.py --researcher-runtime-provenance-repair WORKFLOW_ID --provider openrouter --safe-mode
+
+It creates one task identity:
+
+<original_task_id>_runtime_provenance_repair_1
+
+Authorization requires the consumed Cycle 036 identity authorization, its exact
+reservation/model, the correlated NonRetryableAgentError, a failed source_id present in
+the unchanged saved Context, and the same Retrieval ID and SHA-256. The authorization is
+consumed only after its new reservation is durable and before the Provider call. Failure
+cannot reuse that identity.
+
+Success returns to the existing Cycle 032 recovery state machine, which executes only the
+eight untouched reasoning tasks, integration and one Quality Review. Retrieval is not
+run again.
+
+6. Regression and Fault Injection
+
+PASS  All seven strict schemas omit type-specific provenance fields
+PASS  Provider-generated identity spellings are overwritten before validation
+PASS  GOVERNMENT official labels are source-type scoped
+PASS  Academic copyright.gov provenance remains the exact hostname
+PASS  Unverified expert/politician identity is represented as None, not fabricated text
+PASS  Post-hydration tampering remains rejected
+PASS  Changed Retrieval hash blocks before reservation or Provider call
+PASS  Consumed provenance repair cannot invoke the Provider twice
+PASS  Existing Cycle 034/035/036 recovery boundaries remain intact
+PASS  CLI exposes the explicit provenance-repair operation
+
+Verification results:
+
+* targeted and Fault suite: 110/110 PASS
+* maintained runtime compilation: PASS
+* full unit/integration suite: 518/518 PASS
+* 31 Role Definitions loaded in STRICT mode: PASS
+* 22 OpenRouter Structured Output roots recursively validated: PASS
+* Doctor mock readiness: READY, fail=0
+* five-layer Mock CLI E2E through Playwright: COMPLETED
+
+The first Mock E2E verification location exceeded the effective Windows path-length
+boundary and failed before creating its first Mock reservation. The root exception and
+zero Provider-call boundary were confirmed. The same unchanged code completed from a
+short explicit PRDCP_DATA_DIR, which is the supported Windows verification layout. This
+was a test-location failure, not a Provider, schema, PMP or state-machine failure.
+
+7. Exact production-clone recovery
+
+The production workflow was copied to isolated temporary storage and verified before and
+after the full suite:
+
+* initial Researcher status: FAILED
+* final Researcher status: COMPLETED
+* Retrieval calls: 0
+* Gemini Structured Reasoning calls: 9
+* Quality Review calls: 1
+* runtime-provenance repair authorizations: 1
+* total runtime-model repair authorizations: 9
+* duplicate logical Provider calls: 0
+* production source state/messages changed: NO
+
+8. Production boundary after the Cycle 036 Real attempt
+
+* state SHA-256: B5949573767A9BCD75DCA3D636ACE680ACFEA7D897D76BD14F73E1D16AEBDB55
+* messages SHA-256: 45AEDC43FD2193A8826D771DCF1CEDE63ED7E8C79DA6040818E4AAD2CD7F6E6B
+* outbox SHA-256: C3E3ACBBD813327B33A8D8327695CC24415BDFE820029BC27EBC194F654B6CCE
+* Researcher PMP messages: 27
+* saved Retrieval Context files: 10
+* saved Retrieval reservations: 10
+* Provider reservations: 20
+* runtime-model repair authorizations: 1
+* runtime-output repair authorizations: 1
+* runtime-adapter repair authorizations: 1
+* runtime-identity repair authorizations: 1
+* runtime-provenance repair authorizations: 0
+* runtime model snapshots: 4
+
+No existing production JSON was deleted, reset or migrated.
+
+9. Provider call and cost accounting
+
+Real call that exposed Cycle 037:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+* automatic retries: 0
+
+Cycle 037 implementation and verification:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 0
+* Quality Review: 0
+
+Exact OpenRouter cost was not persisted by the runtime. All Cycle 037 implementation,
+tests, Doctor, Mock E2E and clone recovery were non-billable.
+
+10. State, PMP, Schema, Checkpoint, Reservation and Outbox impact
+
+The Provider schema becomes smaller, while ResearchSource storage retains the same keys.
+Some identity values are now explicitly nullable when Retrieval cannot verify a person or
+affiliation; existing non-null saved values remain valid. PMP, Context, checkpoint and
+outbox formats do not change. A future authorized recovery adds one new suffix-specific
+authorization/reservation and append-only request/result or request/error PMP records.
+
+11. Debug Cycle self-audit
+
+Root cause identified: YES
+Symptom-only validator relaxation avoided: YES
+Same Failure Mode audited across all 7 Researcher specialists: YES
+Producer General Opinion boundary checked separately: YES
+Other layers and common reservation pipeline checked: YES
+State/PMP/Schema/Checkpoint/Reservation/Context/Outbox impact checked: YES
+Regression tests added: YES
+Recovery and fault conditions verified: YES
+Production clone verified twice: YES
+Debug Report generated: YES
+Design meaning explained: YES
+Unnecessary Provider calls: NO; the Real attempt was limited to 1
+Safety mechanisms disabled: NO
+
+12. Production deployment verification
+
+The verified code, README, tests, clone verifier and this report were copied to PRDCP_v2
+using an explicit file allowlist that rejected storage/data. Production verification then
+confirmed:
+
+* CLI help exposes --researcher-runtime-provenance-repair;
+* deployed Cycle 037 targeted tests: 22/22 PASS;
+* deployed exact workflow clone: COMPLETED with Retrieval 0, reasoning 9, review 1;
+* read-only status still loads Producer COMPLETED / Researcher FAILED at the expected
+  consumed Cycle 036 boundary;
+* state, messages and outbox SHA-256 remain exactly the values in section 8;
+* Context count remains 10, Retrieval reservation count 10 and Provider reservation
+  count 20;
+* production runtime-provenance authorization count remains 0.
+
+Cycle 037 is deployed. No additional Real call was made after the failed one-shot. Any
+further Real invocation requires a new explicit authorization for Retrieval 0, additional
+Gemini Structured Reasoning maximum 9 and Quality Review maximum 1.
+
+13. Explicit production Real recovery result
+
+After the user explicitly authorized saved-Context reuse, up to nine Gemini Structured
+Reasoning calls, one Researcher Quality Review call and the corresponding durable state
+updates, the following command was invoked once:
+
+py main.py --researcher-runtime-provenance-repair
+35fc624a-d8ac-451b-97f6-f3e94e13a951 --provider openrouter --safe-mode
+
+The provenance-repair task completed, followed by the other eight previously untouched
+Researcher reasoning tasks. The Manager integrated a Research Report containing 13
+sources. Quality Reviewer was then invoked exactly once and returned
+revision_required. Demo Safe Mode stopped before automatic reviewer revision or Manager
+re-dispatch, as designed. The CLI exit code was 1 because the durable Researcher state is
+BLOCKED; this was not a Provider, schema, parsing or provenance failure.
+
+Paid Provider calls in this authorized continuation:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 9
+* Researcher Quality Review: 1
+* automatic retries or resends: 0
+
+The exact OpenRouter cost was not persisted by the runtime. No call was made after the
+Safe Mode stop.
+
+14. Quality Review outcome
+
+The review found evidence-quality gaps rather than a recurrence of the Cycle 037 output
+contract failure. Its four revision targets are academic_researcher,
+government_researcher, industry_researcher and news_researcher.
+
+Five findings require external evidence gathering:
+
+* finding_qr_001: RQ1 lacks ACADEMIC evidence;
+* finding_qr_002: RQ1 lacks United States official/government material;
+* finding_qr_003: RQ2 lacks substantive INDUSTRY evidence;
+* finding_qr_004: RQ2 lacks NEWS evidence;
+* finding_qr_005: RQ3 lacks ACADEMIC evidence on licensing/compensation models.
+
+finding_qr_006 is a separate Manager/internal classification correction. The sole source
+counted as INDUSTRY for RQ3 is a cas.go.jp government document. The Manager must correct
+that classification and expose the resulting INDUSTRY gap; gathering replacement
+industry evidence remains covered by finding_qr_003.
+
+This separation matters operationally: the classification defect can be handled by
+internal revision, while the other findings require new source discovery. Saved Context
+reuse alone cannot satisfy those five missing-evidence requirements.
+
+15. Exact post-recovery production boundary
+
+* Researcher status: BLOCKED
+* error: Demo Safe Mode stopped automatic reviewer revision and Manager re-dispatch
+* completed specialist agents: 5
+* failed specialist agents: 0
+* revision_count: 0
+* Research Report ID: report_afa839f170f84efc962f0ab8d1b5d661
+* Report source count: 13
+* state SHA-256: 7965E73CB4A6C0F7F205D73E5205D8A9204E914D85ADAD7AE5003661A7B44CCD
+* messages SHA-256: 483FE9A64409A8181192E7FFFDED4AC342E567E4B6EB1068997B38A57BC6F1AE
+* outbox SHA-256: C3E3ACBBD813327B33A8D8327695CC24415BDFE820029BC27EBC194F654B6CCE
+* Researcher PMP messages: 47
+* saved Retrieval Context files: 10
+* saved Retrieval reservations: 10
+* Provider reservations: 30
+* distinct Provider task identities: 30
+* duplicate Provider task identities: 0
+* runtime-model repair authorizations: 9
+* runtime-output repair authorizations: 1
+* runtime-adapter repair authorizations: 1
+* runtime-identity repair authorizations: 1
+* runtime-provenance repair authorizations: 1, status CONSUMED
+* retrieval-reconstruction authorizations: 9
+* runtime model snapshots: 5
+* updated_at: 2026-08-18T04:56:20.87452Z
+
+The Quality Review request PMP is 119ed574-2afe-4a97-aa5b-3a5b84572dea and the correlated
+review PMP is 2741cd30-a75e-456e-b7e9-828433ff812c. The 20 appended PMP records are nine
+request/result pairs plus one review request/review pair. The outbox hash and timestamp
+remain unchanged. These facts prove that no Retrieval was repeated, no logical Provider
+task was duplicated and no downstream handoff escaped the Safe Mode boundary.
+
+16. Post-Real self-audit and next authorization boundary
+
+Authorized call ceiling respected: YES (9 reasoning, 1 review)
+Retrieval prohibition respected: YES (0 calls; Context/reservation counts unchanged)
+Stopped on review revision_required without automatic resend: YES
+State/PMP/reservation/authorization writes durable and correlated: YES
+Outbox remained behind the Safe Mode boundary: YES
+Schema/provenance regression observed: NO
+Unnecessary Provider calls: NO
+
+The current authorization is exhausted. A successful evidence revision cannot be inferred
+from the existing Retrieval-only authorization because the Reviewer explicitly requests
+new categories and United States sources. The next Real transition therefore requires a
+fresh, explicit authorization that permits the narrowly routed Retrieval and Structured
+Reasoning work for the four revision targets, plus a subsequent Quality Review. Until
+then this BLOCKED state is the correct, recoverable checkpoint and no further Provider
+call may be made.

@@ -14,6 +14,7 @@ from researcher.schemas.source import (
     ResearchSourceType,
     SourceSpecificMetadata,
 )
+from researcher.schemas.trace_ids import EvidenceId, SourceId
 
 
 class ObservationType(str, Enum):
@@ -30,7 +31,7 @@ class ResearchQuestionCoverage(BaseModel):
     question: str = Field(min_length=1)
     required_categories: list[ResearchSourceType] = Field(min_length=1)
     completed_categories: list[ResearchSourceType] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[EvidenceId] = Field(default_factory=list)
     coverage_status: CoverageStatus
 
 
@@ -39,7 +40,7 @@ class CrossSourceObservation(BaseModel):
 
     observation_id: str = Field(min_length=1)
     description: str = Field(min_length=1)
-    supporting_evidence_ids: list[str] = Field(min_length=1)
+    supporting_evidence_ids: list[EvidenceId] = Field(min_length=1)
     observation_type: ObservationType
     limitations: list[str] = Field(default_factory=list)
 
@@ -56,8 +57,8 @@ class EvidenceGap(BaseModel):
 class EvidenceItem(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
-    evidence_id: str = Field(min_length=1)
-    source_id: str = Field(min_length=1)
+    evidence_id: EvidenceId
+    source_id: SourceId
     research_question_ids: list[str] = Field(min_length=1)
     summary: str = Field(min_length=1)
     stance: EvidenceStance
@@ -67,8 +68,8 @@ class EvidenceItem(BaseModel):
 class EvidenceQualityAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
-    evidence_id: str = Field(min_length=1)
-    source_id: str = Field(min_length=1)
+    evidence_id: EvidenceId
+    source_id: SourceId
     reliability: ReliabilityLevel
     directness: EvidenceDirectness
     primary_source: bool
@@ -78,7 +79,7 @@ class EvidenceQualityAssessment(BaseModel):
 class SourceMetadataRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
-    source_id: str = Field(min_length=1)
+    source_id: SourceId
     source_type: ResearchSourceType
     title: str = Field(min_length=1)
     source_name: str = Field(min_length=1)
@@ -94,13 +95,13 @@ class SourceMetadataRecord(BaseModel):
 class SourceCategoryReferences(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    EXPERT: list[str] = Field(default_factory=list)
-    ACADEMIC: list[str] = Field(default_factory=list)
-    GOVERNMENT: list[str] = Field(default_factory=list)
-    NEWS: list[str] = Field(default_factory=list)
-    PUBLIC_OPINION: list[str] = Field(default_factory=list)
-    POLITICIAN: list[str] = Field(default_factory=list)
-    INDUSTRY: list[str] = Field(default_factory=list)
+    EXPERT: list[SourceId] = Field(default_factory=list)
+    ACADEMIC: list[SourceId] = Field(default_factory=list)
+    GOVERNMENT: list[SourceId] = Field(default_factory=list)
+    NEWS: list[SourceId] = Field(default_factory=list)
+    PUBLIC_OPINION: list[SourceId] = Field(default_factory=list)
+    POLITICIAN: list[SourceId] = Field(default_factory=list)
+    INDUSTRY: list[SourceId] = Field(default_factory=list)
 
 
 class SourceCategoryCounts(BaseModel):
@@ -119,6 +120,7 @@ class ResearchReportReviewFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     finding_id: str = Field(min_length=1)
+    finding_type: str = Field(default="UNCLASSIFIED", min_length=1)
     severity: str = Field(min_length=1)
     research_question_id: str | None = None
     target_agent_id: str | None = None
@@ -178,4 +180,26 @@ class ResearchReport(BaseModel):
             raise ValueError("evidence_items contain an unknown source_id")
         if any(item.evidence_id not in evidence_ids for item in self.evidence_items):
             raise ValueError("evidence_items contain an unknown evidence_id")
+        if any(item.source_id not in source_ids for item in self.source_metadata):
+            raise ValueError("source_metadata contain an unknown source_id")
+        if any(
+            item.source_id not in source_ids or item.evidence_id not in evidence_ids
+            for item in self.evidence_quality_assessments
+        ):
+            raise ValueError("evidence_quality_assessments contain unknown trace IDs")
+        if any(
+            set(item.evidence_ids) - evidence_ids for item in self.research_questions
+        ):
+            raise ValueError("research_questions contain an unknown evidence_id")
+        if any(
+            set(item.supporting_evidence_ids) - evidence_ids
+            for item in self.cross_source_observations
+        ):
+            raise ValueError("cross_source_observations contain an unknown evidence_id")
+        for references in (self.source_perspectives, self.sources_by_category):
+            for category in ResearchSourceType:
+                if set(getattr(references, category.value)) - source_ids:
+                    raise ValueError(
+                        f"{category.value} source references contain an unknown source_id"
+                    )
         return self

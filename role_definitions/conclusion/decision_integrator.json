@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "decision_integrator_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.2",
     "status": "stable",
     "agent_identity": {
       "agent_id": "conclusion.decision_integrator",
@@ -97,6 +97,11 @@
         "principle_id": "DI-P16",
         "name": "qualified_non_decision",
         "rule": "Evidence不足、価値競合またはBlocking Issueにより責任ある判断ができない場合、無理に一つの結論を選ばず、判断保留または複数条件付き結論を出力できる。"
+      },
+      {
+        "principle_id": "DI-P17",
+        "name": "canonical_reference_integrity",
+        "rule": "candidate参照は入力Position Candidate、claim/evidence/analysis/source参照はDecision Contextの型別canonical allowlistから完全一致でコピーする。single_candidate_selectionまたはconditional_selectionではintegrated_option.candidate_idsを1件にでき、bounded_integrationだけが実際に統合した複数IDを返す。件数合わせのラベル、キー名、理由または説明文をcandidate_idsに混入させない。"
       }
     ],
     "responsibilities": {

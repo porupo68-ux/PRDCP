@@ -1,0 +1,224 @@
+PRDCP Debug Report
+
+ID: 020
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Common Provider Contract / Conclusion
+Agent: conclusion.position_generator
+Error Class: CONFIG / PROVIDER / RECOVERY / CHECKPOINT / RESERVATION
+
+1. 発生した症状
+
+Cycle 019の明示Conclusion revisionは、正しいrevision_1 task/state/reservationを保存した後、
+Position Generatorの最初のReal callでroot floatを受領してFAILEDになった。使用modelは
+qwen/qwen3.5-flash-02-23だった。同じAgentではCycle 016に、このmodelがoriginalとoperator retryの
+2回ともroot scalarを返し、openai/gpt-5-miniによるcontract repairだけが成功していた。
+
+2. 発生地点
+
+- task_id: conclusion_position_generation_upstream_0_revision_1
+- state: FAILED、revision_count=1
+- failed agent: conclusion.position_generator
+- error: ProviderResponseContractError
+- model: qwen/qwen3.5-flash-02-23
+- root/path: float / $
+- response hash: 1eb1e64d569ddb83ba3d6d0248571ad0653d892e72b9af04cf760a72d089033f
+- response length: 22
+- automatic retry: 0
+
+3. 再現条件
+
+同一workflow/Agent/output schemaで異なるmodelによるcontract repairが成功した後、新しいrevision
+logical taskを通常のregistry model mappingから起動する。従来はrepair_modelがtask-local override
+としてのみ存在したため、新taskは元の非互換modelへ戻る。
+
+4. 根本原因
+
+Provider contract repairのauthorization/reservationは「そのtaskを一度だけ別modelで送る」ことを
+保証していたが、成功結果を将来taskのmodel compatibility factとして永続化していなかった。
+そのためruntime model selectionは、保存済みの成功実績を利用せず、環境設定の既定modelへ戻った。
+
+同時に、legacy random task IDの成功repair Resultをcurrent revision cycleでも復元候補へ含めていた。
+Decision Contextが同じなら初回Positionをrevision_1 Positionとして誤復元し得るため、current failure
+とのstage identity不整合または古いartifact再利用につながる潜在Checkpointバグも存在した。
+
+5. なぜこの問題が発生したか
+
+Cycle 016は同一taskの安全な別model repairと第四call禁止を主眼とし、別logical taskのmodel選択を
+修復範囲に含めていなかった。model mappingは静的設定、repairは一時overrideという二分だけで、
+「検証済み互換性」という中間の永続contractがなかった。
+
+6. なぜ既存テストで発見できなかったか
+
+既存Fault testはoriginal → retry → distinct-model repairの同一task列と、そのrepair Resultの
+checkpoint復元までを検証したが、成功後に同じAgentが別revision taskを実行するケースを持たなかった。
+legacy restore testもrevision_count=0だけで、revision cycleをまたぐ誤復元を検証していなかった。
+
+7. 修正計画
+
+1) 成功済みrepairをprovider/agent/output schema/incompatible model単位でappend-only保存する。
+2) Pydantic output validation済みかつCONSUMED authorizationと一致する場合だけ登録する。
+3) configured modelがincompatible modelと完全一致する将来taskだけcompatible modelへ置換する。
+4) 明示model overrideと変更済み環境設定を常に優先する。
+5) 旧workflowはsaved repair request/result PMPとauthorizationを検証してbindingを復元する。
+6) revision/upstream cycleではlegacy random initial taskをcheckpoint候補にしない。
+7) current FAILED state cloneでretry task/model/checkpointを検証後、一回だけReal retryする。
+
+8. 実際の修正内容
+
+- common/provider_model_compatibility.pyを追加した。
+- verified bindingをstorage/data/provider_model_compatibilityへexclusive createで保存する。
+- Conclusion agent実行時にexact contract bindingを解決し、新logical taskへcompatible modelを適用する。
+- explicit repair_modelはbindingより優先する。
+- validated contract repair Result後にbindingを登録する。
+- recover/revise時に旧saved repair ResultをPydantic、PMP routing、CONSUMED authorizationで再検証し登録する。
+- revision_count/upstream_revision_countが1以上ならlegacy random taskをcheckpoint候補から除外する。
+- Doctorに有効bindingの件数とmodel遷移を表示する。
+- Conclusion Manager RDとREADMEへmodel selectionの優先順位と監査規則を追記した。
+
+9. 変更したファイル
+
+- common/provider_model_compatibility.py
+- conclusion/manager.py
+- cli_app/diagnostics.py
+- role_definitions/conclusion/manager.json
+- tests/unit/test_provider_model_compatibility.py
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_rd_loader.py
+- README.md
+- debug_reports/020_verified_provider_model_compatibility_recovery.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Provider modelを単なる静的設定値ではなく、検証済みStructured Output contractを持つ実行依存として
+扱う。operatorが明示的に選んだ別modelの成功を、無条件なglobal rewriteではなく、元modelとの
+exact pairへ限定した監査可能bindingとして再利用する。これにより既知の非互換modelへ費用を払って
+何度も戻らず、環境設定変更や明示overrideの権限も保持する。
+
+Checkpoint側では「同じDecision Context」だけではrevision artifact identityとして不十分であり、
+cycle固有logical task IDを復元条件の中心に戻した。初回成果物と修正成果物の意味を混同しない。
+
+11. 他Layerへの影響
+
+異なるmodelを使う永続contract repair CLIは現在Conclusionだけに存在するため、binding適用は
+Conclusion ManagerのAgent実行境界に限定した。共通storeはprovider/agent/schema/modelで型付けされ、
+将来他Layerが同じ明示repair contractを導入する場合にも再利用できる。
+
+Producer/Researcher/Deliberation/Playwrightの既存model selection、PMP、revision、outboxは変更しない。
+全22 Structured Output schemaとOpenRouter require_parametersも不変である。
+
+12. 同系統Failure Mode監査結果
+
+- Conclusion 4 Agent: binding keyにagent/output schemaを含め、他Agentへ漏れない。
+- initial/internal/upstream/human integration/retry: logical taskが変わってもexact bindingだけ再利用する。
+- explicit contract repair: explicit model overrideを優先する。
+- environment model変更: configured model不一致ならbindingを無視する。
+- provider変更: provider namespace不一致ならbindingを無視する。
+- failed repair: ResultがPydantic validationを通らないためbindingを作らない。
+- legacy saved repair: request/result correlationとauthorizationを満たす場合だけbackfillする。
+- legacy checkpoint restore: revision/upstream cycleでは初回random taskを除外する。
+
+13. Regression Test
+
+- bindingはCONSUMED repairだけを受理する。
+- configured model exact match時だけcompatible modelを返す。
+- repair成功後の新revision taskがrepair modelを再利用する。
+- legacy binding欠落 + new revision failureから、saved repairを復元してoperator retryをcompatible modelで実行する。
+- retry reservationのmodel_idがopenai/gpt-5-miniである。
+- existing contract repair exhaustion、checkpoint restore、Safe Mode testsを維持する。
+- Targeted model/recovery tests: 7 PASS
+- Related Conclusion/RD/runtime/Safe Mode/OpenRouter/strict: 116 PASS
+- Full Unit: 362 PASS in 317.204s
+- Integration: 9 PASS in 27.868s
+- 31 RD STRICT: PASS
+- 全22 OpenRouter root recursive strict schema audit: 13 PASS
+- Mock CLI Producer -> Delivery: PASS
+
+14. Recovery / Fault Test
+
+Fault 1: verified bindingを削除し、旧挙動としてrevision Positionを非互換modelでFAILEDにした。
+次の明示provider retryは旧repair Resultをbackfillし、Position retryだけをcompatible modelへ送り、
+その後WAITING_HUMAN_SELECTIONへ復旧した。
+
+Fault 2: revision_count=1のstateでは初回legacy repair Positionをcheckpointとして復元せず、
+current revision taskのoperator retryを実行した。
+
+Exact Saved-State: productionの現在state、current Position reservation、旧repair authorizationだけを
+隔離複製した。Mock provider_id=openrouterで--conclusion-provider-retry相当を実行し、
+Position model callはopenai/gpt-5-mini 1回だけ、taskは
+conclusion_position_generation_upstream_0_revision_1_operator_retry_1、結果は
+WAITING_HUMAN_SELECTION / approved / revision_count=1だった。
+
+15. Provider Call数
+
+- Cycle 020 implementation/Unit/Integration/Mock/Fault: Real 0
+- exact saved-state recovery: Mock Position 1、Real 0
+- upstream redispatch: 0
+- automatic retry: 0
+- explicit Real CLI: --conclusion-provider-retryを一回だけ実行
+- Real Provider calls: 4
+  - Position Generator: 1（operator_retry_1、openai/gpt-5-mini）
+  - Decision Evaluator: 1（qwen/qwen3.6-35b-a3b）
+  - Decision Integrator: 1（qwen/qwen3.6-35b-a3b）
+  - Quality Reviewer: 1（qwen/qwen3.6-35b-a3b）
+- Producer / Researcher / Deliberation redispatch: 0
+- duplicate calls: 0
+
+16. API Cost
+
+Cycle 020の実装・検証はReal $0。明示CLIはcurrent FAILED Positionに対する一回限りretryを
+compatible modelで実行し、未完了だったEvaluator/Integrator/Quality Reviewerまで進んだ。
+reservationおよびPMPにはtoken usage / actual costが保存されないため、実測costはunknown。
+
+17. Existing Workflowへの影響
+
+実装・Mock/Fault中のproduction storageはread-only。Cycle 019の正規CLIが保存したFAILED state、
+revision history、request/error PMP、reservationは保持した。既存authorization/reservationは削除せず、
+新bindingはproduction CLI recoveryが旧成功repairを検証した時点でappend-only作成された。
+
+Real後もDeliberation state/messages hashは不変だった。Conclusion state/messagesだけが正規CLIにより更新され、
+Conclusion outbox hash 674d69a13d99cbb34a6fe705728947b2bee896edaf15ca85db28581352beba58
+は不変、Playwright outboxは未作成のままである。
+
+18. Remaining Risk
+
+Real Quality Reviewerは、未知claim ID `claim_task_reorganization_observed`がDecision Integrationと
+Conclusion Packageへ入ったtraceability findingを返した。Safe Modeは追加revisionを自動実行せず停止した。
+このfindingはmodel compatibility修正とは別のdomain validation漏れであり、Cycle 021へ移行する。
+
+OpenRouter側でQwen endpointの契約挙動が将来改善しても、環境設定が同じ間はverified bindingを使うため、
+Qwenへ戻す場合はoperatorが設定を明示変更する必要がある。
+
+19. Result
+
+PASS。Implementation / Unit / Targeted / Integration / Mock / Fault /
+Exact Saved-State Recovery / production限定反映 / 明示的一回Real retryを完了した。
+
+Real retryは保存済みの検証済みmodel compatibilityを復元し、revision_1 Positionを
+openai/gpt-5-miniで成功させた。Evaluator、Integrator、Quality Reviewerまで進み、Reviewerの
+新たなdomain findingに対してSafe Modeが正しくBLOCKEDで停止した。Cycle 020の目的である
+「既知の非互換modelへ戻らず、保存済みcheckpointから一回だけ安全に回復する」は達成した。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所パッチだけで終わっていない
+[YES] Sibling Failureを監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full E2Eは再実行せず、current FAILED Positionからだけ再開する。

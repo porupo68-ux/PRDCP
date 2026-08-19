@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "authorization_id": "68bad3e9-26d5-40a3-8e0b-23c63c57300c",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "provider_id": "openrouter",
+  "agent_id": "researcher.government_researcher",
+  "original_task_id": "task_1abf9d163f0f4c20980e4221ca960e1e",
+  "runtime_repair_task_id": "task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_repair_1",
+  "output_repair_task_id": "task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_output_repair_1",
+  "source_runtime_authorization_id": "52fb79db-8243-42d8-8bf9-33fe440fd582",
+  "source_error_message_id": "d9dad747-bc78-4d6b-9fc0-83650caf7a3e",
+  "source_error_class": "NonRetryableAgentError",
+  "failure_signature": "retrieval_excerpt_hydration_contract",
+  "model_id": "google/gemini-3.7-flash",
+  "retrieval_id": "retrieval_3ad9f59b349db82867e1f137",
+  "retrieval_context_sha256": "adbc07245d2f6ca01202c7c9b2fd7b9793c37ec6f62077011f05c78b5c877dbd",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-18T02:14:42.957211Z",
+  "consumed_at": "2026-08-18T02:14:43.727604Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\35fc624a-d8ac-451b-97f6-f3e94e13a951\\task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_output_repair_1.json"
+}

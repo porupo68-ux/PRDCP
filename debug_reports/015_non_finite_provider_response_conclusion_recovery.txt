@@ -1,0 +1,152 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 015
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Common Provider boundary / Conclusion
+Agent: conclusion.position_generator / conclusion.manager; sibling scope: all 22 OpenRouter output roots
+Failure Stage: Position Generation response decoding
+Error Class: PROVIDER / SCHEMA / CHECKPOINT / RESERVATION / IDEMPOTENCY / RECOVERY / STORAGE
+
+1. What happened
+
+The localized Real Conclusion continuation passed Cycle 014's readiness boundary and made exactly one Position Generator call. OpenRouter returned message content that Python json.loads accepted as the float `inf`. PositionGenerationResult requires an object, so Pydantic stopped with input_value=inf, input_type=float. Conclusion became FAILED. Decision Evaluator, Decision Integrator, and Conclusion Quality Reviewer were not called. Automatic retry was zero and the original reservation remained.
+
+2. Where it happened
+
+Workflow 15f3f5c5-4167-447d-b255-069fc7f5beb2, conclusion.position_generator, logical task position_task_7001de5f08ae4dabbd3881fed57dcd5a, model qwen/qwen3.5-flash-02-23, provider openrouter, Demo Safe Mode enabled.
+
+3. Reproduction conditions
+
+Any OpenRouter Structured Output root equal to Infinity, -Infinity, NaN, an exponent overflow such as 1e999, or a non-object JSON root reproduced the boundary defect without network access. A nested overflow reproduced the same defect below an object. The exact production FAILED state and original reservation were copied read-only into isolated storage and reproduced the missing one-shot Conclusion recovery path.
+
+4. Root cause
+
+Python's json.loads deliberately accepts non-standard Infinity/NaN constants and converts exponent overflow to a non-finite float unless told otherwise. The OpenRouter Provider returned the decoded value directly to Pydantic and did not enforce the Structured Output response invariant that the root is a JSON object containing only finite JSON numbers. The resulting PayloadValidationError could not preserve the scalar invalid payload, so audit metadata was also insufficient.
+
+Conclusion had a second systemic defect: its Provider task IDs were random and it had neither checkpoint recovery nor a persisted one-shot Provider retry route. Restarting could not distinguish a safe uncalled downstream stage, a saved result awaiting checkpoint restoration, and an ambiguous/billed failed call.
+
+5. Why it happened
+
+The strict schema work validated the request schema but treated Provider response decoding as ordinary Python JSON parsing. Mock always returned dictionaries and therefore could not exercise non-standard JSON tokens. Conclusion predated the deterministic task/reservation/recovery controls already developed for Researcher and Deliberation.
+
+6. Why prior tests did not find it
+
+Existing Provider tests covered malformed envelopes, HTTP status, network interruption, and strict request schemas, but not non-finite JSON constants, exponent overflow, nested non-finite values, or scalar/array roots. Conclusion tests covered normal revision routing and Safe Mode but not a billed contract-invalid response, explicit retry authorization, or result-message persistence surviving a checkpoint write fault.
+
+7. Cycle 015 repair plan and v2 comparison
+
+Plan A: enforce standard object JSON plus recursively finite numbers at the shared OpenRouter response boundary. This follows v2 Systemic Repair and protects all 22 roots.
+
+Plan B: record only response SHA-256, character length, root type, and invalid JSON path. This follows explainable debugging without persisting potentially sensitive response bodies.
+
+Plan C: give all four Conclusion Provider stages deterministic logical task IDs and persistent reservations. This matches v2 Logical Task Identity and Reservation principles.
+
+Plan D: add Conclusion checkpoint recovery and an explicit Demo-Safe one-shot retry authorization. Reuse valid upstream checkpoints and use a separate `_operator_retry_1` task. This matches localized re-execution and cost control.
+
+Plan E: if validated result PMP messages survived a state/checkpoint save fault, restore them by task and dependency identity with Provider calls zero. This matches Persist Before Advance, idempotency, and Recovery R9.
+
+Plan F: Static -> targeted Unit -> full Unit -> Integration -> full Mock E2E -> exact production-state isolated Mock recovery -> one localized Real retry. This is the v2 validation ladder and avoids a full restart.
+
+8. Implementation
+
+- OpenRouter now rejects Infinity, -Infinity, NaN, exponent overflow, nested non-finite numbers, and non-object roots before Pydantic.
+- Added ProviderResponseContractError. It is retryable only by explicit operator action and always disables automatic retry.
+- Error PMP records response hash/length/root/path and never the response body.
+- Conclusion Position, Evaluation, Integration, and Quality Review task IDs are deterministic by upstream revision, internal revision, and operation variant.
+- Conclusion Quality Review input now carries its logical task_id.
+- Added `--conclusion-recover` and `--conclusion-provider-retry`.
+- Recovery inspects saved checkpoints, restores correlated saved result PMP messages, preserves completed expensive stages, and calls only the first truly unfinished stage.
+- Provider resend requires a persisted pending authorization, creates a distinct retry reservation, consumes authorization once, and rejects retry-of-retry.
+- Legacy saved input_value=inf PayloadValidationError is classified on read as ProviderResponseContractError; the production JSON is not rewritten.
+- Conclusion Manager RD advanced to 1.0.1 and README documents the boundary and CLI.
+
+9. Changed files
+
+common/models/errors.py; common/models/__init__.py; common/agents/base.py; common/provider_retry.py; providers/openrouter_provider.py; conclusion/manager.py; conclusion/schemas/review.py; cli_app/arguments.py; cli_app/commands.py; tests/unit/test_openrouter_provider.py; tests/unit/test_conclusion_manager.py; tests/unit/test_maintainability.py; role_definitions/conclusion/manager.json; README.md; Debug Cycle reports.
+
+10. Design meaning
+
+A strict Structured Output contract has two independent halves: the JSON Schema sent to the Provider and the JSON document accepted back. Pydantic is not the raw JSON grammar boundary. A response that may already have been generated and billed must never be silently replayed under the same logical task. Durable result messages are checkpoints and must be reused before any resend decision.
+
+11. Other-layer impact
+
+The response decoder is shared by Producer, Researcher, Deliberation, Conclusion, and Playwright, so all 22 OpenRouter output roots receive the same finite-object guarantee. Existing Researcher/Deliberation retry authorization semantics remain intact. No Producer, Researcher, Deliberation, Playwright, PMP shape, outbox format, or existing checkpoint JSON was migrated.
+
+12. Same-family Failure Mode audit
+
+- Request strictness: all 22 root schemas, nested objects, arrays, unions, and $defs still pass recursive Azure/OpenAI strict audit.
+- Response root: dict required for every OpenRouter Structured Output.
+- Response numbers: constants and overflow rejected at every recursive path.
+- Automatic retry: disabled for ambiguous/contract-invalid billed responses.
+- Conclusion stages: all four now have deterministic task identity and recovery.
+- Save-after-response fault: validated saved responses restore with zero Provider calls.
+- Unanswered persisted request: recovery fails closed instead of guessing whether the Provider ran.
+- Existing random task: compatibility is limited to the correlated saved error and original reservation; new tasks are deterministic.
+
+13. Regression tests
+
+- Non-finite root constants and exponent overflow.
+- Non-object root array/string/null.
+- Nested overflow with exact invalid path.
+- Deterministic distinct task identity across all Conclusion stages.
+- Position contract failure: no automatic retry, explicit authorization required, one retry consumed.
+- Evaluation failure: Position checkpoint reused.
+- Legacy input_value=inf read compatibility.
+- All saved result messages restored with Provider calls unchanged.
+- CLI discovery for both Conclusion recovery commands.
+- Existing 22-root strict schema audit.
+
+14. Recovery / Fault results
+
+Targeted final suite: 59 PASS.
+Full Unit: 327 PASS in 268.122s.
+Full Integration: 9 PASS in 26.775s.
+Role Definitions: 31 loaded in STRICT mode.
+Doctor provider=mock Safe Mode: READY.
+Full Mock CLI E2E Producer -> Delivery: PASS.
+Exact production FAILED state copied to isolated storage: FAILED -> WAITING_HUMAN_SELECTION.
+Isolated exact-state calls: Position 1, Evaluation 1, Integration 1, Quality Review 1; every upstream call 0; automatic retry 0; authorization CONSUMED.
+Saved-result persistence fault: Position/Evaluation/Integration/Review restored, Provider call delta 0.
+
+15. Provider calls
+
+Cycle 014 failure capture: Real Position 1, downstream 0, upstream 0, automatic retry 0.
+Cycle 015 implementation/validation so far: Real 0; Mock only.
+Prevented duplicate calls: all saved-result fault stages; all completed upstream workflow stages.
+Next authorized action: one localized Conclusion operator retry, not a full E2E restart.
+
+16. API cost
+
+CLI did not expose measured cost for the one Cycle 014 Position call; actual cost is unknown. Cycle 015 implementation and validation cost is $0 Real API. The retry budget remains limited to the explicit localized call sequence.
+
+17. Existing workflow impact before deployment/retry
+
+Production Deliberation state/messages/outbox hashes remain unchanged. Conclusion remains FAILED with its original state, messages, and Position reservation. No Conclusion retry authorization or retry reservation has been written by Mock/Fault testing. All tests used isolated data directories.
+
+18. Remaining risk
+
+The next OpenRouter Position response may expose a different semantic/schema issue, and later Conclusion/Playwright responses remain real-model boundaries not fully reproducible by Mock. Human Selection is still a mandatory explicit user gate. Actual OpenRouter cost is not visible from the CLI.
+
+19. Debug Cycle compliance review / result
+
+[YES] Root cause reached Python JSON response semantics and missing Conclusion recovery design.
+[YES] Repair is shared at the Provider boundary, not a Position-only coercion.
+[YES] All 22 output roots and all four Conclusion stages audited.
+[YES] Other layers and existing retry routes checked.
+[YES] State, PMP, Schema, Checkpoint, Reservation, Outbox impacts checked.
+[YES] Regression tests added.
+[YES] Recovery and Fault Injection completed.
+[YES] Debug Report generated.
+[YES] Design meaning explained.
+[YES] No unnecessary Real Provider call.
+[YES] Existing production workflow/storage unchanged during implementation.
+[YES] E2E execution plan v2 re-read after the cycle.
+
+Result before Real retry: IMPLEMENTATION / STATIC / UNIT / INTEGRATION / MOCK / FAULT / EXACT-SAVED-STATE RECOVERY PASS. ONE LOCALIZED REAL RETRY PENDING.
+
+20. Explicit Real retry result
+
+The one authorized `--conclusion-provider-retry` was executed once against the saved workflow. It reused every upstream checkpoint and made one Position Generator call only. The same configured Qwen3.5 Flash model again returned a structured message whose entire root decoded as a float instead of an object. The Provider boundary rejected it as `ProviderResponseContractError` and recorded only SHA-256 `21beb3cb0dc26c0534791e821c9101110d45e9054a1fbe6419f270d1e8d36021`, length 8224, root type `float`, and invalid path `$`; the response body was not persisted. The retry authorization became CONSUMED, its reservation remains present, downstream Conclusion calls stayed zero, upstream calls stayed zero, and automatic retry stayed zero.
+
+Cycle 015 therefore passed its safety and recovery objective: the malformed response could not contaminate state and the same logical task could not be sent again. The repeated endpoint/model contract failure is a new Failure Mode and is handled in Cycle 016. No retry-of-retry is permitted.

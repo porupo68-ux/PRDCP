@@ -16,6 +16,8 @@ def make_conclusion_handoff(
     provider: MockModelProvider | None = None,
 ) -> PMPMessage:
     provider = provider or MockModelProvider()
+    if provider.reservation_root is None:
+        provider.reservation_root = data_dir / "provider_call_reservations"
     deliberation = make_deliberation_manager(data_dir, provider)
     state = asyncio.run(
         deliberation.start_from_message(make_deliberation_handoff())
@@ -37,6 +39,8 @@ def make_conclusion_manager(
     demo_safe_mode: bool = False,
 ) -> ConclusionManager:
     provider = provider or MockModelProvider()
+    if provider.reservation_root is None:
+        provider.reservation_root = data_dir / "provider_call_reservations"
     registry = ConclusionRegistry(provider, {}, demo_safe_mode=demo_safe_mode)
     return ConclusionManager(
         registry,

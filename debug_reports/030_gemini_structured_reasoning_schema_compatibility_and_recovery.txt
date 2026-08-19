@@ -1,0 +1,137 @@
+PRDCP v2 Debug Report - Cycle 030
+Gemini Structured Reasoning Schema Compatibility and Producer Checkpoint Recovery
+
+1. 何が起きたか
+
+Fresh Real E2E workflow 35fc624a-d8ac-451b-97f6-f3e94e13a951 は、Producer Topic Scout と Topic Selector を完了した後、General Opinion Analyst で停止した。OpenRouter の routing 先は Google AI Studio / google/gemini-3.7-flash で、応答は HTTP 400 INVALID_ARGUMENT（Request contains an invalid argument）だった。
+
+この時点で Retrieval は正常終了していた。5件のsourceは storage/data/retrieval_contexts/<workflow_id>/retrieval_f354b54b51f6c2f44f4dbfd1.json に保存済みであり、そのSHA-256は BFE69D5CB5D26993A7482C9DE28C1E2FBC6A68B504360507943EE5D13F1B9455 である。検索結果の先頭PDF titleは1,801文字、UTF-8で1,963 bytesだった。
+
+2. 最終requestの再構築と根本原因
+
+失敗時に保存されたSchema、workflow state、PMP message、Provider reservation、Retrieval Context、現在のRDから、Authorization headerやAPI keyを含まない最終requestを再構築した。成果物は debug_reports/030_general_opinion_sanitized_request.json である。
+
+変換経路は次のとおりだった。
+
+Pydantic GeneralOpinionOutput
+  -> normalize_strict_output_schema()
+  -> GeneralOpinionOutput.specialize_strict_output_schema()
+  -> validate_strict_output_schema()
+  -> OpenRouter response_format.json_schema.schema
+
+失敗時Schemaは SupportingSource.source にretrieved title 5件、SupportingSource.urlにURL 5件をenumとして直接埋め込んでいた。Schemaは3,683 bytes、title enumは合計2,283 bytes、最大literalは1,963 bytesだった。provider parameterは provider.require_parameters=true、response_format.type=json_schema、json_schema.strict=trueであり、既に成功した同一Gemini endpointのTopic Scout requestとも整合していた。
+
+Google GeminiのStructured OutputはJSON Schemaの一部をcontrolled-generation constraintへ変換する。公開仕様はenumをサポートする一方、非常に大きい、または深いSchemaは拒否され得ると明記している。今回、同一workflow・同一endpointで成功したTopic Scoutとの差分、失敗Schemaの異常に長い動的enum、ローカルFault再現を合わせると、retrieved payload textをSchema enumへコンパイルさせたことが400の根本原因である。Google側の正確なconstraint state上限は公開されていないため、1,963 bytesが普遍的な閾値だとは仮定しない。
+
+3. なぜMock / Doctorで検出できなかったか
+
+Mock ProviderはPydantic/local output contractを検証するが、Google endpointがSchemaをcontrolled-generation grammarへコンパイルする工程を持たない。従来のfixture titleとURLは短く、長大PDF titleのFaultもなかった。
+
+Doctorはmodelと稼働endpointが response_format と structured_outputs を受け付ける能力を公開metadataで確認する。実行時Retrievalから生成されるrequest固有Schemaの文字列長やenum総量までは、Retrieval実行前のDoctorでは決定できない。そのため能力対応modelであっても、payload依存のSchema compilation failureを検出できなかった。
+
+4. どう直したか
+
+- General Opinion Analystと7 Researcher specialist、合計8 Retrieval Agentの動的Schemaを横断修正した。
+- Schemaで動的enum拘束する値を、短いstable identifierであるsource_idだけに限定した。
+- title、URL、excerpt/contentはRetrieval Context内の通常inputとして渡すが、Schema enumには埋め込まない。
+- Provider応答後、source_idから保存済みRetrieval recordを引く。title、URL、retrieved_atはLLMに再転記させず、保存値を決定論的にhydrationする。excerpt、分析metadata、agent/category identityはlocal contractで照合する。したがって自由生成へ緩和していない。
+- Gemini向け最終Schemaについて、HTTP送信とProvider reservationの前にSchema bytes、enum literal bytes、enum total bytesを再帰検査するProvider compatibility gateを追加した。enumはcompact ID/classification用であり、retrieved payload text用ではない。
+- OpenRouterModelProvider.build_request_body()を最終のsecret-free request構築点として共通化し、監査と実送信が同じ変換を通るようにした。
+- Producerへ --producer-recover と --producer-provider-retry を追加した。後者はFAILED state、保存済みPMP error、HTTP 400 INVALID_ARGUMENT、元reservationを相関し、一回限りのoperator retry taskを発行する。
+- Retryは保存済みRetrievalのcanonical identityを再利用し、General Opinion checkpointだけを実行して停止する。Research PlannerやQuality Reviewerは同じCLI操作では実行しない。
+- 旧General Opinion artifactはsource_idなしでも読めるが、新しいProvider-bound strict schemaではsource_id keyを必須にする。既存JSONは書き換えない。
+
+最終修正後Schemaは1,167 bytesで、動的enumはsource_id 5件だけ、最大31 bytes、合計155 bytesである。SupportingSourceのProvider-bound shapeはsource_idだけであり、永続artifactのtitleとURLは保存済みRetrievalから復元される。
+
+5. 他Agent / Layerへの影響
+
+直接影響はProducer General Opinion AnalystとResearcherのAcademic、Government、Industry、Expert、Politician、News、Public Opinionの7 Agentである。8 Agentすべてに1,801文字titleと5,000文字contentを注入し、最終SchemaがGemini compatibility gateを通り、raw title/URL/contentがenumへ入らないことを確認した。
+
+Producer / Researcher以外のDeliberation、Conclusion、Playwrightは共通OpenRouter request builderとpreflight gateを通る。ただし、現在の22 root schemaが閾値内である限り意味やSchema形状は変わらない。Azure/OpenAI strict normalization、additionalProperties=false、required==properties.keys()の再帰検証は維持した。
+
+6. Recovery / Fault Test
+
+- Static compile: PASS
+- Cycle 030 targeted regression: PASS
+- 8 Retrieval Agent long-title / long-content Fault Injection: PASS
+- 31 RD strict preload: PASS
+- 22 OpenRouter root Structured Output schema audit: PASS
+- 全Unit / Integration: 446 tests PASS
+- 5層Mock E2E: Producer -> Researcher -> Deliberation -> Conclusion -> Playwright COMPLETED
+- production workflow clone recovery: PASS
+
+production workflowの複製には元state、messages、Retrieval Context、Retrieval reservation、General Opinion reservationだけをコピーした。Mockで --producer-recover を実行するとGeneral Opinion checkpointから再開し、その後ProducerをCOMPLETEDにできた。Retrieval ContextのSHA-256は前後とも BFE69D5CB5D26993A7482C9DE28C1E2FBC6A68B504360507943EE5D13F1B9455 で、追加検索予約は0件だった。
+
+明示的一回Real Retry後に検出したmetadata再転記Failureを修正した後も、現在のproduction FAILED stateを再複製して同じRecoveryを再実行した。Provider schemaどおりsource_idだけを返すMock応答から長大titleとURLをhydrationし、ProducerはCOMPLETED、Retrieval hash不変、追加検索予約0件だった。
+
+全回帰の最初の実行では2件のテスト期待値更新漏れを検出した。ProviderRequestSchemaErrorのretry許可分類と、Gemini互換の単一値enum表現に対する旧期待であり、実装の局所回避は行わず「新分類だけ許可・未分類は拒否」「constではなく1要素enum」を明示テストに直して全体を再実行した。
+
+7. Production Storage保護
+
+コード反映前のproduction hash:
+
+- workflow state: 45B9D98D546B209B2BCA80ED616E925D4609BD3F47D98A0DDD8030631E867D9E
+- messages: F66359DFA851149774284ED25C38CFFBE9FC84FD75F8A511F413555269AAD17F
+- retrieval context: BFE69D5CB5D26993A7482C9DE28C1E2FBC6A68B504360507943EE5D13F1B9455
+- retrieval reservation: 2B0F127BD934F75D93CDB31C88258712610276ADED54A50803597A134042B673
+- original General Opinion reservation: B66242C3E5A62483B32EFB892DD4DE446BB4E1D90AAC8EC042770D97E411E039
+
+コード、README、テスト、監査script、Debug Reportだけをdeployment copy対象とした。storage/dataはcopy対象に含めなかった。
+
+明示的一回Real Retryでは、設計された更新だけが発生した。元Retrieval Context、Retrieval reservation、元General Opinion reservationのhashは不変である。追加されたものはoperator retry reservation 1件、CONSUMED authorization 1件、retry task/error PMP、FAILED state更新である。Retrieval Context数とRetrieval reservation数はいずれも1件のままである。
+
+Real Retry後の主要hash:
+
+- workflow state: AE2C528AF2C4430C96268D4ECD24AF58E4D651314530F4BA5AB9DA0C2B727387
+- messages: B9995C75F63AE65B31D8B4F0FDA75006446ACC2C316063D0F022F2DEBBF8FAA3
+- retrieval context: BFE69D5CB5D26993A7482C9DE28C1E2FBC6A68B504360507943EE5D13F1B9455（不変）
+- retrieval reservation: 2B0F127BD934F75D93CDB31C88258712610276ADED54A50803597A134042B673（不変）
+- original General Opinion reservation: B66242C3E5A62483B32EFB892DD4DE446BB4E1D90AAC8EC042770D97E411E039（不変）
+- operator retry reservation: CE923D8293269452A6A4480F949FE767A7FAED49844B82CEB57B5C3D6A1BEAFA
+- consumed authorization: A8F7C8011C735D05C6964E7A3BF955AF3A5CF531C54675CEAFB0165EEBE5B46A
+
+8. Provider Call数とCost
+
+Cycle 030合計:
+
+- Retrieval provider call: 0
+- Real Structured Reasoning call: 1
+- 二回目のReal call: 0
+- OpenRouter追加費用: responseにusage/costを保存する実装ではないため実測値取得不可
+
+明示的一回Real Retryの結果:
+
+- Google/Geminiは修正版response_formatを受理した。
+- HTTP 400 INVALID_ARGUMENTは再発せず、Structured Output JSONが返った。
+- 返却後、source_7019103e5ffc7f8e83161c32のtitleまたはURL完全一致でlocal contractが停止した。
+- 正しいsource_idは返っていたため、Schema compatibility修正の有効性と、immutable metadataをLLMへ再転記させる別Failure Modeが同時に確認された。
+- Provider raw payloadは現行実装ではlocal contract failure時に保存されていなかったため、既に課金された応答からGeneral Opinion artifactを復元できない。
+- 指示された一回上限を守り、追加Real callは行っていない。
+
+この実観測を受け、General Opinionと7 Researcherに共通のdeterministic metadata hydrationを追加し、全Mock/Fault/clone recoveryを再度通した。現在のproduction workflowはFAILED / completed agents 2のままで、retry authorizationはCONSUMEDである。次のReal acceptanceには、ユーザーが別Cycleとして新しい一回限りtask identityと追加Provider callを明示承認する必要がある。
+
+9. 設計上の意味と再発防止
+
+外部データの同一性制約と、Provider grammarへコンパイルするSchema制約を分離した。Schemaはcompact identityだけを選ばせ、意味のある外部payloadは保存済みデータとの決定論的照合で保証する。これにより、長大・多言語・PDF由来titleのようなRetrieval品質を落とさず、Provider compilerの状態爆発も防止できる。
+
+また、Provider capabilityの静的確認とrequest-instance compatibilityの動的確認を別gateとして明文化した。今後、provider modelが対応済みでも、実データからspecializeされた最終Schemaが過大ならreservation/HTTP前に停止し、検索済みcheckpointを保持したまま修正・明示Retryできる。
+
+10. Self Audit
+
+- 根本原因まで特定: YES
+- 局所パッチではなく8 Retrieval Agentを監査・修正: YES
+- 他Layerと共通Provider境界への影響確認: YES
+- State / PMP / Schema / Checkpoint / Reservation / Outbox確認: YES
+- Regression Test追加: YES
+- Fault / Recovery確認: YES
+- 既存workflow JSONの書換え回避: YES（Real Retry前）
+- 不要なProvider二重呼び出し回避: YES
+- Real API前に全Mock/Fault検証完了: YES
+- 明示的一回Real API上限を遵守: YES
+- Provider=openrouterでGeneral Opinion checkpoint完了: NO（Schema受理後のmetadata再転記Failure。修正済みだが再実行未許可）
+
+11. 参照仕様
+
+- Google Gemini Structured Outputs: https://ai.google.dev/gemini-api/docs/structured-output?lang=rest
+- OpenRouter Structured Outputs: https://openrouter.ai/docs/guides/features/structured-outputs
+- OpenRouter Provider Routing: https://openrouter.ai/docs/guides/routing/provider-selection

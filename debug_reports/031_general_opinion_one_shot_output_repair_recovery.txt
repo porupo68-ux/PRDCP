@@ -1,0 +1,239 @@
+PRDCP v2 Debug Cycle 031
+General Opinion Analyst one-shot output repair recovery
+
+対象workflow
+35fc624a-d8ac-451b-97f6-f3e94e13a951
+
+実施日時
+2026-08-18 JST（Provider reservation上は2026-08-17 UTC）
+
+1. 何が起きていたか
+
+Cycle 030では、保存済みRetrieval Contextを再利用したGeneral Opinion Analystの
+Gemini Structured ReasoningがGoogle endpointに受理され、HTTP 400は解消した。
+しかし、その実行時点のローカル出力契約は、LLMが返したsource_idに加えて長い
+titleとURLの文字列一致までLLM応答そのものへ要求していた。このため、有効な
+source_idを返したProvider応答が、長いPDF titleの再転記差分によって
+OUTPUT_CONTRACT_ERRORになり、General Opinion checkpointへ保存されなかった。
+
+Retrievalはすでに成功しており、5 sourceのRetrieval Contextとretrieval
+reservationは永続化済みだった。したがって、検索やTopic Scout、Topic Selectorを
+再実行せず、Cycle 030で修正した「LLMはsource_idだけを選択し、title/URLは保存済み
+Retrievalから決定論的に復元する」処理だけを、新しいidentityで一度実行する必要が
+あった。
+
+2. 根本原因
+
+障害はProvider request schemaではなく、Provider応答後のローカルmetadata hydration
+境界にあった。Cycle 030のoperator retryはすでにCONSUMEDであり、通常のretryをもう
+一度発行すると「同じ論理taskへのretryのretry禁止」と二重課金防止を破る。
+
+一方、元のretry identityを再使用せずに無制限の別taskを発行することも不適切である。
+必要だったのは、次の事実をすべて結び付けた、別種の一回限りrepair authorization
+である。
+
+- 元General Opinion taskのProvider reservation
+- Cycle 030 operator retryのProvider reservation
+- CONSUMED済みCycle 030 retry authorization
+- retry taskと親子対応するPMP TASK / ERROR
+- NonRetryableAgentErrorの既知failure signature
+- 保存済みRetrieval Contextのretrieval_idとSHA-256
+- 同一modelの修正済みoutput adapterであること
+
+3. どう直したか
+
+新しいtask suffixを追加した。
+
+producer.general_opinion_analyst_provider_output_repair_1
+
+ProviderOutputRepairAuthorizationStoreは上記の相関条件を満たす場合だけPENDING
+authorizationを排他的に作成する。Provider reservation作成直前に、保存済みRetrieval
+ContextのSHA-256をもう一度検証し、reservationの永続化直後にauthorizationを
+CONSUMEDへ遷移させる。Provider callが失敗しても同じrepairは二度とcallできない。
+
+ProducerManagerにはrepair_provider_output()を追加した。この処理はGeneral Opinionの
+最初の未完了checkpointだけを実行し、成功時にstateを通常のRUNNINGへ戻すが、
+stop_after_indexによりResearch Plannerの前で必ず停止する。
+
+CLIには次を追加した。
+
+py main.py --producer-output-repair WORKFLOW_ID --provider openrouter --safe-mode
+
+RetrievalCoordinatorは新suffixもcanonical taskへ正規化する。通常retry、contract
+repair、capability repairの既存意味と、retry-of-retry禁止は変更していない。
+
+4. Real実行前の固定値
+
+state
+- status: FAILED
+- completed_agents: producer.topic_scout, producer.topic_selector
+- general_opinion: absent
+- research_plan: absent
+- SHA-256: ae2c528af2c4430c96268d4ecd24af58e4d651314530f4ba5ab9da0c2b727387
+
+messages SHA-256
+- b9995c75f63ae65b31d8b4f0fda75006446acc2c316063d0f022f2debbf8faa3
+
+Retrieval Context
+- count: 1
+- retrieval_id: retrieval_f354b54b51f6c2f44f4dbfd1
+- SHA-256: bfe69d5cb5d26993a7482c9de28c1e2fbc6a68b504360507943ee5d13f1b9455
+
+Retrieval reservation
+- count: 1
+- SHA-256: 2b0f127bd934f75d93cdb31c88258712610276aded54a50803597a134042b673
+
+Provider reservations
+- count: 4
+- original General SHA-256: b66242c3e5a62483b32efb892dd4de446bb4e1d90aac8ec042770d97e411e039
+- Cycle 030 retry SHA-256: ce923d8293269452a6a4480f949fe767a7faed49844b82ceb57b5c3d6a1beafa
+
+Cycle 030 retry authorization
+- authorization_id: 2cf26975-91fc-4e42-b1fe-5e325745ec28
+- status: CONSUMED
+- SHA-256: a8f7c8011c735d05c6964e7a3bf955af3a5cf531c54675ceafb0165eebe5b46a
+
+Cycle 031 authorization/reservation
+- 実行前はいずれも不存在
+
+5. 検証
+
+Static / targeted
+- Python compile: PASS
+- Cycle 031 targeted + CLI regression: 28/28 PASS
+- Cycle 030 Gemini schema compatibility: PASS
+- 8 Retrieval Agent long-title/long-URL Fault Injection: PASS
+- 22 OpenRouter Structured Output Schema監査: PASS
+
+Fault Injection
+- authorization後にRetrieval Context hashを変更: Provider call 0で拒否
+- repair Provider callを失敗させる: reservationとauthorizationをCONSUMEDにし、2回目はcall前に拒否
+- 成功時の二重実行: state/CONSUMED authorizationによりcall前に拒否
+- すべてのcaseでRetrieval call 0
+
+全体回帰
+- 450/450 unit/integration tests: PASS
+- 31 Role Definitions STRICT load: PASS
+- Doctor: READY（fail=0）
+- 5-layer Mock E2E: ProducerからPlaywright deliveryまでPASS
+
+production workflow clone recovery
+- 実運用workflowのstate、messages、2 Provider reservations、CONSUMED retry
+  authorization、Retrieval Context、retrieval reservationだけを隔離領域へ複製
+- General Opinion mock reasoning call: 1
+- Retrieval call: 0
+- result: RUNNING / completed_agents=3 / research_plan absent
+- Retrieval Contextとretrieval reservationの前後SHA-256: 完全一致
+
+検証時の注意
+- 最初の全テスト実行を誤って2プロセス同時に開始し、長いstaging path上の共有Mock
+  reservationがWindows MAX_PATHに達したため、その結果は無効とした。
+- 公式scripts/verify.pyが定義する短い隔離PRDCP_DATA_DIRで単独再実行し、450/450
+  PASSを正式結果とした。これはproduction codeのFailure Modeではなく、検証環境の
+  実行条件である。
+
+6. 明示的一回Real実行
+
+実行command
+py main.py --producer-output-repair 35fc624a-d8ac-451b-97f6-f3e94e13a951 --provider openrouter --safe-mode
+
+model
+google/gemini-3.7-flash
+
+task identity
+producer.general_opinion_analyst_provider_output_repair_1
+
+Provider call数
+- Structured Reasoning: 1
+- Retrieval: 0
+- Topic Scout: 0
+- Topic Selector: 0
+- Research Planner: 0
+- その他Provider call: 0
+
+API cost
+- このProvider応答と現行reservation形式には実測costが保存されないため、正確な金額は
+  取得不能。call数は新規Provider reservationの4→5とPMP task/resultから1回と確定。
+
+結果
+- SUCCESS
+- status: FAILED -> RUNNING
+- completed_agents: 2 -> 3
+- general_opinion: absent -> saved
+- supporting_sources: 4（保存済み5 sourceの一意な部分集合）
+- 4 sourceすべてsource_id/title/URLが保存済みRetrievalと完全一致
+- research_plan: absentのまま
+- current_agent_id: null
+- Research Planner reservation: 不存在
+
+PMP
+- task message_id: 74bf1982-2103-47ba-a3f8-6f34e056186b
+- result message_id: e474283d-f4bb-4412-8648-5cc41d43e119
+- result.parent_message_idはtask message_idと一致
+
+Cycle 031 authorization
+- authorization_id: a0aac407-284f-47cb-83aa-824cb1254d86
+- source_error_message_id: 5eee762a-578d-4121-994b-d7922bb0628c
+- source_retry_authorization_id: 2cf26975-91fc-4e42-b1fe-5e325745ec28
+- failure_signature: retrieval_metadata_hydration_contract
+- status: CONSUMED
+
+7. Real実行後の不変条件と差分
+
+不変
+- Retrieval Context count: 1
+- Retrieval Context SHA-256: bfe69d5cb5d26993a7482c9de28c1e2fbc6a68b504360507943ee5d13f1b9455
+- Retrieval reservation count: 1
+- Retrieval reservation SHA-256: 2b0f127bd934f75d93cdb31c88258712610276aded54a50803597a134042b673
+- original General reservation SHA-256: b66242c3e5a62483b32efb892dd4de446bb4e1d90aac8ec042770d97e411e039
+- Cycle 030 retry reservation SHA-256: ce923d8293269452a6a4480f949fe767a7faed49844b82ceb57b5c3d6a1beafa
+- Cycle 030 retry authorization SHA-256: a8f7c8011c735d05c6964e7a3bf955af3a5cf531c54675ceafb0165eebe5b46a
+
+期待どおりの差分
+- Provider reservation count: 4 -> 5
+- new reservation SHA-256: ab24399fb34086cd85469b9d61d8e5b19f6567169d285580e72fd84447e80e3b
+- state SHA-256: c4637a6f181e57ab68d044d9ecc0e8fecf8606fca9617cdb5d2f101762ab1f60
+- messages SHA-256: 6dbf3849a5907fe1db816613ebf9b158ba135a02cf18507e81bd34f93f59baa1
+- Cycle 031 authorization作成・CONSUMED
+- PMP TASK/RESULTを各1件追加
+
+8. 設計上の意味
+
+今回の修正は「retry上限を例外的に増やす」ものではない。課金済みのretry失敗が
+Provider障害ではなく、修正済みローカルadapter境界に起因すると相関確認できる場合に
+だけ、別種類のrepair identityを発行する。入力となるRetrievalのhashまでidentityへ
+固定することで、後から検索結果が変わった状態で同じrepair権限を使うことを防ぐ。
+
+また、General Opinion checkpoint直後に停止するため、復旧と通常state machineの再開を
+分離できる。次にResearch Plannerへ進むかは別の明示操作として残り、今回のone-shotが
+下流コストを連鎖発生させない。
+
+9. 再発防止
+
+- LLMへimmutable source metadataの再転記を要求せず、source_idからlocal hydrationする。
+- operator retry、model contract repair、capability repair、output adapter repairを別identity・
+  別authorization namespaceで管理する。
+- authorization作成時とProvider reservation直前の二段階でRetrieval hashを検証する。
+- Provider reservationをcall前に排他的作成し、作成済みtaskの再callを拒否する。
+- failure後の二回目拒否とRetrieval call 0を回帰テストで維持する。
+
+10. Debug Cycle自己監査
+
+- 根本原因まで特定: YES
+- 局所的なretry上限緩和を回避: YES
+- 同系統Failure Mode（共通予約、Retry/Repair、Retrieval canonicalization）を監査: YES
+- Producer以外4層への影響を全450テストで確認: YES
+- State / PMP / Schema / Checkpoint / Reservation / Outboxを確認: YES
+- Regression Test追加: YES
+- Recovery / Fault条件確認: YES
+- Debug Report生成: YES
+- 設計上の意味を記録: YES
+- 不必要なProvider callなし: YES
+- Retrieval call 0: YES
+- Real Structured Reasoning call上限1を遵守: YES
+
+11. 現在の安全な再開位置
+
+ProducerはRUNNING、General Opinion checkpoint保存済み、Research Planner未実行である。
+今回の指示どおりここで停止した。下流を進める場合は別の明示操作として通常の
+--producer-recoverを使用する。Cycle 031では実行していない。

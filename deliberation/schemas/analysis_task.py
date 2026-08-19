@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from deliberation.schemas.research_context import DeliberationResearchContext
+
 
 class AnalysisType(str, Enum):
     ARGUMENT = "ARGUMENT"
@@ -58,15 +60,20 @@ class CounterargumentTask(BaseModel):
     key_claim_ids: list[str] = Field(min_length=1)
     candidate_viewpoint_ids: list[str] = Field(min_length=1)
     evidence_ids: list[str] = Field(min_length=1)
-    agreements: list[dict[str, Any]] = Field(default_factory=list)
-    conflicts: list[dict[str, Any]] = Field(default_factory=list)
-    unresolved_items: list[dict[str, Any]] = Field(default_factory=list)
     initial_integration: dict[str, Any]
-    research_report: dict[str, Any]
+    research_report: DeliberationResearchContext
     revision_context: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_target(self) -> "CounterargumentTask":
         if self.target_agent_id != "deliberation.counterargument_analyst":
             raise ValueError("Counterargument task has an invalid target_agent_id")
+        known_evidence_ids = {
+            item.evidence_id for item in self.research_report.evidence_items
+        }
+        unknown = set(self.evidence_ids) - known_evidence_ids
+        if unknown:
+            raise ValueError(
+                f"Counterargument task references unknown evidence IDs: {sorted(unknown)}"
+            )
         return self

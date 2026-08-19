@@ -1,0 +1,247 @@
+PRDCP v2 Debug Report
+Cycle: 035
+Title: Research Source Identity Canonicalization and One-Shot Adapter Repair
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: REAL ADAPTER REPAIR 1/1 STOPPED SAFELY AT REDUNDANT COMPOSITE IDENTITY; CONTINUED IN CYCLE 036
+
+1. What happened
+
+Cycle 034 deterministically restored relevant_excerpt from the saved Retrieval Context
+and invoked exactly one newly authorized Gemini Structured Reasoning task. That repair
+passed the excerpt contract and exposed the next output-contract failure:
+
+OUTPUT_CONTRACT_ERROR: ungrounded source identity metadata for
+source_008333aebcd976549e1a618a: Japan, 内閣府知的財産戦略推進事務局
+
+The consumed task identity was:
+
+task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_output_repair_1
+
+The correlated ERROR PMP message was 370b61f9-de3f-416a-b505-555609fc78b3, with parent
+adbeb110-d72b-43de-ad56-31427357300f. Its Provider reservation binds the task to
+google/gemini-3.7-flash. The one-shot runtime-output authorization
+68bad3e9-26d5-40a3-8e0b-23c63c57300c is CONSUMED and is not reopened.
+
+No Retrieval call, untouched specialist call or Quality Review call followed that
+failure. The workflow remained FAILED at the exact saved checkpoint.
+
+2. Root cause
+
+The persisted PDF text contains the organization name with extraction/layout whitespace:
+
+内閣府知的財産戦略推 進事務局
+
+Gemini returned the same organization name without the layout space. The prior validator
+used near-literal substring matching, so a typographically equivalent identity was
+rejected. The returned country, Japan, is also deterministically supported by the saved
+.go.jp URL even though the English country name need not occur literally in Japanese PDF
+text.
+
+The same validator also treated study_type, article_type, statement_type and
+organization_type as if they were quoted identity strings. Those fields are analytical
+classifications. Requiring each classification value to appear verbatim in source text
+confused evidence grounding with classification and could reject valid responses from
+all seven Researcher specialists.
+
+The validator was therefore too strict in the wrong dimension. Relaxing all identity
+validation would weaken traceability, while requiring byte-identical PDF text would make
+valid grounding dependent on extraction artifacts.
+
+3. Why Mock and Doctor did not detect it
+
+Mock fixtures used identity values already present as exact substrings in synthetic
+Retrieval content. They did not inject Unicode normalization, PDF layout whitespace or a
+country inferred from a persisted government-domain URL. They also did not distinguish
+identity names from analytical source classifications.
+
+Doctor correctly checks runtime configuration, RD loading, model capabilities and
+Retrieval readiness. It cannot establish semantic grounding for a future response. This
+failure belonged in the deterministic Researcher output adapter and its Fault Injection
+tests.
+
+4. Repair design
+
+The shared ResearcherAgent boundary now separates three concepts.
+
+First, true identity names remain evidence-bound. Expert names and affiliations, academic
+journal names, government organizations, news media names, public-opinion platforms,
+politician names and industry organization names must be supported by the saved source.
+Their comparison uses Unicode NFKC normalization, case folding and removal of whitespace
+and punctuation while preserving alphanumeric content. This accepts PDF layout artifacts
+without accepting an unrelated name.
+
+Second, government country metadata is grounded either by normalized saved source text or
+by a deterministic country-code domain mapping from the persisted URL. The current
+closed mapping covers .jp, .eu, .gov, .gov.uk, .de, .fr, .ca and .au. A mismatched country
+such as France for a .go.jp source remains rejected.
+
+Third, analytical classification fields remain required and retain their Pydantic type
+validation, but are no longer forced to appear as literal quotations in source text.
+This preserves their meaning instead of weakening or silently deleting them.
+
+All seven Researcher specialists use this one shared adapter. Producer General Opinion
+has a separate SupportingSource contract and is not changed. Deliberation, Conclusion and
+Playwright do not emit ResearchSource identity metadata and are unaffected.
+
+5. Recovery identity and billing safety
+
+A new explicit command was added:
+
+py main.py --researcher-runtime-adapter-repair WORKFLOW_ID --provider openrouter --safe-mode
+
+It creates exactly one new task identity:
+
+<original_task_id>_runtime_adapter_repair_1
+
+Authorization requires the consumed Cycle 034 runtime-output authorization, its exact
+Provider reservation and model, the correlated source-identity ERROR PMP, and the same
+saved Retrieval Context ID and SHA-256. A different error class, changed Context hash,
+missing predecessor reservation or previously consumed adapter authorization blocks
+before any Provider call.
+
+The new authorization is consumed after its distinct Provider reservation is durably
+written and before invocation. A failed or ambiguous call therefore cannot be repeated.
+On success, the existing Cycle 032 recovery state machine reuses every saved Retrieval
+Context, runs only the eight untouched Structured Reasoning tasks, integrates the report
+and performs one Researcher Quality Review.
+
+The Cycle 034 Real attempt used one of the nine additionally authorized reasoning calls.
+Eight calls remained under that authorization, but a complete safe continuation requires
+nine calls: one adapter repair plus eight untouched tasks. The system deliberately did
+not make an incomplete eight-call continuation. A fresh explicit maximum of nine
+reasoning calls is required.
+
+6. Regression and Fault Injection
+
+PASS  PDF layout whitespace and Unicode-normalized government organization are accepted
+PASS  Japan is grounded by the immutable saved .go.jp URL
+PASS  France is rejected for the same .go.jp source
+PASS  Analytical classifications are excluded from quotation-style identity grounding
+PASS  One adapter-repair identity is used with zero Retrieval calls
+PASS  A consumed failed adapter repair cannot invoke the Provider again
+PASS  Changed Retrieval hash blocks before reservation or Provider invocation
+PASS  Existing Cycle 030/032/033/034 recovery boundaries remain intact
+PASS  CLI parser exposes the explicit adapter-repair operation
+
+The complete verification result was:
+
+* maintained runtime compilation: PASS
+* full unit/integration suite: 482/482 PASS
+* 31 Role Definitions loaded in STRICT mode: PASS
+* 22 OpenRouter Structured Output schema roots recursively validated: PASS
+* Doctor mock readiness: READY, fail=0
+* five-layer Mock CLI E2E through Playwright: COMPLETED
+
+7. Exact production-clone recovery
+
+The current production workflow was copied to isolated temporary storage and exercised
+with the verified Cycle 035 code. The source production directory was hashed before and
+after the test.
+
+* initial Researcher status: FAILED
+* final Researcher status: COMPLETED
+* Retrieval calls: 0
+* Gemini Structured Reasoning calls: 9
+* Quality Review calls: 1
+* runtime-adapter repair authorizations: 1
+* total runtime-model repair authorizations: 9
+* duplicate logical Provider calls: 0
+* production source state/messages changed: NO
+
+This proves that the failed first specialist receives one new auditable repair identity,
+the remaining eight tasks execute once, and existing Retrieval, Topic Scout, Topic
+Selector and completed Producer artifacts are reused.
+
+Deployment verification repeated the same clone with the deployed production code and
+obtained the same call counts and COMPLETED result. CLI help exposes
+--researcher-runtime-adapter-repair. A read-only status load still reports Producer
+COMPLETED and Researcher FAILED at the expected saved error. The state, messages and
+outbox hashes and every Context/reservation/authorization count listed below remained
+exactly unchanged.
+
+8. Production workflow boundary after the Cycle 034 Real failure
+
+The following values were fixed before Cycle 035 deployment verification:
+
+* state SHA-256: 8DF7BC20A032DC14AADD3A0B04E739B3732AE285B538CE6763F76999E9836003
+* messages SHA-256: ADD5479148EBF7B5D7A87E584B042280C857C85985BD93B55E337505F2BF74E6
+* outbox SHA-256: C3E3ACBBD813327B33A8D8327695CC24415BDFE820029BC27EBC194F654B6CCE
+* saved Retrieval Context files: 10
+* saved Retrieval reservations: 10
+* Provider reservations: 18
+* runtime-repair authorizations: 1
+* runtime-output authorizations: 1
+* runtime-adapter authorizations: 0
+
+All implementation and verification in this cycle used staging or isolated clone
+storage. Existing production workflow JSON, messages, reservations, Contexts,
+authorizations and outbox were not deleted, reset or rewritten.
+
+9. Provider call and cost accounting
+
+Real call that exposed Cycle 035:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+* automatic retries: 0
+
+Cycle 035 implementation and verification:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+
+Exact OpenRouter cost was not persisted by the runtime and must be read from the
+operator's account. Compilation, tests, Doctor, Mock E2E and production-clone recovery
+were non-billable.
+
+10. State, PMP, Schema, Checkpoint, Reservation and Outbox impact
+
+The repair changes only deterministic post-response validation and a suffix-specific,
+chained one-shot authorization path. It does not alter PMP storage formats, strict output
+schemas, existing checkpoints, Retrieval Context content, ordinary retry semantics or
+outbox delivery rules.
+
+On a newly authorized Real continuation, expected writes are limited to the new adapter
+authorization/reservation and correlated RESULT or ERROR; then up to eight existing
+runtime-model repair authorization/reservation/result groups; then normal integrated
+Research Report, Quality Review state and Researcher outbox if successful. Existing
+records are append-only or normally transitioned; no historical file is migrated.
+
+11. Real continuation result
+
+After a fresh explicit authorization, production invoked exactly one runtime-adapter
+repair task and stopped on:
+
+OUTPUT_CONTRACT_ERROR: ungrounded source identity metadata for
+source_008333aebcd976549e1a618a: 内閣官房 / 内閣府知的財産戦略推進事務局
+
+The second component is grounded in saved PDF text after Cycle 035 normalization. The
+first component is the organization represented by the immutable saved cas.go.jp URL.
+The remaining problem was a redundant Provider-generated author_or_organization alias:
+the same typed organization identity was generated independently in multiple fields and
+the combined spelling was then checked as one literal source substring. No Retrieval,
+remaining reasoning or Quality Review call occurred. The consumed adapter identity is not
+reused. Cycle 036 removes those redundant fields from the Provider schema and hydrates
+them from the one validated type-specific identity.
+
+12. Debug Cycle self-audit
+
+Root cause identified: YES
+Symptom-only patch avoided: YES
+Same Failure Mode audited across all 7 Researcher specialists: YES
+Producer General Opinion boundary checked separately: YES
+Other layers and common reservation pipeline checked: YES
+State/PMP/Schema/Checkpoint/Reservation/Context/Outbox impact checked: YES
+Regression tests added: YES
+Recovery and fault conditions verified: YES
+Production clone verified: YES
+Debug Report generated: YES
+Design meaning explained: YES
+Unnecessary Provider calls: NO; Cycle 035 Real calls were limited to 1
+Safety mechanisms disabled: NO
+
+Cycle 035 completed its bounded Real attempt and handed the next proven contract failure
+to Cycle 036.

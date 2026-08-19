@@ -1,0 +1,282 @@
+PRDCP v2 Debug Report
+Cycle: 032
+Title: Discord Runtime Model Drift and Researcher Recovery
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: IMPLEMENTATION / MOCK / FAULT VERIFICATION COMPLETE; REAL RECOVERY FAIL-CLOSED
+
+1. What happened
+
+Producer completed normally. Researcher then created nine initial Research Tasks, but all
+nine Structured Reasoning calls failed. The persisted ERROR PMP records identify
+perplexity/sonar or perplexity/sonar-deep-research and HTTP 404
+ProviderCapabilityError: no endpoint accepted the required parameters.
+
+At investigation time, Settings.from_env() configured every Researcher specialist as
+google/gemini-3.7-flash. The discrepancy was real: the long-lived Discord process had
+constructed its managers and registries before the model configuration changed and kept
+the old Agent.model values.
+
+2. Root cause
+
+There were two runtime-configuration defects.
+
+* Discord constructed all five managers once and never compared their live registry
+  models with the current configuration before a later command.
+* The local .env loader used os.environ.setdefault(). Re-reading Settings in the same
+  process therefore could not observe a changed .env value that the loader itself had
+  installed earlier.
+
+The Researcher failure also exposes a second, independent recovery precondition. The
+production workflow contains no Researcher Retrieval Context for any of the nine tasks.
+The only retrieval_context and retrieval reservation in this workflow belong to the
+Producer General Opinion Analyst from Cycle 031. This indicates that the old Discord
+runtime predated, or otherwise did not execute, the Cycle 029 Retrieval -> Structured
+Reasoning separation for Researcher. A model-only retry cannot reconstruct evidence
+without performing a new search.
+
+3. Why Doctor previously reported READY
+
+Doctor inspected a newly created Settings object and current OpenRouter metadata. It did
+not receive the already-running Discord managers, so it could prove that the configured
+models were compatible but could not prove that the live registries held those models.
+Configured compatibility and runtime identity are now separate checks.
+
+Definitions used by Cycle 032:
+
+* Configured Model: current Settings/.env model for an agent.
+* Runtime Model: model held by the live manager registry (Agent.model, or the manager
+  model snapshot held by registry.models).
+* Resolved Model: a verified provider-agent-output-schema compatibility binding used at
+  invocation time. It is reported separately and is not mistaken for base-model drift.
+
+4. Production evidence fixed before modification
+
+Producer state: COMPLETED
+Producer completed agents: 5
+Producer state SHA-256: 935e5fb829747475e9e15ecdc66c9f5eefb7f75c1062bc636b025a46494f1090
+
+Researcher state: FAILED
+Researcher completed agents: 0
+Research Tasks: 9
+Researcher state SHA-256: 701ccffcf00900643ec7078d809b70d0b8ee0e2ff108788526864460419681dc
+Workflow retrieval_context count: 1 (Producer General Opinion only)
+Workflow retrieval reservation count: 1 (Producer General Opinion only)
+Workflow provider reservation count: 16
+Researcher saved Retrieval Contexts: 0/9
+
+Task evidence:
+
+1) task_1abf9d163f0f4c20980e4221ca960e1e
+   agent: researcher.government_researcher
+   research_question: rq_transparency_policy_001
+   error PMP: 9ad9ba25-5f6a-4e11-85f6-9f810660e202
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: fafdc20d76a198521ba3b748491b16803d80937aa21aa8b07f706e14f238480e
+   Retrieval Context: MISSING
+
+2) task_903e2f7ec9764fc58ec30eea9486990e
+   agent: researcher.academic_researcher
+   research_question: rq_transparency_policy_001
+   error PMP: 28932112-eef5-4ba9-95cf-824216bfbf56
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: f6cde2a9a56673a38bcc2a70c29d2c4af2900d3f501f1463a05c3e2f53141d7b
+   Retrieval Context: MISSING
+
+3) task_736d525b2700492aaefe4bb6083a9ff2
+   agent: researcher.expert_researcher
+   research_question: rq_transparency_policy_001
+   error PMP: c00465c9-196d-468b-8222-183083923087
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: b1f4195d9202498a91bd7e6bfed51d606a5e30136c034ec4051e8f4ea5f93a1f
+   Retrieval Context: MISSING
+
+4) task_9d7952d2e23c4d348acbc5310bd9a55e
+   agent: researcher.industry_researcher
+   research_question: rq_technical_measures_002
+   error PMP: 96685eee-671c-4cac-aae7-cda33ce7053b
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: 07fadeca2fce2c87632ec03113e372027c6f64df5831a49a9a269888c635da29
+   Retrieval Context: MISSING
+
+5) task_c31b34d20d8146438903ad200c088b80
+   agent: researcher.expert_researcher
+   research_question: rq_technical_measures_002
+   error PMP: af8a622f-cd61-4585-aa69-f8a01c4ae453
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: fac30c3119470d73767dca3e4382a59c40128865438d4d18327c12e61552aee9
+   Retrieval Context: MISSING
+
+6) task_2fa5e5738aed4cb99ac56fffdde57919
+   agent: researcher.news_researcher
+   research_question: rq_technical_measures_002
+   error PMP: 40289dbd-dc66-4073-8ded-ef51f775d522
+   failed model: perplexity/sonar
+   original reservation SHA-256: 413e4850f9ceef0a4f3b9cd5b29a5f05447c434396329145b6f17d949139acf4
+   Retrieval Context: MISSING
+
+7) task_424faf70d1944c888726351e93afe2df
+   agent: researcher.industry_researcher
+   research_question: rq_licensing_compensation_003
+   error PMP: c1280c95-5f24-4ace-bd4f-f523a1dd560e
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: 3fb9aec13af965a45d2a64c05c6ebda0c18e425d23cc5afbc86404fb5590a7cf
+   Retrieval Context: MISSING
+
+8) task_764ecbae962144188ad90cde40530b9c
+   agent: researcher.government_researcher
+   research_question: rq_licensing_compensation_003
+   error PMP: 295fede7-eee4-499d-a4d7-d6a7e86e325f
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: 89d5d805c6eeb1d038602ec8a138e9b682701cd89def2550dc8a0a3359c8a09b
+   Retrieval Context: MISSING
+
+9) task_157c1cc9cb6e411c9bfd4affd3b6c5e2
+   agent: researcher.academic_researcher
+   research_question: rq_licensing_compensation_003
+   error PMP: 46f532e7-55c7-42e5-9ac6-f96737791dd0
+   failed model: perplexity/sonar-deep-research
+   original reservation SHA-256: 90aa9fdfadc31e3c9f1e262226c194ba43efd985ccfeb8007fd6c9c3925ed4dd
+   Retrieval Context: MISSING
+
+5. Changes made
+
+Runtime drift control:
+
+* Added a 31-agent runtime audit that reads live registries, current configured models,
+  and verified compatibility bindings as separate values.
+* Added a Discord execution-boundary guard for Producer, Researcher, Deliberation,
+  Conclusion, Playwright, resume/integration commands, and automatic layer transitions.
+  Drift raises RUNTIME_MODEL_DRIFT before provider reservation or provider invocation.
+* Added !runtime_models [layer]. It reports a compact current count and full details only
+  for drifted agents.
+* Added immutable audit artifacts under runtime_model_snapshots without modifying workflow
+  JSON/PMP schemas.
+* Changed .env refresh so only values previously installed by the loader may be refreshed;
+  parent-process/operator-owned environment values retain precedence.
+* Kept verified compatibility bindings out of the drift predicate, preventing false drift
+  for Conclusion Position Generator and Playwright Visual Director repairs.
+
+Researcher recovery:
+
+* Added --researcher-runtime-model-repair WORKFLOW_ID.
+* Recovery accepts only an incomplete initial task with a correlated original TASK and
+  HTTP 404 capability ERROR, a different current runtime model, COMPATIBLE capability
+  metadata, an original provider reservation, and an exact saved Retrieval Context/hash.
+* Every call uses <original_task_id>_runtime_model_repair_1.
+* Added persistent PENDING -> CONSUMED one-shot authorization bound to workflow, agent,
+  old/new model, error PMP, retrieval ID, retrieval hash, and repair reservation.
+* Recovery is sequential. A validated RESULT/PMP is persisted before the next task is
+  authorized. Saved results are reconciled before every paid call.
+* Automatic provider retry is zero in required Demo Safe Mode. A consumed repair cannot
+  be repaired again.
+* Missing Retrieval fails closed before authorization, search, reservation, or reasoning.
+* Cycle 030 source hydration and unknown-source rejection remain active for all seven
+  Researcher specialists.
+
+Reservation boundary hardening discovered by full regression:
+
+Directly constructed managers under the long Work path exposed a common Windows path
+length failure in the old global fallback reservation directory. All five managers now
+use this precedence: explicit Provider reservation root, then PRDCP_DATA_DIR, then the
+manager Repository data directory. Production builders already supplied the explicit
+root, so production reservation locations do not change.
+
+6. Verification
+
+PASS  Static/compileall
+PASS  Cycle 032 unit/fault tests: 8
+PASS  Runtime drift: changed .env/live registry -> reservation 0, provider call 0
+PASS  No-drift normal execution
+PASS  Verified binding does not produce false drift
+PASS  Saved Retrieval -> retrieval call 0, reasoning call 1
+PASS  Missing Retrieval -> retrieval call 0, reasoning call 0, authorization 0
+PASS  Consumed authorization -> provider call 0
+PASS  Post-commit state-save fault -> saved RESULT reused, reasoning call 0
+PASS  Partial success -> completed task retained and not called again
+PASS  Failed repair -> repair-of-repair rejected before provider call
+PASS  Runtime repair identity canonicalizes to original Retrieval identity
+PASS  Cycle 030 source hydration / unknown source contract regression
+PASS  Researcher regression
+PASS  Deliberation regression: 57/57
+PASS  31 Role Definitions loaded in STRICT mode
+PASS  22 OpenRouter Structured Output root schemas
+PASS  Doctor (mock): READY, fail=0
+PASS  5-layer Mock E2E through Playwright COMPLETED
+PASS  Full unit/integration suite: 458 tests, 458 PASS
+
+Production clone fault test:
+
+* Exact production FAILED state and nine original reservations were copied to an isolated
+  temporary data directory.
+* With the actual missing-Retrieval condition: provider calls 0, authorizations 0,
+  automatic retrieval 0, fail closed.
+* For the positive recovery branch only, nine Mock Retrieval Contexts were created as
+  isolated test fixtures, then the retrieval counter was reset.
+* Recovery result: reasoning 9, Quality Review 1, recovery retrieval 0, duplicate calls 0,
+  saved results 9, final Researcher status COMPLETED.
+
+7. Real call and cost accounting
+
+Real OpenRouter generation calls in Cycle 032: 0
+Real Retrieval calls in Cycle 032: 0
+Estimated/observed API cost in Cycle 032: USD 0.00
+
+Calculated production Real Recovery target before any call:
+
+Recovery target: 0 tasks
+Saved Researcher Retrieval: 0/9
+Allowed Retrieval calls: 0
+Allowed Gemini reasoning calls under current plan: 0
+Allowed Quality Review calls under current plan: 0
+
+No explicit Real approval was requested or consumed because the mandatory saved-Retrieval
+precondition is false. Running a search now would violate the Cycle 032 plan's absolute
+Retrieval-call-zero requirement. The production workflow/state/messages/reservations and
+the sole Producer Retrieval Context remain unchanged.
+
+8. State/PMP difference
+
+Production state difference during investigation and verification: none.
+Production messages difference: none.
+Production provider reservations difference: none.
+Production retrieval reservations/contexts difference: none.
+No storage migration, deletion, initialization, or workflow JSON rewrite was performed.
+
+9. Design meaning and recurrence prevention
+
+Configuration compatibility is no longer treated as proof of live runtime identity.
+Provider execution now has an explicit runtime boundary: the live model must equal the
+current configured base model before a reservation exists. Compatibility bindings remain
+audited invocation-time resolutions.
+
+Recovery is not a general retry. It is an evidence-bound transition from one immutable
+failed identity to one immutable repair identity. Retrieval evidence is a required
+checkpoint, not something recovery silently recreates. This prevents old-provider replay,
+unplanned searches, duplicate billing, and repair-of-repair loops.
+
+10. Cycle self-audit
+
+Root cause identified: YES
+Symptom-only patch avoided: YES
+Same failure mode audited across 31 agents / five layers: YES
+State/PMP/Schema/Checkpoint/Reservation/Outbox impact reviewed: YES
+Regression tests added: YES
+Recovery/Fault conditions verified: YES
+Debug Report generated: YES
+Design meaning documented: YES
+Unnecessary Provider calls: NO (real calls 0)
+Existing production workflow/storage modified: NO
+
+11. Required next decision
+
+The code can be deployed safely, and a restarted Discord bot will prevent future runtime
+model drift. This particular workflow cannot perform the planned zero-search recovery
+because its nine Researcher Retrieval Contexts were never saved. A later operator decision
+must choose either:
+
+* preserve the Cycle 032 zero-Retrieval-call rule and leave this workflow fail-closed; or
+* explicitly authorize a separately designed retrieval reconstruction cycle with a new
+  retrieval identity, budget, audit record, and Real call ceiling.
+
+The second option is outside Cycle 032 and was not assumed or executed.

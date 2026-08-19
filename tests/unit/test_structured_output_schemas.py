@@ -189,6 +189,19 @@ class StructuredOutputSchemaTests(unittest.TestCase):
         self.assertTrue(any("/anyOf/" in path for path in paths))
         self.assertEqual(strict_schema_violations(schema), [])
 
+    def test_decision_evaluation_matrix_is_bounded_and_uses_plural_candidate_refs(self) -> None:
+        schema = strict_output_schema(DecisionEvaluationResult)
+
+        evaluations = schema["properties"]["candidate_evaluations"]
+        self.assertEqual(evaluations["maxItems"], 70)
+        self.assertEqual(schema["properties"]["comparison_matrix"]["maxItems"], 5)
+        advantage = schema["$defs"]["ConditionalAdvantage"]
+        sensitivity = schema["$defs"]["SensitivityResult"]
+        self.assertIn("advantaged_candidate_ids", advantage["properties"])
+        self.assertNotIn("advantaged_candidate_id", advantage["properties"])
+        self.assertIn("preferred_candidate_ids", sensitivity["properties"])
+        self.assertNotIn("preferred_candidate_id", sensitivity["properties"])
+
     def test_free_form_objects_are_rejected_instead_of_silently_closed(self) -> None:
         cases = (
             (FreeAnyPayload, {"payload": {"nested": {"unknown": [1, "two"]}}}),
@@ -318,6 +331,7 @@ class StructuredOutputSchemaTests(unittest.TestCase):
                     "source_ids": [],
                     "analysis_ids": [],
                     "counterargument_ids": [],
+                    "challenge_ids": [],
                     "integration_ids": [],
                     "task_ids": [],
                 }
@@ -343,6 +357,28 @@ class StructuredOutputSchemaTests(unittest.TestCase):
         ):
             self.assertIn(field_name, schema["required"])
 
+        readiness_ref = schema["properties"]["conclusion_readiness"]["$ref"]
+        readiness_name = readiness_ref.rsplit("/", 1)[-1]
+        self.assertEqual(
+            schema["$defs"][readiness_name]["enum"],
+            ["ready", "ready_with_conditions", "not_ready", "undetermined"],
+        )
+
+    def test_researcher_finding_type_is_required_and_bounded_for_human_gate(self) -> None:
+        schema = strict_output_schema(ResearchQualityReviewOutput)
+        finding_schema = schema["$defs"]["ResearchReviewFinding"]
+        self.assertIn("finding_type", finding_schema["required"])
+        finding_type = finding_schema["properties"]["finding_type"]
+        enum_name = finding_type["$ref"].rsplit("/", 1)[-1]
+        self.assertEqual(
+            schema["$defs"][enum_name]["enum"],
+            [
+                "EVIDENCE_SUFFICIENCY_FINDING",
+                "HARD_INTEGRITY_FAILURE",
+                "UNCLASSIFIED",
+            ],
+        )
+
     def test_deliberation_required_scope_is_an_explicit_closed_model(self) -> None:
         schema = strict_output_schema(DeliberationQualityReviewOutput)
         request_schema = schema["$defs"]["UpstreamResearchRequest"]
@@ -359,6 +395,12 @@ class StructuredOutputSchemaTests(unittest.TestCase):
         conclusion_finding = conclusion_schema["$defs"]["ConclusionQualityFinding"]
         self.assertIn("affected_agent_ids", conclusion_finding["required"])
         self.assertIn("affected_candidate_ids", conclusion_finding["required"])
+        readiness_ref = conclusion_schema["properties"]["playwright_readiness"]["$ref"]
+        readiness_name = readiness_ref.rsplit("/", 1)[-1]
+        self.assertEqual(
+            conclusion_schema["$defs"][readiness_name]["enum"],
+            ["ready", "ready_with_conditions", "not_ready", "not_applicable"],
+        )
 
         playwright_schema = strict_output_schema(VisualPlan)
         visual_cue = playwright_schema["$defs"]["VisualCue"]

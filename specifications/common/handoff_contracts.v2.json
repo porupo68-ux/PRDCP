@@ -37,13 +37,17 @@
         "source_perspectives",
         "evidence_quality_assessments",
         "research_limitations",
-        "unresolved_questions"
+        "unresolved_questions",
+        "human_evidence_decision",
+        "accepted_evidence_gaps",
+        "human_evidence_integrity_repairs"
       ],
       "required_ids": [
         "research_question_id",
         "evidence_id",
         "source_id"
-      ]
+      ],
+      "human_gate": "human_evidence_decision"
     },
     "deliberation_to_conclusion": {
       "message_type": "deliberation_result",
@@ -66,6 +70,8 @@
         "unresolved_issues",
         "research_gaps",
         "source_traceability",
+        "human_evidence_decision",
+        "accepted_evidence_gaps",
         "quality_review"
       ],
       "required_ids": [
@@ -102,6 +108,8 @@
         "unresolved_issues",
         "prohibited_interpretations",
         "source_registry_reference",
+        "human_evidence_decision",
+        "accepted_evidence_gaps",
         "quality_review",
         "workflow_metadata"
       ],
@@ -113,7 +121,10 @@
         "evidence_id",
         "source_id"
       ],
-      "human_gate": "user_final_selection"
+      "human_gates": [
+        "human_evidence_decision",
+        "user_final_selection"
+      ]
     }
   }
 }

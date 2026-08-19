@@ -1,0 +1,15 @@
+{
+  "authorization_id": "b4c4d5b0-9897-435c-895e-da191c3d0722",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "provider_id": "openrouter",
+  "agent_id": "deliberation.manager",
+  "original_task_id": "deliberation_manager_final_integration_revision_1_recovery_1_contract_repair_1",
+  "retry_task_id": "deliberation_manager_final_integration_revision_1_recovery_1_contract_repair_1_operator_retry_1",
+  "source_error_message_id": "manager_provider_failure_4a600701a42a4690a8bcaa45769f5d1a",
+  "source_error_class": "ProviderResponseContractError",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-18T10:33:41.320411Z",
+  "consumed_at": "2026-08-18T10:33:42.718405Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\35fc624a-d8ac-451b-97f6-f3e94e13a951\\deliberation_manager_final_integration_revision_1_recovery_1_contract_repair_1_operator_retry_1.json"
+}

@@ -1,0 +1,276 @@
+Cycle 043 — Final Integration Causal Traceability Prefix Contract Repair
+Date: 2026-08-19 (Asia/Tokyo)
+Workflow: 4b837e0e-9e1c-4150-97e1-ac31ef87024e
+Status: IMPLEMENTATION AND ALL ZERO-CALL VERIFICATION COMPLETE; PRODUCTION RECOVERY AWAITS EXPLICIT PAID-CALL AUTHORIZATION
+
+1. What happened
+
+The saved Deliberation reached Final Integration after all three primary analyses,
+Initial Integration, and Counterargument completed. The paid Final Manager response
+was received and persisted as an invalid payload, but local Pydantic validation
+rejected two traceability references:
+
+  alt_interp_task_fragmentation_and_busyness
+  alt_interp_skill_ceiling_decay
+
+Both appeared in FinalIntegratedAnalysis.traceability_index[*].causal_item_ids.
+The existing validator allowed primary Causal Analyst namespaces only:
+causal_, mechanism_, structure_/structural_, feedback_, alternative_, and alt_exp_.
+The workflow therefore closed as FAILED rather than storing an invalid checkpoint.
+
+2. Canonical ownership and alt_exp_ distinction
+
+alt_exp_/alternative_ are owned by the Causal & Structural Analyst. They identify
+primary competing causal explanations and are valid in the primary causal result,
+Initial Integration, Final Integration, and downstream causal traceability.
+
+alt_interp_ is owned by the Counterargument Analyst. It identifies an alternative
+interpretation produced while challenging the Initial Integration. It is not valid
+in the primary Causal Analyst result or Initial Integration.
+
+Final Integration is the deliberate ownership transition. The Manager may promote
+an exact Counterargument alt_interp_* artifact into
+causal_structure.alternative_explanations when it retains the originating
+counterargument in source_counterargument_ids. At that point it is a real item in
+the final causal model and causal_item_ids must be able to trace it. The production
+payload did exactly this for both rejected IDs. It was not a naming typo and must
+not be renamed mechanically to alt_exp_*.
+
+3. Root cause
+
+The Counterargument producer and Final Manager were semantically consistent, but
+the shared traceability consumer still represented only the pre-Counterargument
+primary causal namespace. This was contract drift between a later producer stage
+and FinalIntegratedAnalysis validation.
+
+The same-family audit found two read-path variants of the same problem:
+
+- canonicalize_legacy_causal_item_ids accepted alternative_* but incorrectly
+  treated the equally canonical alt_exp_* namespace as legacy;
+- saved Final recovery used startswith("alt_") broadly and would rename canonical
+  alt_exp_* or alt_interp_* IDs while trying to repair old alt_1 placeholders.
+
+Those paths did not cause the first failure, but would have changed valid IDs on
+Recovery. They were corrected in the same Cycle because they share the exact
+namespace-ownership failure mode.
+
+4. Design meaning of the repair
+
+The contract is stage-aware rather than globally permissive:
+
+- Counterargument alternative_interpretations require alt_interp_* IDs.
+- Primary causal alternatives remain alternative_*/alt_exp_* only.
+- Initial Integration rejects alt_interp_* in both its causal model and trace.
+- Final Integration accepts alt_interp_* only as a declared alternative
+  explanation with source_counterargument_ids.
+- A Final trace may reference an alt_interp_* ID only when the exact ID was present
+  in the Counterargument artifact supplied to that Manager request.
+- Unknown prefixes and valid-looking but non-source alt_interp_* IDs fail closed.
+
+The Provider-visible schema now contains the bounded causal trace pattern. The
+Initial request specialization excludes alt_interp_*; the Final request pattern
+includes it. Local Pydantic and cross-artifact validation repeat the semantic
+checks after the Provider response.
+
+5. Code changes
+
+- deliberation/schemas/counterargument_analysis.py
+  Defines the canonical alt_interp_* namespace for AlternativeInterpretation.
+- deliberation/schemas/integrated_analysis.py
+  Defines primary versus Final causal trace patterns, documents the namespace,
+  rejects alt_interp_* in Initial, requires declared counterargument lineage in
+  Final, and cross-checks exact Counterargument-owned interpretation IDs.
+- deliberation/schemas/causal_structural_analysis.py
+  Preserves canonical alt_exp_* during legacy checkpoint reads.
+- deliberation/manager.py
+  Supplies Initial/Counterargument artifacts to saved-payload provenance checks,
+  preserves alt_exp_*/alt_interp_* during Final recovery, rebuilds traceability
+  with the Final namespace, and records preserved interpretation IDs in the audit.
+- deliberation/prompts/manager.md
+  Explains the alt_exp_ versus alt_interp_ ownership and Final-only transition.
+- providers/mock/deliberation_fixtures.py
+  Emits canonical alt_interp_* IDs and exercises their Final promotion.
+- tests/unit/test_deliberation_payloads.py and
+  tests/unit/test_deliberation_manager.py
+  Add production-ID, schema, fault, persistence, reviewer, revision, and handoff
+  coverage.
+- scripts/verify_cycle043_traceability_clone.py
+  Clones the exact production boundary and verifies zero-cost checkpoint recovery
+  through Delivery without changing production storage.
+
+6. Contract impact map
+
+Changed Contract:
+  FinalIntegratedAnalysis causal traceability ID namespace
+Canonical Owner:
+  CounterargumentAnalysisResult.AlternativeInterpretation for alt_interp_;
+  FinalIntegratedAnalysis for the controlled Final promotion
+Producer:
+  Counterargument Analyst -> Deliberation Final Manager
+Persistence:
+  Deliberation state, invalid Manager payload, Final checkpoint, PMP messages
+Direct Consumers:
+  FinalIntegratedAnalysis validator, deterministic validation, Quality Review
+Transitive Consumers:
+  Deliberation Result -> Conclusion -> Playwright -> Delivery
+
+No Researcher, Human Evidence Gate, Retrieval, model assignment, Conclusion
+selection design, Playwright design, or production analysis content was changed.
+
+7. Regression and fault verification
+
+Static:
+  compileall PASS
+Targeted Deliberation:
+  109 tests PASS in 83.794 seconds
+Explicit Cycle 043 fault/persistence set:
+  7 tests PASS
+Full regression:
+  570 tests PASS in 472.294 seconds
+Role Definitions:
+  31 RD loaded in STRICT mode
+Structured Outputs:
+  all 22 OpenRouter root schemas PASS recursive strict audit
+Doctor:
+  READY, fail=0 (optional dependency/config warnings only)
+Five-layer Mock E2E:
+  Producer -> Researcher -> Deliberation -> Conclusion -> Playwright -> Delivery
+  PASS with six expected Delivery files
+
+Explicit new cases:
+  - production alt_interp_task_fragmentation_and_busyness PASS
+  - production alt_interp_skill_ceiling_decay PASS
+  - canonical alt_exp_* PASS and no legacy rename
+  - foo_interp_*/invalid_causal_* rejection
+  - mixed valid/invalid list rejection
+  - Initial Integration alt_interp_* rejection
+  - Final alt_interp_* without declared alternative rejection
+  - valid-prefix but absent-from-Counterargument ownership rejection
+  - persist -> reload -> Quality Review preservation
+  - internal revision preservation
+  - Deliberation Result and Conclusion handoff preservation
+  - saved Final invalid-payload recovery with Provider call count 0
+
+Cycle 041 safety regressions:
+  - full traceback remains in logs
+  - Discord receives one bounded operational summary below its message limit
+  - execution failure closes RUNNING as ERROR
+
+8. Post-change consumer audit
+
+Active-source searches excluded archive, __pycache__, and production storage.
+
+- Causal Analyst primary schemas and RD continue to allow only
+  alternative_/alt_exp_.
+- Counterargument AlternativeInterpretation is the only active producer contract
+  for alt_interp_*.
+- Initial Integrated Analysis explicitly rejects that Final-only namespace.
+- Final traceability, saved Final recovery, deterministic validation, Quality
+  Review, Deliberation Result, and Conclusion handoff preserve it.
+- No active argument_item_ids, stakeholder_item_ids, or
+  counterargument_item_ids analogue exists. TraceabilityEntry instead uses typed
+  claim, viewpoint, causal, change, evidence, source, analysis,
+  counterargument, challenge, integration, and task fields; their existing prefix
+  checks remain intact.
+- The only remaining startswith("alt_") compatibility path is guarded to exclude
+  alt_exp_* and is preceded by explicit alt_interp_* preservation. It applies only
+  to old noncanonical alt_1-style placeholders.
+
+No old Final consumer assumption that alt_interp_* is invalid remains.
+
+9. Production clone
+
+The exact production workflow boundary was copied to isolated temporary storage.
+The source boundary was hashed before and after and remained byte-for-byte equal.
+
+Starting clone state:
+  Deliberation: FAILED at Final local validation
+  completed agents: 4
+  saved messages: 10
+  Provider reservations: 22
+  Retrieval reservations: 10
+
+Clone recovery result:
+  saved primary calls re-executed: 0
+  Initial Integration calls re-executed: 0
+  Counterargument calls re-executed: 0
+  Final Integration calls re-executed: 0
+  Deliberation calls: DeliberationQualityReviewOutput only
+  exact two production alt_interp_* IDs preserved
+  deterministic validation: passed=true
+  Deliberation: COMPLETED, active error=null
+  Conclusion Human Gate: WAITING_HUMAN_SELECTION
+  fixture selection: COMPLETED
+  Playwright: COMPLETED
+  Delivery: six expected files
+  Researcher sources preserved: 27
+  accepted gap preserved: fqrq_ai_emp_003_news_missing
+  real Provider calls: 0
+  Retrieval calls: 0
+  production source storage mutated: false
+
+10. Production boundary before real recovery
+
+Researcher state SHA-256:
+  6c12d9f85ce12adef2c68ebc31f98e93e604a20ddce8ec51ccd86d6518a1e9b3
+Research Report SHA-256:
+  52d2ec719cbd05d781e1e88d2dbd60fea79d5d100e46a14dea81da5cfb681fbb
+Researcher -> Deliberation handoff SHA-256:
+  0f567d0b1fb1d031c5524ddb404fdd835fe0a6e3f405f834b7716cda090f6159
+Human Decision SHA-256:
+  3ff9ae389c083b6db379a03b78b0900ab806daab834ee5d058ecc2973b18f7f8
+Deliberation FAILED state SHA-256:
+  162b8b7e4c95e1a2bbb3f79c9ed0423e0ce0282d7a8de2d548412a1bdc410ebb
+Deliberation messages SHA-256:
+  1e986dc3fbb9c518818da109625db2ea5cbbfb5f67ef80d2420bb775f9a9e0dc
+OpenRouter Provider reservations:
+  22
+OpenRouter Retrieval reservations:
+  10
+
+The Bot was restarted once after all zero-call verification. The old single
+launcher/worker pair 13636/39860 was replaced by the single pair 8344/30400. No
+duplicate Bot remains.
+
+11. API accounting and stop condition
+
+Cycle 043 implementation/test/fault/clone:
+  Real Provider calls: 0
+  Real Retrieval calls: 0
+  Production state/messages/reservations/outbox writes: 0
+
+The current user request references a plan containing Production Recovery, but it
+does not explicitly authorize a paid OpenRouter call for this exact workflow.
+Therefore no production recover command was issued.
+
+Expected explicitly authorized command boundary:
+  py main.py --deliberation-recover
+    4b837e0e-9e1c-4150-97e1-ac31ef87024e
+    --provider openrouter --safe-mode
+
+Maximum new calls at this boundary:
+  Retrieval: 0
+  Primary analyses: 0
+  Initial Integration: 0
+  Counterargument: 0
+  Final Integration: 0
+  Deliberation Quality Review: 1
+
+If that call fails, stop with no automatic resend. If it returns an internal or
+Researcher revision decision, Safe Mode must stop before another Provider call.
+Further Conclusion/Playwright paid calls and final Human Selection remain separate
+authorization/decision boundaries.
+
+12. Prevention
+
+Every future identifier-contract change must be audited in both directions:
+
+  canonical owner -> producer -> Provider schema -> local validator -> persistence
+  -> reload -> direct consumer -> transitive downstream -> Delivery
+
+and:
+
+  old consumer assumptions -> compatibility adapters -> recovery -> fault paths.
+
+Prefix similarity is not semantic equivalence. A namespace may cross ownership
+only at an explicit integration boundary with source lineage retained.

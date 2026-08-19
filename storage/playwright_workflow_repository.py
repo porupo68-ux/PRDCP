@@ -9,6 +9,7 @@ from playwright.schemas import (
     CitationManifest,
     FinalScriptPackage,
     NarrativeBlueprint,
+    PlaywrightDeterministicRepairRecord,
     ScriptDraft,
     VisualPlan,
 )
@@ -27,6 +28,9 @@ class PlaywrightWorkflowRepository(JsonRepository):
         self.citation_dir = data_dir / "artifacts" / "citation_manifests"
         self.visual_dir = data_dir / "artifacts" / "visual_plans"
         self.package_dir = data_dir / "artifacts" / "final_script_packages"
+        self.deterministic_repair_dir = (
+            data_dir / "artifacts" / "playwright_deterministic_repairs"
+        )
         self.deliveries_dir = data_dir / "deliveries"
         for directory in (
             self.workflows_dir,
@@ -37,6 +41,7 @@ class PlaywrightWorkflowRepository(JsonRepository):
             self.citation_dir,
             self.visual_dir,
             self.package_dir,
+            self.deterministic_repair_dir,
             self.deliveries_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -75,6 +80,15 @@ class PlaywrightWorkflowRepository(JsonRepository):
 
     def save_final_package(self, artifact: FinalScriptPackage) -> Path:
         return self._save_model(self.package_dir / f"{artifact.workflow_id}.json", artifact)
+
+    def save_deterministic_repair(
+        self,
+        artifact: PlaywrightDeterministicRepairRecord,
+        workflow_id: str,
+    ) -> Path:
+        target = self.deterministic_repair_dir / workflow_id
+        target.mkdir(parents=True, exist_ok=True)
+        return self._save_model(target / f"{artifact.repair_id}.json", artifact)
 
     def load_final_package(self, workflow_id: str) -> FinalScriptPackage:
         path = self.package_dir / f"{workflow_id}.json"

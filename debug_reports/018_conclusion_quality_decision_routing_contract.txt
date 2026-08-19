@@ -1,0 +1,187 @@
+PRDCP Debug Report
+
+ID: 018
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion
+Agent: conclusion.quality_reviewer
+Error Class: SCHEMA / VALIDATION / REVISION / RECOVERY
+
+1. 発生した症状
+
+Cycle 017の明示的一回Real retryでDecision EvaluatorとDecision Integratorは成功した。続くConclusion Quality Reviewerは、承認してHuman Selectionへ進める判定と、成果物を修正して再審査する経路を同じ応答に混在させた。Pydanticは`approved review cannot route revisions`として拒否し、ConclusionはFAILEDになった。
+
+2. 発生地点
+
+- workflow_id: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+- task_id: conclusion_quality_review_upstream_0_revision_0
+- message_id: 39696367-f2d3-4854-b5b2-63064f42bc7e
+- parent_message_id: ac6ae8cc-8142-45ae-b89a-e9b6a864a493
+- provider: OpenRouter
+- model: qwen/qwen3.6-35b-a3b
+- Safe Mode: true
+- reservation: 保存済み
+- invalid payload / validation_errors: Error PMPへ保存済み
+
+3. 再現条件
+
+Quality Reviewが次の組合せを返す。
+
+- status=approved_with_conditions
+- playwright_readiness=ready_with_conditions
+- revision_scope=targeted
+- revision_targets=[conclusion.manager, conclusion.decision_integrator]
+- upstream_revision_requestsにtraceability_mapping/schema_validation要求
+- findingはConclusion内のclaim mapping修正を要求
+
+これは「Playwrightへ進める」「Conclusion内部を修正する」「Deliberationへ返送する」の三つを同時に意味し、Managerが安全に一つの次工程を選べない。
+
+4. 根本原因
+
+Runtime schemaはapproved系の修正routingを既に拒否しており、この停止自体は正しかった。根本原因はConclusion Quality Reviewerへ与える設計契約が分裂していたことである。
+
+- RDの説明・責務・stable decisionでは正式状態をapproved / approved_with_conditions / revision_required / blockedとしていた。
+- 同じRDのapproval policy、formal output schema、configurationではrevision_requiredの代わりにrejectedを列挙していた。
+- Agent promptは審査観点だけを一文で示し、status/readiness/scope/internal target/upstream requestの排他的対応表を持たなかった。
+- Runtime validatorはapproved系の基本矛盾を拒否したが、internal revisionとdeliberation_returnの混在、scopeとtarget件数、上流requestからfindingへの参照を完全には制約していなかった。
+- revision_targetsが自由文字列で、Conclusion外AgentやReviewer自身をStructured Output境界で除外できなかった。
+
+5. なぜこの問題が発生したか
+
+ProviderはRD全体、短いAgent prompt、JSON Schemaを同時に受け取る。RD内で`rejected`と`revision_required`が競合し、`approved_with_conditions`の「条件」が開示条件なのか修正条件なのか曖昧だった。そのため、内容上はmapping修正が必要だと判断しながら、status/readinessだけ承認側に置く出力が成立した。
+
+6. なぜ既存テストで発見できなかったか
+
+既存Schema testはapprovedがrevision targetを持つ単純矛盾とreadinessだけを検証していたが、実Providerが返した三者混在payloadをfixture化していなかった。Mock Quality Reviewerは常に整合済みのdecisionを返し、RDのformal status vocabularyとruntime enumの一致を比較するテストもなかった。
+
+7. 修正計画
+
+1) RDの正式状態名をruntimeの4値へ統一する。
+2) Promptへ排他的decision/routing tableを明記する。
+3) Runtime schemaでapproval、internal revision、Deliberation return、blockedを相互排他的にする。
+4) Conclusion内部revision targetを有限Enumにする。
+5) blocking/upstream参照を同じReviewのfinding IDsへcross-checkする。
+6) 観測payloadをFault Injectionし、保存済み3 checkpointを再利用してReviewerだけ一回再試行できることを検証する。
+
+8. 実際の修正内容
+
+- role_definition_versionを1.0.2へ更新し、RD内の`rejected` / `rejection_reason`を`revision_required` / `revision_reason`へ統一した。
+- Promptにapproved、approved_with_conditions、internal revision、deliberation_return、blockedの完全な対応表を追加した。
+- approvedはready、approved_with_conditionsはready_with_conditionsかつ開示制約1件以上を必須にした。両方ともrevision routeとblocking IDsを禁止した。
+- revision_requiredはscope=noneを禁止し、internal scopeとupstream requestを混在禁止にした。
+- targetedは内部target 1件、multi_agentは2件以上を必須にした。
+- deliberation_returnはupstream request必須、internal target禁止にした。
+- blockedはscope=none、revision routeなし、findingへ解決できるblocking IDsを必須にした。
+- internal revision targetをPosition Generator、Decision Evaluator、Decision Integrator、Conclusion Managerの有限Enumへ制限した。
+- upstream source_finding_idsを同じ応答のfinding IDsと照合した。
+
+9. 変更したファイル
+
+- conclusion/schemas/review.py
+- conclusion/prompts/quality_reviewer.md
+- role_definitions/conclusion/quality_reviewer.json
+- tests/unit/test_conclusion_schemas.py
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_rd_loader.py
+- README.md
+- debug_reports/017_decision_evaluation_matrix_contract.txt
+- debug_reports/018_conclusion_quality_decision_routing_contract.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Quality Reviewを「自由文と独立フィールドの寄せ集め」ではなく、次工程を一意に決定する判定契約として扱う。承認は前進、internal revisionはConclusion内の再実行、deliberation_returnは上流返送、blockedは経路確定不能であり、同時には成立しない。これによりManagerが暗黙の優先順位で一部の要求を捨てることを防ぐ。
+
+approved_with_conditionsは、成果物変更を要求しない開示事項だけに限定した。mappingやschema修正が必要な場合はrevision_requiredとなるため、「承認したが修正対象もある」という曖昧な状態を保存しない。
+
+11. 他Layerへの影響
+
+Producer、Researcher、DeliberationのQuality Review schemaとrouting validationを監査した。ProducerとResearcherはapproved時のrevision routeを拒否する。DeliberationはResearcher returnとinternal revisionの同時要求を明示的な依存計画として扱う設計であり、Conclusionとは責務が異なる。Conclusion Managerはdeliberation_returnで即時上流返送しinternal targetを処理しないため、Conclusionでは混在をfail closedするのが既存state machineと一致する。Playwrightへは承認済みConclusionだけがhandoffされるため、この変更で未修正artifactが下流へ流れることを防ぐ。
+
+12. State / PMP / Checkpoint / Reservation / Outbox影響
+
+- State: 新規decisionだけを厳格化し、既存保存JSONを手動変更しない。
+- PMP: invalid payloadとvalidation errorsを持つ既存Error PMPを一回retry認可の根拠として再利用する。
+- Checkpoint: Position、Decision Evaluation、Decision Integrationの保存済みResultを再検証し、Quality Reviewだけを未完了stageとして扱う。
+- Reservation: 元Quality Review reservationを保持し、明示retryは`_operator_retry_1`の別task/reservationを使用する。
+- Outbox: approval前なのでPlaywright outboxは作成しない。Deliberation/Conclusion outboxは変更しない。
+
+13. Regression Test
+
+- 観測されたapproved_with_conditions + internal/upstream route混在payloadを拒否。
+- approved_with_conditionsは開示事項1件以上、revision routeなしの場合だけ許可。
+- internal revisionとupstream returnの双方向混在を拒否。
+- upstream requestが未知finding IDを参照する場合を拒否。
+- Conclusion外revision targetをSchemaで拒否。
+- RDのapproval status vocabularyがruntime 4値と一致し、`rejected`が残らないことを検証。
+- Promptに排他的routing tableが存在することを検証。
+
+14. Recovery / Fault Test
+
+- Targeted Conclusion schema/manager/strict suite: 67 PASS。
+- RD/OpenRouter/provider retry targeted: 44 PASS。
+- Full Unit: 350 PASS in 286.254s。
+- Integration: 9 PASS in 26.038s。
+- 31 Role Definitions STRICT load: PASS。
+- 全22 OpenRouter root recursive strict schema audit: PASS。
+- Doctor provider=mock Safe Mode: READY。
+- Mock CLI E2E Producer -> Researcher -> Deliberation -> Conclusion -> Playwright -> Delivery: PASS。
+- Fault Injection: 一回目のQuality Reviewerに観測矛盾payloadを返させFAILED。明示retry後はPosition/Evaluation/Integrationのcall数が各1のまま、Reviewerだけ2回目を実行してWAITING_HUMAN_SELECTIONへ復旧。
+
+15. Provider Call数
+
+- Cycle 018 implementation / Unit / Integration / Mock / Fault: Real 0。
+- Failure captureとなった直前のReal command: Decision Evaluator 1、Decision Integrator 1、Quality Reviewer 1、automatic retry 0（Cycle 017追記にも記録）。
+- Cycle 018の次の許可操作: 保存済み3 checkpointからQuality Reviewerを一回だけ明示retryする。
+
+16. API Cost
+
+Cycle 018の実装・検証はReal API $0。直前Real commandの実測costはCLI/保存応答に記録されていないためunknown。最終Fresh Real E2E用予算を保持する。
+
+17. Existing Workflowへの影響
+
+Cycle 018の実装・Mock検証中、production storageはread-onlyで確認した。現在のConclusionはFAILED、Position/Evaluation/Integration保存済み、Review未保存、failed_agentはconclusion.quality_reviewer。Deliberation state/messagesとConclusion outboxのhashはCycle 017前から不変だった。既存JSON、checkpoint、reservation、authorizationを削除・初期化・手動上書きしていない。
+
+18. Remaining Risk
+
+実OpenRouterが新しいdecision tableに従うかはMockだけでは確認できない。productionへコード/RD/prompt/test/reportだけを反映し、Quality Reviewerの一回retryが必要。成功してapproved系ならHuman Selectionで必ず停止する。revision_requiredならSafe Modeにより追加Provider call直前で停止し、正しいrevision経路を次Cycleとして扱う。再びSchema-invalidなら再々送しない。
+
+19. Plan Compliance Review / Result before E2E resume
+
+[YES] Root Causeまで特定した。
+[YES] Runtime validatorを弱めず、RD/prompt/schemaの三境界を統一した。
+[YES] 他Quality ReviewerとConclusion ManagerのSibling Failureを監査した。
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outboxへの影響を確認した。
+[YES] Regression Testを追加した。
+[YES] Mock Recovery / Fault Injectionを行った。
+[YES] Debug Reportを書いた。
+[YES] 修正の設計上の意味を説明した。
+[YES] production storageを手動変更していない。
+[YES] 不必要なProvider Callを避けた。
+[YES] CLI E2E Execution & Stabilization Plan v2を全1541行再読し、production hashを取得した。
+[PENDING] production反映後の明示的一回Quality Reviewer Real Retry。
+
+Result before E2E resume: IMPLEMENTATION / UNIT / INTEGRATION / MOCK / FAULT / PLAN COMPLIANCE PASS. PRODUCTION DEPLOYMENT AND ONE EXPLICIT QUALITY REVIEW RETRY PENDING.
+
+20. Production反映と明示的一回Real Retry結果
+
+検証済み10ファイルだけをproductionへ反映し、全ファイルのSHA-256一致を確認した。`storage/data`へのコピー、既存JSONの手動編集、reservation削除は行っていない。反映後のOpenRouter DoctorはREADY、31 RD STRICT PASS、`--status`で既存workflowを正常に読み取れた。
+
+`--conclusion-provider-retry 15f3f5c5-4167-447d-b255-069fc7f5beb2 --provider openrouter --safe-mode`を一回だけ実行した。taskは`conclusion_quality_review_upstream_0_revision_0_operator_retry_1`、authorizationはCONSUMED、独立reservationは保存済みである。
+
+Real callはConclusion Quality Reviewer 1、Position Generator 0、Decision Evaluator 0、Decision Integrator 0、upstream 0、automatic retry 0。新しいRD 1.0.2とSchemaでJSON objectを正常受領・検証し、Schema errorは0だった。
+
+Reviewは次の整合した判定となった。
+
+- status=revision_required
+- playwright_readiness=not_ready
+- revision_scope=targeted
+- revision_targets=[conclusion.position_generator]
+- upstream_revision_requests=[]
+- finding: `claim_task_reorganization_observed`がDecision Context/Analysis側の既知claimへ解決できず、Position 2件とConclusion packageのtraceabilityが破断
+
+Safe Modeは自動Position再生成の直前で停止し、ConclusionはBLOCKEDになった。Review Resultは保存済み、completed agentsは4、failed agentsは0である。Deliberation state/messagesおよびConclusion outboxのhashは不変だった。
+
+この結果はCycle 018の修正目的を満たす。承認/routing矛盾は解消し、本当に修正すべき内部traceability問題だけが残った。Safe Mode停止後に内部revisionを明示承認するConclusion CLI経路が存在しないため、これは別Failure ModeとしてCycle 019へ移行する。
+
+Final Result: PASS — QUALITY REVIEW CONTRACT REPAIRED / ONE EXPLICIT REAL RETRY COMPLETED / INTERNAL REVISION SAFELY STOPPED BEFORE PROVIDER CALL.

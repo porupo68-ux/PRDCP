@@ -19,10 +19,38 @@ from common.models.errors import (
     RetryableAgentError,
 )
 from common.models.pmp import MessageStatus, MessageType, PMPContext, PMPMessage, PMPMetadata
+from common.provider_capability_repair import (
+    PROVIDER_CAPABILITY_REPAIR_SUFFIX,
+    ProviderCapabilityRepairAuthorizationStore,
+)
+from common.provider_contract_repair import (
+    PROVIDER_CONTRACT_REPAIR_SUFFIX,
+    ProviderContractRepairAuthorizationStore,
+)
+from common.provider_output_repair import (
+    PROVIDER_OUTPUT_REPAIR_SUFFIX,
+    ProviderOutputRepairAuthorizationStore,
+)
+from common.provider_retry import OPERATOR_RETRY_SUFFIX, ProviderRetryAuthorizationStore
+from common.provider_runtime_model_repair import (
+    RUNTIME_MODEL_REPAIR_SUFFIX,
+    RuntimeModelRepairAuthorizationStore,
+)
+from common.provider_runtime_output_repair import (
+    RUNTIME_ADAPTER_REPAIR_SUFFIX,
+    RUNTIME_IDENTITY_HYDRATION_REPAIR_SUFFIX,
+    RUNTIME_MODEL_OUTPUT_REPAIR_SUFFIX,
+    RUNTIME_PROVENANCE_HYDRATION_REPAIR_SUFFIX,
+    RuntimeAdapterRepairAuthorizationStore,
+    RuntimeIdentityHydrationRepairAuthorizationStore,
+    RuntimeModelOutputRepairAuthorizationStore,
+    RuntimeProvenanceHydrationRepairAuthorizationStore,
+)
 from common.role_definitions import RoleDefinitionLoader
 from common.role_definitions.agent_runtime import (
     prepare_agent_execution,
     role_definition_extensions,
+    specialize_agent_execution_prompt,
 )
 from common.role_definitions.models import RoleDefinitionSnapshot
 from common.validation import PMPValidator, PayloadValidator
@@ -76,6 +104,7 @@ class StructuredAgent(ABC):
         rd_loader: RoleDefinitionLoader | None = None,
         max_technical_retries: int | None = None,
         demo_safe_mode: bool = True,
+        retrieval_coordinator: object | None = None,
     ) -> None:
         self.provider = provider
         self.payload_validator = payload_validator
@@ -85,13 +114,20 @@ class StructuredAgent(ABC):
         # authoritative, so callers cannot silently override the role contract.
         self.legacy_max_technical_retries = max_technical_retries
         self.demo_safe_mode = demo_safe_mode
+        self.retrieval_coordinator = retrieval_coordinator
         self.rd_loader = rd_loader or RoleDefinitionLoader.from_project(
             BASE_DIR,
             access_log_path=BASE_DIR / "storage" / "data" / "logs" / "rd_access.jsonl",
         )
 
-    async def execute(self, message: PMPMessage) -> PMPMessage:
+    async def execute(
+        self,
+        message: PMPMessage,
+        *,
+        model_override: str | None = None,
+    ) -> PMPMessage:
         snapshot: RoleDefinitionSnapshot | None = None
+        effective_model = model_override or self.model
         try:
             validated = self.validate_message(message)
             result_message_type = self.resolve_result_message_type(validated)
@@ -105,13 +141,51 @@ class StructuredAgent(ABC):
             )
             snapshot = execution.snapshot
             payload = self.payload_validator.validate(validated.payload, self.input_schema)
-            if self.demo_safe_mode:
-                self._reserve_demo_invocation(validated, payload)
+            provider_id = getattr(self.provider, "provider_id", None)
+            input_data = await self.prepare_provider_input(
+                payload,
+                message=validated,
+                timeout_seconds=execution.runtime_config.timeout_seconds,
+            )
+            if input_data != validated.payload:
+                execution = specialize_agent_execution_prompt(
+                    execution,
+                    loader=self.rd_loader,
+                    agent_id=self.agent_id,
+                    message=validated,
+                    agent_prompt=self.agent_prompt,
+                    output_schema=self.output_schema,
+                    input_data=input_data,
+                )
+            explicit_task_id = self._explicit_logical_task_id(
+                validated,
+                input_data=input_data,
+            )
+            logical_task_id = explicit_task_id or self.agent_id
+            preflight = getattr(self.provider, "validate_request_budget", None)
+            if callable(preflight):
+                preflight(
+                    agent_id=self.agent_id,
+                    model=effective_model,
+                    system_prompt=execution.system_prompt,
+                    input_data=input_data,
+                    output_schema=self.output_schema,
+                )
+            if self.demo_safe_mode or (
+                isinstance(provider_id, str) and explicit_task_id is not None
+            ):
+                self._reserve_provider_invocation(
+                    validated,
+                    logical_task_id=logical_task_id,
+                    model_id=effective_model,
+                )
             result, retry_count = await self.run(
                 payload,
                 system_prompt=execution.system_prompt,
                 max_technical_retries=execution.runtime_config.technical_retry_limit,
                 timeout_seconds=execution.runtime_config.timeout_seconds,
+                model=effective_model,
+                prepared_input=input_data,
             )
             return self.create_result_message(
                 validated,
@@ -121,7 +195,12 @@ class StructuredAgent(ABC):
                 snapshot=snapshot,
             )
         except Exception as exc:
-            return self.create_error_message(message, exc, snapshot=snapshot)
+            return self.create_error_message(
+                message,
+                exc,
+                snapshot=snapshot,
+                model_id=effective_model,
+            )
 
     def validate_message(self, message: PMPMessage) -> PMPMessage:
         validated = self.pmp_validator.validate(message)
@@ -141,8 +220,15 @@ class StructuredAgent(ABC):
         system_prompt: str,
         max_technical_retries: int,
         timeout_seconds: int,
+        model: str | None = None,
+        prepared_input: dict | None = None,
     ) -> tuple[BaseModel, int]:
-        input_data = payload.model_dump(mode="json")
+        input_data = (
+            payload.model_dump(mode="json")
+            if prepared_input is None
+            else prepared_input
+        )
+        effective_model = model or self.model
         effective_retry_limit = (
             0 if self.demo_safe_mode else min(max(max_technical_retries, 0), 1)
         )
@@ -150,7 +236,7 @@ class StructuredAgent(ABC):
             try:
                 raw = await asyncio.wait_for(
                     self.provider.generate_structured(
-                        model=self.model,
+                        model=effective_model,
                         system_prompt=system_prompt,
                         input_data=input_data,
                         output_schema=self.output_schema,
@@ -158,7 +244,19 @@ class StructuredAgent(ABC):
                     ),
                     timeout=timeout_seconds,
                 )
-                return self.payload_validator.validate(raw, self.output_schema), attempt
+                normalized_raw = self.normalize_provider_output(
+                    raw,
+                    provider_input=input_data,
+                )
+                validated_result = self.payload_validator.validate(
+                    normalized_raw,
+                    self.output_schema,
+                )
+                return self.validate_output_contract(
+                    payload,
+                    validated_result,
+                    provider_input=input_data,
+                ), attempt
             except PayloadValidationError as exc:
                 exc.retry_count = attempt
                 raise
@@ -167,14 +265,17 @@ class StructuredAgent(ABC):
                 raise
             except RetryableAgentError as exc:
                 exc.retry_count = attempt
-                if attempt >= effective_retry_limit:
+                if (
+                    not exc.automatic_retry_allowed
+                    or attempt >= effective_retry_limit
+                ):
                     raise
             except TimeoutError as exc:
                 timeout_error = RetryableAgentError(
                     f"{self.agent_id} provider call timed out after {timeout_seconds} seconds",
                     retry_count=attempt,
                     provider=type(self.provider).__name__,
-                    model_id=self.model,
+                    model_id=effective_model,
                 )
                 if attempt >= effective_retry_limit:
                     raise timeout_error from exc
@@ -184,24 +285,76 @@ class StructuredAgent(ABC):
                     http_status=exc.http_status,
                     retry_count=attempt,
                     provider=exc.provider or type(self.provider).__name__,
-                    model_id=exc.model_id or self.model,
+                    model_id=exc.model_id or effective_model,
                 ) from exc
         raise RuntimeError("unreachable retry state")
 
-    def _reserve_demo_invocation(self, message: PMPMessage, payload: BaseModel) -> None:
-        input_data = payload.model_dump(mode="json")
-        task_id = input_data.get("task_id") or message.payload.get("task_id")
-        logical_task_id = str(task_id or self.agent_id)
+    async def prepare_provider_input(
+        self,
+        payload: BaseModel,
+        *,
+        message: PMPMessage,
+        timeout_seconds: int,
+    ) -> dict:
+        """Build the runtime-only view sent to the model.
+
+        The default is deliberately a no-op so the canonical PMP payload stays
+        authoritative for every agent that does not opt into retrieval.
+        """
+
+        del message, timeout_seconds
+        return payload.model_dump(mode="json")
+
+    def normalize_provider_output(
+        self,
+        raw: dict,
+        *,
+        provider_input: dict | None = None,
+    ) -> dict:
+        """Restore deterministic fields omitted from a provider-bound schema.
+
+        Retrieval-aware agents may ask the model to select a compact source ID
+        while materializing immutable source metadata from the persisted input.
+        The default leaves ordinary agent output unchanged.
+        """
+
+        del provider_input
+        return raw
+
+    def validate_output_contract(
+        self,
+        input_payload: BaseModel,
+        output_payload: BaseModel,
+        *,
+        provider_input: dict | None = None,
+    ) -> BaseModel:
+        """Apply an optional input-aware domain contract after schema validation.
+
+        JSON Schema can validate the shape of an ID field, but it cannot prove
+        that the ID belongs to the canonical set supplied in the request. Layer
+        adapters may override this hook for those cross-payload invariants.
+        """
+        del provider_input
+        return output_payload
+
+    def _reserve_provider_invocation(
+        self,
+        message: PMPMessage,
+        *,
+        logical_task_id: str,
+        model_id: str | None = None,
+    ) -> None:
         provider_name = type(self.provider).__name__
         provider_id = getattr(self.provider, "provider_id", None)
+        effective_model = model_id or self.model
         if not isinstance(provider_id, str) or not re.fullmatch(
             r"[a-z0-9][a-z0-9_-]{0,63}", provider_id
         ):
             raise NonRetryableAgentError(
-                f"Demo Safe Mode requires a stable logical provider ID for {self.agent_id}; "
+                f"Provider invocation requires a stable logical provider ID for {self.agent_id}; "
                 "provider call blocked",
                 provider=provider_name,
-                model_id=self.model,
+                model_id=effective_model,
             )
         workflow_component = self._reservation_path_component(message.workflow_id)
         task_component = self._reservation_path_component(logical_task_id)
@@ -216,18 +369,232 @@ class StructuredAgent(ABC):
             "task_id": logical_task_id,
             "agent_id": self.agent_id,
             "provider": provider_name,
-            "model_id": self.model,
+            "model_id": effective_model,
             "reserved_at": datetime.now(timezone.utc).isoformat(),
         }
+        retry_authorization = None
+        retry_store = None
+        repair_authorization = None
+        repair_store = None
+        capability_authorization = None
+        capability_store = None
+        output_repair_authorization = None
+        output_repair_store = None
+        runtime_model_repair_authorization = None
+        runtime_model_repair_store = None
+        runtime_output_repair_authorization = None
+        runtime_output_repair_store = None
+        runtime_adapter_repair_authorization = None
+        runtime_adapter_repair_store = None
+        runtime_identity_repair_authorization = None
+        runtime_identity_repair_store = None
+        runtime_provenance_repair_authorization = None
+        runtime_provenance_repair_store = None
+        if logical_task_id.endswith(OPERATOR_RETRY_SUFFIX):
+            retry_store = ProviderRetryAuthorizationStore.from_reservation_root(
+                _provider_call_reservations_dir(self.provider)
+            )
+            try:
+                retry_authorization = retry_store.require_pending_retry(
+                    workflow_id=message.workflow_id,
+                    provider_id=provider_id,
+                    agent_id=self.agent_id,
+                    retry_task_id=logical_task_id,
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Operator provider retry authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX):
+            repair_store = ProviderContractRepairAuthorizationStore.from_reservation_root(
+                _provider_call_reservations_dir(self.provider)
+            )
+            try:
+                repair_authorization = repair_store.require_pending_repair(
+                    workflow_id=message.workflow_id,
+                    provider_id=provider_id,
+                    agent_id=self.agent_id,
+                    repair_task_id=logical_task_id,
+                    repair_model_id=effective_model,
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Provider contract repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(PROVIDER_CAPABILITY_REPAIR_SUFFIX):
+            capability_store = (
+                ProviderCapabilityRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                capability_authorization = capability_store.require_pending_repair(
+                    workflow_id=message.workflow_id,
+                    provider_id=provider_id,
+                    agent_id=self.agent_id,
+                    repair_task_id=logical_task_id,
+                    repair_model_id=effective_model,
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Provider capability repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(PROVIDER_OUTPUT_REPAIR_SUFFIX):
+            output_repair_store = (
+                ProviderOutputRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                output_repair_authorization = (
+                    output_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Provider output repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(RUNTIME_MODEL_REPAIR_SUFFIX):
+            runtime_model_repair_store = (
+                RuntimeModelRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                runtime_model_repair_authorization = (
+                    runtime_model_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        runtime_model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Runtime model repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(RUNTIME_MODEL_OUTPUT_REPAIR_SUFFIX):
+            runtime_output_repair_store = (
+                RuntimeModelOutputRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                runtime_output_repair_authorization = (
+                    runtime_output_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Runtime output repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(RUNTIME_ADAPTER_REPAIR_SUFFIX):
+            runtime_adapter_repair_store = (
+                RuntimeAdapterRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                runtime_adapter_repair_authorization = (
+                    runtime_adapter_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Runtime adapter repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(RUNTIME_IDENTITY_HYDRATION_REPAIR_SUFFIX):
+            runtime_identity_repair_store = (
+                RuntimeIdentityHydrationRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                runtime_identity_repair_authorization = (
+                    runtime_identity_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Runtime identity repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
+        elif logical_task_id.endswith(RUNTIME_PROVENANCE_HYDRATION_REPAIR_SUFFIX):
+            runtime_provenance_repair_store = (
+                RuntimeProvenanceHydrationRepairAuthorizationStore.from_reservation_root(
+                    _provider_call_reservations_dir(self.provider)
+                )
+            )
+            try:
+                runtime_provenance_repair_authorization = (
+                    runtime_provenance_repair_store.require_pending_repair(
+                        workflow_id=message.workflow_id,
+                        provider_id=provider_id,
+                        agent_id=self.agent_id,
+                        repair_task_id=logical_task_id,
+                        model_id=effective_model,
+                    )
+                )
+            except ValueError as exc:
+                raise NonRetryableAgentError(
+                    f"Runtime provenance repair authorization rejected for {self.agent_id} "
+                    f"task {logical_task_id}: {exc}",
+                    provider=provider_name,
+                    model_id=effective_model,
+                ) from exc
 
         try:
             reservation_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise NonRetryableAgentError(
-                f"Demo Safe Mode could not persist a reservation for {self.agent_id} "
+                f"Provider invocation could not persist a reservation for {self.agent_id} "
                 f"task {logical_task_id}; provider call blocked",
                 provider=provider_name,
-                model_id=self.model,
+                model_id=effective_model,
             ) from exc
 
         try:
@@ -236,20 +603,117 @@ class StructuredAgent(ABC):
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            if retry_authorization is not None and retry_store is not None:
+                retry_store.consume(
+                    retry_authorization,
+                    reservation_path=reservation_path,
+                )
+            if repair_authorization is not None and repair_store is not None:
+                repair_store.consume(
+                    repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                capability_authorization is not None
+                and capability_store is not None
+            ):
+                capability_store.consume(
+                    capability_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                output_repair_authorization is not None
+                and output_repair_store is not None
+            ):
+                output_repair_store.consume(
+                    output_repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                runtime_model_repair_authorization is not None
+                and runtime_model_repair_store is not None
+            ):
+                runtime_model_repair_store.consume(
+                    runtime_model_repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                runtime_output_repair_authorization is not None
+                and runtime_output_repair_store is not None
+            ):
+                runtime_output_repair_store.consume(
+                    runtime_output_repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                runtime_adapter_repair_authorization is not None
+                and runtime_adapter_repair_store is not None
+            ):
+                runtime_adapter_repair_store.consume(
+                    runtime_adapter_repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                runtime_identity_repair_authorization is not None
+                and runtime_identity_repair_store is not None
+            ):
+                runtime_identity_repair_store.consume(
+                    runtime_identity_repair_authorization,
+                    reservation_path=reservation_path,
+                )
+            if (
+                runtime_provenance_repair_authorization is not None
+                and runtime_provenance_repair_store is not None
+            ):
+                runtime_provenance_repair_store.consume(
+                    runtime_provenance_repair_authorization,
+                    reservation_path=reservation_path,
+                )
         except FileExistsError as exc:
             raise NonRetryableAgentError(
-                f"Demo Safe Mode blocked a repeated call for {self.agent_id} "
+                f"Persistent reservation blocked a repeated call for {self.agent_id} "
                 f"task {logical_task_id}",
                 provider=provider_name,
-                model_id=self.model,
+                model_id=effective_model,
             ) from exc
+
         except OSError as exc:
             raise NonRetryableAgentError(
-                f"Demo Safe Mode could not persist a reservation for {self.agent_id} "
+                f"Provider invocation could not persist a reservation for {self.agent_id} "
                 f"task {logical_task_id}; provider call blocked",
                 provider=provider_name,
-                model_id=self.model,
+                model_id=effective_model,
             ) from exc
+
+    def _logical_task_id(
+        self,
+        message: PMPMessage,
+        *,
+        input_data: dict | None = None,
+    ) -> str:
+        return self._explicit_logical_task_id(
+            message,
+            input_data=input_data,
+        ) or self.agent_id
+
+    def _explicit_logical_task_id(
+        self,
+        message: PMPMessage,
+        *,
+        input_data: dict | None = None,
+    ) -> str | None:
+        override = message.metadata.extensions.get("provider_task_id")
+        if override is not None:
+            if not isinstance(override, str) or not override.strip():
+                raise NonRetryableAgentError(
+                    f"Invalid provider_task_id override for {self.agent_id}",
+                    provider=type(self.provider).__name__,
+                    model_id=self.model,
+                    automatic_retry_allowed=False,
+                )
+            return override
+        task_id = (input_data or {}).get("task_id") or message.payload.get("task_id")
+        return str(task_id) if task_id else None
 
     @staticmethod
     def _reservation_path_component(value: str) -> str:
@@ -314,21 +778,25 @@ class StructuredAgent(ABC):
         exc: Exception,
         *,
         snapshot: RoleDefinitionSnapshot | None = None,
+        model_id: str | None = None,
     ) -> PMPMessage:
         retry_count = max(int(getattr(exc, "retry_count", 0)), 0)
         root_exception = self._root_exception(exc)
-        task_id = request.payload.get("task_id") if isinstance(request.payload, dict) else None
+        task_id = self._logical_task_id(request)
         payload = {
             "error_code": getattr(exc, "error_code", type(exc).__name__),
             "message": self._safe_error_text(str(exc)),
             "workflow_id": request.workflow_id,
             "task_id": task_id,
             "agent_id": self.agent_id,
-            "model_id": getattr(exc, "model_id", None) or self.model,
+            "model_id": getattr(exc, "model_id", None) or model_id or self.model,
             "provider": getattr(exc, "provider", None) or type(self.provider).__name__,
             "error_class": type(exc).__name__,
             "http_status": getattr(exc, "http_status", None),
             "retry_count": retry_count,
+            "automatic_retry_allowed": bool(
+                getattr(exc, "automatic_retry_allowed", True)
+            ),
             "root_exception_type": type(root_exception).__name__,
             "root_exception_message": self._safe_error_text(str(root_exception)),
             "validation_field_path": self._validation_field_path(exc),
@@ -338,6 +806,19 @@ class StructuredAgent(ABC):
             value = getattr(exc, field, None)
             if value:
                 payload[field] = value
+        for field in (
+            "response_content_sha256",
+            "response_content_length",
+            "response_root_type",
+            "response_invalid_path",
+        ):
+            value = getattr(exc, field, None)
+            if value is not None:
+                payload[field] = value
+        invalid_payload = getattr(exc, "invalid_payload", None)
+        if isinstance(invalid_payload, dict):
+            payload["invalid_payload"] = invalid_payload
+            payload["validation_errors"] = getattr(exc, "validation_errors", [])
         if snapshot:
             payload.update(snapshot.trace())
         return PMPMessage.create(

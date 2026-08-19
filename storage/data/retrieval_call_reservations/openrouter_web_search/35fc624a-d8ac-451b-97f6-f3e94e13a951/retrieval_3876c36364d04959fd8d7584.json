@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_3876c36364d04959fd8d7584",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "task_id": "task_2fa5e5738aed4cb99ac56fffdde57919_retrieval_reconstruction_1",
+  "agent_id": "researcher.news_researcher",
+  "strategy": "NEWS",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-17T17:54:51.184589+00:00"
+}

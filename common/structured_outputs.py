@@ -97,7 +97,11 @@ class StrictStructuredOutputSchemaError(ValueError):
         )
 
 
-def strict_output_schema(output_model: type[BaseModel]) -> dict[str, Any]:
+def strict_output_schema(
+    output_model: type[BaseModel],
+    *,
+    input_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build and validate the schema sent to strict Structured Output providers.
 
     Application models keep their Pydantic defaults. Only the API-boundary copy is
@@ -106,6 +110,11 @@ def strict_output_schema(output_model: type[BaseModel]) -> dict[str, Any]:
     """
 
     schema = normalize_strict_output_schema(output_model.model_json_schema())
+    specializer = getattr(output_model, "specialize_strict_output_schema", None)
+    if input_data is not None and callable(specializer):
+        specialized = specializer(schema, input_data)
+        if specialized is not None:
+            schema = specialized
     validate_strict_output_schema(schema, schema_name=output_model.__name__)
     return schema
 

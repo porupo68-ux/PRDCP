@@ -1,9 +1,4 @@
 from common.role_definitions.boundary import RoleBoundaryValidator
-from common.role_definitions.agent_runtime import (
-    AgentExecutionContext,
-    prepare_agent_execution,
-    role_definition_extensions,
-)
 from common.role_definitions.exceptions import (
     RoleBoundaryViolationError,
     RoleDefinitionError,
@@ -31,7 +26,4 @@ __all__ = [
     "RoleDefinitionValidationError",
     "RoleDefinitionValidator",
     "RoleRuntimeConfig",
-    "AgentExecutionContext",
-    "prepare_agent_execution",
-    "role_definition_extensions",
 ]

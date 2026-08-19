@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from enum import Enum
+from http.client import IncompleteRead
 from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -13,13 +14,21 @@ from pydantic import BaseModel, Field
 from common.models.errors import (
     AgentExecutionError,
     NonRetryableAgentError,
+    ProviderCapabilityError,
+    ProviderResponseContractError,
     RetryableAgentError,
 )
 from common.structured_outputs import (
     StrictStructuredOutputSchemaError,
     strict_output_schema,
 )
-from providers.openrouter_provider import OpenRouterModelProvider
+from providers.openrouter_provider import (
+    OpenRouterModelProvider,
+    estimate_openrouter_input_tokens,
+)
+from providers.openrouter_capabilities import OpenRouterModelCapabilityClient
+from researcher.schemas.research_result import ResearchResult
+from tests.researcher_helpers import valid_source
 
 
 class _Payload(BaseModel):
@@ -64,6 +73,129 @@ class _Response:
 
 
 class OpenRouterProviderTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.capability_patch = patch.object(
+            OpenRouterModelCapabilityClient,
+            "require_compatible",
+            return_value=None,
+        )
+        self.capability_patch.start()
+        self.addCleanup(self.capability_patch.stop)
+
+    async def test_incompatible_model_is_rejected_before_paid_post(self) -> None:
+        class RejectingCapabilityClient:
+            def require_compatible(self, model_id: str):
+                raise ProviderCapabilityError(
+                    f"MODEL_CAPABILITY_ERROR: model={model_id}; Provider call = 0",
+                    provider="openrouter",
+                    model_id=model_id,
+                )
+
+        provider = OpenRouterModelProvider(
+            api_key="test-key",
+            timeout=1,
+            capability_client=RejectingCapabilityClient(),
+        )
+        with patch.object(provider, "_post") as post:
+            with self.assertRaises(ProviderCapabilityError):
+                await provider.generate_structured(
+                    model="unsupported/model",
+                    system_prompt="system",
+                    input_data={"topic": "test"},
+                    output_schema=_Payload,
+                )
+        post.assert_not_called()
+
+    def test_agent_preflight_error_identifies_effective_agent_and_model(self) -> None:
+        class RejectingCapabilityClient:
+            def require_compatible(self, model_id: str):
+                raise ProviderCapabilityError(
+                    "MODEL_CAPABILITY_ERROR: reason=NO_ENDPOINTS",
+                    provider="openrouter",
+                    model_id=model_id,
+                )
+
+        provider = OpenRouterModelProvider(
+            api_key="test-key",
+            timeout=1,
+            capability_client=RejectingCapabilityClient(),
+        )
+        with self.assertRaises(ProviderCapabilityError) as raised:
+            provider.validate_request_budget(
+                agent_id="producer.topic_scout",
+                model="unsupported/model",
+                system_prompt="system",
+                input_data={"topic": "test"},
+                output_schema=_Payload,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("agent=producer.topic_scout", message)
+        self.assertIn("model=unsupported/model", message)
+        self.assertIn("No paid chat completion request was sent", message)
+
+    async def test_known_context_overflow_is_rejected_before_network_access(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+
+        with patch("providers.openrouter_provider.urlopen") as post:
+            with self.assertRaisesRegex(
+                NonRetryableAgentError,
+                "local context budget exceeded",
+            ):
+                await provider.generate_structured(
+                    model="deepseek/deepseek-r1",
+                    system_prompt="あ" * 60_000,
+                    input_data={"topic": "fault injection"},
+                    output_schema=_Payload,
+                )
+
+        post.assert_not_called()
+
+    def test_mixed_language_token_estimator_is_conservative(self) -> None:
+        self.assertEqual(estimate_openrouter_input_tokens("あ" * 100), 100)
+        self.assertEqual(estimate_openrouter_input_tokens("a" * 100), 25)
+
+    async def test_research_result_schema_is_narrowed_before_network_send(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        payload = {
+            "task_id": "task_academic",
+            "research_question_id": "rq_employment",
+            "agent_id": "researcher.academic_researcher",
+            "sources": [valid_source("ACADEMIC")],
+            "search_summary": "done",
+            "coverage_status": "COMPLETE",
+            "limitations": [],
+        }
+        response = _Response(
+            {"choices": [{"message": {"content": json.dumps(payload)}}]}
+        )
+        input_data = {
+            "target_agent_id": "researcher.academic_researcher",
+            "research_target": "ACADEMIC",
+        }
+
+        with patch("providers.openrouter_provider.urlopen", return_value=response) as post:
+            await provider.generate_structured(
+                model="test/model",
+                system_prompt="system",
+                input_data=input_data,
+                output_schema=ResearchResult,
+            )
+
+        request = post.call_args.args[0]
+        sent = json.loads(request.data.decode("utf-8"))
+        schema = sent["response_format"]["json_schema"]["schema"]
+        self.assertEqual(
+            schema["properties"]["agent_id"]["enum"],
+            ["researcher.academic_researcher"],
+        )
+        self.assertEqual(
+            schema["$defs"]["ResearchSource"]["properties"]["source_type"][
+                "enum"
+            ],
+            ["ACADEMIC"],
+        )
+
     async def test_structured_response_is_parsed_without_network_access(self) -> None:
         provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
         response = _Response(
@@ -87,6 +219,8 @@ class OpenRouterProviderTests(unittest.IsolatedAsyncioTestCase):
         request = post.call_args.args[0]
         sent = json.loads(request.data.decode("utf-8"))
         self.assertEqual(sent["model"], "test/model")
+        self.assertEqual(sent["provider"], {"require_parameters": True})
+        self.assertNotIn("plugins", sent)
         response_format = sent["response_format"]
         self.assertEqual(response_format["type"], "json_schema")
         self.assertEqual(response_format["json_schema"]["name"], "_Payload")
@@ -208,6 +342,61 @@ class OpenRouterProviderTests(unittest.IsolatedAsyncioTestCase):
                     output_schema=_Payload,
                 )
 
+    async def test_non_finite_structured_root_requires_explicit_operator_retry(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        for content in ("Infinity", "-Infinity", "NaN", "1e999"):
+            response = _Response(
+                {"choices": [{"message": {"content": content}}]}
+            )
+            with self.subTest(content=content):
+                with patch("providers.openrouter_provider.urlopen", return_value=response):
+                    with self.assertRaises(ProviderResponseContractError) as raised:
+                        await provider.generate_structured(
+                            model="test/model",
+                            system_prompt="system",
+                            input_data={},
+                            output_schema=_Payload,
+                        )
+                self.assertFalse(raised.exception.automatic_retry_allowed)
+                self.assertEqual(raised.exception.response_invalid_path, "$")
+                self.assertEqual(raised.exception.response_content_length, len(content))
+
+    async def test_non_object_structured_root_is_rejected_by_provider_boundary(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        for content in ('["not", "an", "object"]', '"scalar"', "null"):
+            response = _Response(
+                {"choices": [{"message": {"content": content}}]}
+            )
+            with self.subTest(content=content):
+                with patch("providers.openrouter_provider.urlopen", return_value=response):
+                    with self.assertRaisesRegex(
+                        ProviderResponseContractError,
+                        "root must be a JSON object",
+                    ):
+                        await provider.generate_structured(
+                            model="test/model",
+                            system_prompt="system",
+                            input_data={},
+                            output_schema=_Payload,
+                        )
+
+    async def test_nested_exponent_overflow_reports_exact_json_path(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        content = '{"answer": "ok", "nested": [{"score": 1e999}]}'
+        response = _Response({"choices": [{"message": {"content": content}}]})
+        with patch("providers.openrouter_provider.urlopen", return_value=response):
+            with self.assertRaises(ProviderResponseContractError) as raised:
+                await provider.generate_structured(
+                    model="test/model",
+                    system_prompt="system",
+                    input_data={},
+                    output_schema=_Payload,
+                )
+        self.assertEqual(
+            raised.exception.response_invalid_path,
+            "$/nested/0/score",
+        )
+
     def test_retryable_http_statuses_are_classified(self) -> None:
         provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
         for status in (408, 429, 500, 502, 503, 504):
@@ -240,6 +429,26 @@ class OpenRouterProviderTests(unittest.IsolatedAsyncioTestCase):
                         provider._post({"model": "test/model"})
                 self.assertEqual(raised.exception.http_status, status)
 
+    def test_structured_output_endpoint_404_is_a_capability_failure(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        error = HTTPError(
+            "https://example.invalid",
+            404,
+            "request error",
+            {},
+            BytesIO(
+                b'{"error":{"message":"No endpoints found that can handle '
+                b'the requested parameters"}}'
+            ),
+        )
+        with patch("providers.openrouter_provider.urlopen", side_effect=error):
+            with self.assertRaises(ProviderCapabilityError) as raised:
+                provider._post({"model": "z-ai/glm-4.5-air"})
+
+        self.assertEqual(raised.exception.http_status, 404)
+        self.assertEqual(raised.exception.model_id, "z-ai/glm-4.5-air")
+        self.assertFalse(raised.exception.automatic_retry_allowed)
+
     def test_network_error_requires_an_explicit_transient_cause(self) -> None:
         provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
         cases = (
@@ -255,6 +464,21 @@ class OpenRouterProviderTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with self.assertRaises(expected_error):
                         provider._post({"model": "test/model"})
+
+    def test_incomplete_response_requires_operator_retry_without_partial_body_leak(self) -> None:
+        provider = OpenRouterModelProvider(api_key="test-key", timeout=1)
+        interrupted = IncompleteRead(b"partial-secret-body", 10_000)
+
+        with patch(
+            "providers.openrouter_provider.urlopen",
+            side_effect=interrupted,
+        ):
+            with self.assertRaises(RetryableAgentError) as raised:
+                provider._post({"model": "test/model"})
+
+        self.assertFalse(raised.exception.automatic_retry_allowed)
+        self.assertNotIn("partial-secret-body", str(raised.exception))
+        self.assertIs(raised.exception.__cause__, interrupted)
 
     def test_http_error_detail_redacts_api_key(self) -> None:
         provider = OpenRouterModelProvider(api_key="test-secret", timeout=1)

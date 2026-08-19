@@ -7,8 +7,26 @@ import tempfile
 from dataclasses import dataclass
 
 from common.role_definitions import RoleDefinitionLoader
+from common.provider_model_compatibility import ProviderModelCompatibilityStore
+from common.runtime_models import audit_runtime_models
 from common.specifications import audit_common_specifications
 from config.settings import BASE_DIR, Settings
+from providers.openrouter_capabilities import (
+    ModelCapabilityStatus,
+    OpenRouterModelCapabilityClient,
+)
+
+
+RETRIEVAL_REQUIRED_AGENTS = (
+    "producer.general_opinion_analyst",
+    "researcher.expert_researcher",
+    "researcher.academic_researcher",
+    "researcher.government_researcher",
+    "researcher.news_researcher",
+    "researcher.public_opinion_researcher",
+    "researcher.politician_researcher",
+    "researcher.industry_researcher",
+)
 
 
 @dataclass(frozen=True)
@@ -19,7 +37,12 @@ class DiagnosticCheck:
     action: str | None = None
 
 
-def run_doctor(settings: Settings) -> list[DiagnosticCheck]:
+def run_doctor(
+    settings: Settings,
+    *,
+    capability_client: OpenRouterModelCapabilityClient | None = None,
+    runtime_managers: tuple[object, ...] | None = None,
+) -> list[DiagnosticCheck]:
     checks: list[DiagnosticCheck] = [
         DiagnosticCheck(
             "PASS",
@@ -96,6 +119,21 @@ def run_doctor(settings: Settings) -> list[DiagnosticCheck]:
         )
 
     checks.extend(_provider_checks(settings))
+    if runtime_managers is not None:
+        checks.extend(_runtime_model_checks(settings, runtime_managers))
+    checks.extend(_provider_model_compatibility_checks(settings))
+    checks.extend(
+        _provider_model_capability_checks(
+            settings,
+            capability_client=capability_client,
+        )
+    )
+    checks.extend(
+        _retrieval_capability_checks(
+            settings,
+            capability_client=capability_client,
+        )
+    )
     token_level = "PASS" if settings.discord_bot_token else "WARN"
     checks.append(
         DiagnosticCheck(
@@ -106,6 +144,33 @@ def run_doctor(settings: Settings) -> list[DiagnosticCheck]:
         )
     )
     return checks
+
+
+def _runtime_model_checks(
+    settings: Settings,
+    runtime_managers: tuple[object, ...],
+) -> list[DiagnosticCheck]:
+    audit = audit_runtime_models(settings, runtime_managers)
+    if not audit.drifted:
+        return [
+            DiagnosticCheck(
+                "PASS",
+                "Runtime model snapshot",
+                f"Configured/Runtime current: {len(audit.entries)}/{len(audit.entries)}",
+            )
+        ]
+    return [
+        DiagnosticCheck(
+            "FAIL",
+            "RUNTIME MODEL DRIFT",
+            "; ".join(
+                f"{item.agent_id}: configured={item.configured_model}, "
+                f"runtime={item.runtime_model or '<missing>'}"
+                for item in audit.drifted
+            ),
+            "Restart the Discord bot before starting a provider-backed layer.",
+        )
+    ]
 
 
 def _data_directory_checks(settings: Settings) -> list[DiagnosticCheck]:
@@ -163,6 +228,221 @@ def _provider_checks(settings: Settings) -> list[DiagnosticCheck]:
             "OpenRouter live request",
             "not executed by doctor (no cost is incurred)",
             "設定後に小規模な実APIワークフローで疎通確認してください",
+        )
+    )
+    return checks
+
+
+def _provider_model_compatibility_checks(
+    settings: Settings,
+) -> list[DiagnosticCheck]:
+    try:
+        bindings = ProviderModelCompatibilityStore(settings.data_dir).list_verified(
+            provider_id=settings.provider
+        )
+    except Exception as exc:
+        return [
+            DiagnosticCheck(
+                "FAIL",
+                "Provider model compatibility",
+                str(exc),
+                "provider_model_compatibilityの監査記録を確認してください",
+            )
+        ]
+    if not bindings:
+        return []
+    details = "; ".join(
+        f"{item.agent_id}: {item.incompatible_model_id} -> {item.compatible_model_id}"
+        for item in bindings
+    )
+    return [
+        DiagnosticCheck(
+            "PASS",
+            "Provider model compatibility",
+            f"{len(bindings)} verified binding(s): {details}",
+        )
+    ]
+
+
+def _provider_model_capability_checks(
+    settings: Settings,
+    *,
+    capability_client: OpenRouterModelCapabilityClient | None,
+) -> list[DiagnosticCheck]:
+    if settings.provider != "openrouter":
+        return []
+    client = capability_client or OpenRouterModelCapabilityClient(
+        base_url=settings.openrouter_base_url,
+    )
+    try:
+        bindings = ProviderModelCompatibilityStore(settings.data_dir).list_verified(
+            provider_id="openrouter"
+        )
+    except Exception as exc:
+        return [
+            DiagnosticCheck(
+                "FAIL",
+                "MODEL CAPABILITY PREFLIGHT",
+                f"UNKNOWN: verified binding metadata unavailable: {exc}",
+                "provider_model_compatibilityの監査記録を確認してください",
+            )
+        ]
+
+    compatible_count = 0
+    unknown_count = 0
+    failed_count = 0
+    checks: list[DiagnosticCheck] = []
+    for agent_id, configured_model in settings.models.items():
+        effective_model, binding_note, binding_conflict = _effective_model_for_preflight(
+            agent_id=agent_id,
+            configured_model=configured_model,
+            bindings=bindings,
+        )
+        if binding_conflict:
+            unknown_count += 1
+            checks.append(
+                DiagnosticCheck(
+                    "FAIL",
+                    f"model capability: {agent_id}",
+                    f"UNKNOWN configured={configured_model}: {binding_conflict}",
+                    "競合するverified model bindingを確認してください",
+                )
+            )
+            continue
+        result = client.inspect(effective_model)
+        detail = (
+            f"{result.status.value} model={effective_model}, "
+            f"resolved={result.resolved_model_id or '-'}, "
+            f"endpoints={result.compatible_endpoint_count}/{result.endpoint_count}, "
+            f"reason={result.reason}"
+        )
+        if binding_note:
+            detail += f", {binding_note}"
+        if result.status is ModelCapabilityStatus.COMPATIBLE:
+            compatible_count += 1
+            level = "PASS"
+            action = None
+        elif result.status is ModelCapabilityStatus.UNKNOWN:
+            unknown_count += 1
+            level = "FAIL"
+            action = "OpenRouter metadataを再取得し、UNKNOWNを解消してください"
+        else:
+            failed_count += 1
+            level = "FAIL"
+            action = "strict Structured Output対応modelへ設定を変更してください"
+        checks.append(
+            DiagnosticCheck(
+                level,
+                f"model capability: {agent_id}",
+                detail,
+                action,
+            )
+        )
+
+    total = len(settings.models)
+    summary_level = "PASS" if failed_count == 0 and unknown_count == 0 else "FAIL"
+    checks.append(
+        DiagnosticCheck(
+            summary_level,
+            "MODEL CAPABILITY PREFLIGHT",
+            f"Compatible: {compatible_count}/{total}, Unknown: {unknown_count}, "
+            f"Failed: {failed_count}",
+            (
+                None
+                if summary_level == "PASS"
+                else "Failed/Unknownが0になるまでReal workflowを開始しないでください"
+            ),
+        )
+    )
+    return checks
+
+
+def _effective_model_for_preflight(
+    *,
+    agent_id: str,
+    configured_model: str,
+    bindings: list,
+) -> tuple[str, str | None, str | None]:
+    replacements = {
+        item.compatible_model_id
+        for item in bindings
+        if item.agent_id == agent_id
+        and item.incompatible_model_id == configured_model
+    }
+    if not replacements:
+        return configured_model, None, None
+    if len(replacements) > 1:
+        return (
+            configured_model,
+            None,
+            "multiple verified replacements exist for this configured model",
+        )
+    effective_model = next(iter(replacements))
+    return (
+        effective_model,
+        f"verified binding: {configured_model} -> {effective_model}",
+        None,
+    )
+
+
+def _retrieval_capability_checks(
+    settings: Settings,
+    *,
+    capability_client: OpenRouterModelCapabilityClient | None,
+) -> list[DiagnosticCheck]:
+    if settings.provider == "mock":
+        return [
+            DiagnosticCheck(
+                "PASS",
+                "RETRIEVAL CAPABILITY PREFLIGHT",
+                f"Retrieval Required: {len(RETRIEVAL_REQUIRED_AGENTS)}, "
+                f"Retrieval Ready: {len(RETRIEVAL_REQUIRED_AGENTS)}/{len(RETRIEVAL_REQUIRED_AGENTS)} "
+                "(mock)",
+            )
+        ]
+    checks: list[DiagnosticCheck] = []
+    ready = False
+    reason = ""
+    if settings.retrieval_provider != "openrouter":
+        reason = f"unsupported runtime pairing: {settings.retrieval_provider}"
+    elif not settings.openrouter_api_key:
+        reason = "OPENROUTER_API_KEY missing"
+    elif settings.retrieval_engine not in {
+        "auto",
+        "native",
+        "exa",
+        "firecrawl",
+        "parallel",
+        "perplexity",
+    }:
+        reason = f"unsupported engine={settings.retrieval_engine}"
+    else:
+        client = capability_client or OpenRouterModelCapabilityClient(
+            base_url=settings.openrouter_base_url,
+        )
+        result = client.inspect(settings.retrieval_model)
+        ready = result.status is ModelCapabilityStatus.COMPATIBLE
+        reason = (
+            f"provider=openrouter_web_search, engine={settings.retrieval_engine}, "
+            f"executor_model={settings.retrieval_model}, model_status={result.status.value}, "
+            f"reason={result.reason}"
+        )
+    for agent_id in RETRIEVAL_REQUIRED_AGENTS:
+        checks.append(
+            DiagnosticCheck(
+                "PASS" if ready else "FAIL",
+                f"retrieval capability: {agent_id}",
+                ("PASS " if ready else "FAILED ") + reason,
+                None if ready else "Retrieval provider設定とexecutor modelを確認してください",
+            )
+        )
+    total = len(RETRIEVAL_REQUIRED_AGENTS)
+    checks.append(
+        DiagnosticCheck(
+            "PASS" if ready else "FAIL",
+            "RETRIEVAL CAPABILITY PREFLIGHT",
+            f"Retrieval Required: {total}, Retrieval Ready: {total if ready else 0}/{total}",
+            None if ready else "Retrieval Readyが8/8になるまでReal workflowを開始しないでください",
         )
     )
     return checks

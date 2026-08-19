@@ -1,0 +1,139 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 007
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation
+Agents: Stakeholder & Response Analyst / Deliberation Manager
+Error Class: OVER-STRICT LOCAL VALIDATION / SOURCE BINDING / SAVED PAYLOAD RECOVERY
+
+1. 何が起きたか
+
+Cycle 006 の局所 Real Recovery では、Argument Analyst と Causal & Structural
+Analyst が正常完了した一方、Stakeholder & Response Analyst の OpenRouter 応答が
+local Pydantic validation で拒否された。失敗時点で初回統合、Counterargument、
+最終統合、Deterministic Validation、Quality Review は未実行だった。
+
+拒否理由は、固有名詞・数値を含むすべての文字列について、同一statementを
+specific_factsへ重複登録しなければならないという制約だった。実応答では各項目に
+evidence_idsがあり、ResearchReportにはevidence_idからsource_idへの一意な対応が
+保存されていた。それでも重複SpecificFactがないため全体を拒否していた。
+
+2. なぜ起きたか
+
+qf_001対策の「未裏付け具体情報を確定情報として扱わない」を、
+「具体情報は常にSpecificFactへ同文複製する」と実装していたためである。
+本来必要なのは、具体情報がResearchReportへ追跡可能であること、または
+unknown/unverified/research_gapとして明示されることであり、同文複製ではない。
+
+追加監査で、保存応答のSpecificFact 2件は実在evidence_idsを参照していたが、
+source_idsにはProviderが生成したaliasが入っていた。Report上では各evidence_idが
+別のcanonical source_idへ一意に対応していた。従来Managerはprimary analysisの
+source_idsをReport集合と照合していなかった。
+
+3. 同系統Failure Modeと影響範囲
+
+- evidence-boundな具体情報まで拒否すると、正しい応答にも不要なProvider再実行が必要になる。
+- source_*というprefixだけを検証すると、実Reportに存在しないsource aliasを通してしまう。
+- source_idが実在しても、SpecificFactのevidence_idsに対応しないsourceを紐づける可能性がある。
+- saved invalid_payloadの意味が新Schemaで正当化されても、自動再検証できないと二重課金になる。
+- 一方、自由なaliasを無条件補正するとProviderの新規誤出力を隠すため、新規応答と保存済み互換読込を分離する必要がある。
+
+4. v2との照合と修正計画
+
+既存v2の責務境界を維持した。
+
+- Pydantic Schema: 項目自身にevidence_idsがあれば具体情報はevidence-boundと扱う。
+- SpecificFact: verified/inferredではevidence_idsとsource_idsを引き続き必須とする。
+- Deliberation Manager: 新規応答のsource_idsをResearchReportの実IDおよびevidence→source対応と照合する。
+- Recovery Adapter: 保存済みERROR payloadに限り、Reportの一意なevidence→source対応からsource_idsを補正する。
+- PMP: 補正した場合はrecovered result messageのnotesへ明記する。
+- Reservation: saved payload回復ではProvider reservationを追加しない。
+
+PMP保存形式、Researcher Return、revision routing、checkpoint revision、Safe Mode、
+既存provider reservation形式は変更していない。
+
+5. どう直したか
+
+- Stakeholder Schemaの具体情報探索をevidence未紐付け項目だけに限定した。
+- ManagerへSpecificFact source binding検証を追加した。
+- source_idsがReport外なら新規応答を拒否する。
+- source_idsがfactのevidence_idsから導かれる集合と一致しなければ拒否する。
+- 保存済みStakeholder ERROR payloadに限り、Reportの一意な対応でsource_idsを再構成する。
+- 回復PMPへ互換補正の監査noteを保存する。
+- saved analysisの再利用判定にも同じsource binding検証を適用した。
+
+6. Mock / Fault Injection / Recovery
+
+Static compile: PASS
+Structured Output + Deliberation payload regression: 36 PASS
+Deliberation manager/payload targeted suite: PASS
+Unit full: PASS
+Integration: 9 PASS
+
+Fault A: evidence_ids付きの具体的省庁名はSpecificFactの同文複製なしでPASS。
+Fault B: 同じ項目からevidence_idsを外すとSpecificFactまたはresearch gapなしではFAIL。
+Fault C: Report外source aliasを持つSpecificFactを新規応答として検証するとFAIL。
+Fault D: 同じpayloadを保存済みERRORとして回復すると、evidence→sourceの一意対応で補正される。
+Fault E: 補正後source_idsがfactのevidence_idsに対応し、Provider call countは増えない。
+
+本番state/messagesのread-only copyを用いたMock Recovery:
+- Status: COMPLETED
+- Stakeholder Provider calls: 0
+- Saved payload recovered: YES
+- Rebound source IDs: 2
+- Downstream calls: initial integration / Counterargument / final integration / Quality Review の4件
+- Quality Review: approved_with_conditions
+- failed_agents: []
+- checkpoint_revisions: primary 3件と全downstream stageがrevision 1
+- persistent mock reservations: 4
+
+7. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: 本番stateはこの検証では変更していない。read-only copyのみCOMPLETEDへ進めた。
+PMP: 保存ERRORは保持し、新たに監査note付きrecovered resultを追加する設計。
+Schema: evidence-bound具体情報を許可し、未紐付け具体情報の禁止は維持。
+Checkpoint: recovered Stakeholderをprimary revision 1として保存できることを確認。
+Reservation: Stakeholder reservationは追加0。downstream logical task 4件のみ作成。
+Outbox: Mock copyではConclusion outboxが正常生成された。本番outboxは未変更。
+
+8. Provider CallとCost
+
+Cycle 007 implementation/test calls: 0 real calls
+Mock calls in exact-state recovery: 4
+Automatic retries: 0
+API Cost: $0
+
+次の局所Real RetryではStakeholder call 0を期待し、保存payload回復後のdownstream 4 logical
+callsだけを許可する。Full E2Eの最初からの再実行は行わない。
+
+9. 設計上の意味と再発防止
+
+「証拠拘束」と「同一内容の重複表現」を分離した。信頼境界はprefixではなく、
+保存済みResearchReportの実在IDとevidence→source関係である。新規Provider出力の誤りは
+拒否する一方、既保存の応答は権威ある一意対応だけで互換回復するため、安全性と
+コスト制御を両立できる。
+
+10. Storage Safety
+
+既存workflow JSON、messages、results、checkpoint、provider reservations、outboxは
+実装・Mock/Fault検証中に削除・初期化・上書きしていない。本番データは読取のみ、
+Mock Recoveryは一時領域の複製に対して実行した。
+
+11. Result
+
+IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS
+READY FOR ONE LOCALIZED REAL DELIBERATION RECOVERY
+
+Plan Compliance Review
+
+[YES] 根本原因をSchema責務まで特定した
+[YES] 現在のfield errorだけでなくsource bindingを横断監査した
+[YES] 新規出力と保存済み互換読込の責務を分離した
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outbox影響を確認した
+[YES] Regression Testを追加した
+[YES] Fault Injectionと本番state copy Recoveryを確認した
+[YES] Debug Reportを生成した
+[YES] 設計上の意味と再発防止を説明した
+[YES] Real Provider callは0
+[YES] Full E2Eを最初から再実行していない

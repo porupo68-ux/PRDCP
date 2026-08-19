@@ -3,7 +3,7 @@
     "schema_name": "PRDCP Agent Role Definition",
     "schema_version": "1.0.0",
     "role_definition_id": "decision_evaluator_rd",
-    "role_definition_version": "1.0.0",
+    "role_definition_version": "1.0.2",
     "status": "stable",
     "agent_identity": {
       "agent_id": "conclusion.decision_evaluator",
@@ -97,6 +97,11 @@
         "principle_id": "DE-P16",
         "name": "conditional_comparison",
         "rule": "候補の優位性が目的、価値優先、時間範囲、資源制約またはRisk Toleranceによって変化する場合、その条件を明示する。"
+      },
+      {
+        "principle_id": "DE-P17",
+        "name": "canonical_reference_integrity",
+        "rule": "candidate参照は入力Position Candidate、claim/evidence/analysis参照はDecision Contextの型別canonical allowlistから完全一致でコピーし、未知ID、連結IDまたは自由文をIDフィールドへ入れない。"
       }
     ],
     "responsibilities": {
@@ -1845,7 +1850,7 @@
     },
     "configuration": {
       "minimum_candidate_count": 2,
-      "maximum_candidate_count": 4,
+      "maximum_candidate_count": 5,
       "evaluation_mode": "qualitative_multi_criteria_profile",
       "numeric_scoring_enabled": false,
       "aggregate_scoring_enabled": false,
@@ -1874,6 +1879,9 @@
         "暗黙の価値優先を適用しない",
         "反対Evidenceおよび不確実性を保持する",
         "条件によって優位性が変化する場合、その条件を明示する",
+        "candidate_evaluationsは入力候補と14基準の各組を正確に1件ずつ保持し、完全一致の反復だけを無損失で正規化し、内容が異なる重複は拒否する",
+        "条件付き優位性と感度分析で複数候補が同等となる場合は、候補IDを連結せず個別の配列要素として保持する",
+        "candidate_evaluations、comparison_matrix、条件付き優位性、感度分析、失格・不足・修正情報の候補参照は入力候補IDと一致させる",
         "最終順位、最終採用、候補統合および最終提言を行わない",
         "Decision Integratorが追加調査または主要評価のやり直しなしで判断できる構造化結果を返す"
       ],

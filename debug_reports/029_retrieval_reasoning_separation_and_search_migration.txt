@@ -1,0 +1,106 @@
+PRDCP v2 Debug Cycle 029
+Retrieval / Reasoning Separation & Search-capable Agent Migration
+
+Status
+COMPLETED IN MOCK/Fault/Recovery. Production deployment and read-only Doctor/status checks are recorded below after deployment. No paid Provider call was made in this cycle.
+
+Plan identity
+Source: Cycle 029 改修計画書
+SHA-256: 5B11547AF4DFF24D87E68CAE5DFCC196804D23A0AFE739C331DA9E9A5584280E
+Note: the supplied file ends during regression-test item 5. The implemented audit therefore preserves every complete requirement and adds the directly implied idempotency, source-grounding, and provider-input consistency tests.
+
+What happened
+Cycle 028 proved that nine Perplexity-bound agents did not satisfy the strict Structured Output capability preflight. The deeper design problem was that PRDCP expected one model call to perform search, source acquisition, reasoning, and strict JSON generation. Replacing the model names alone would either lose search or preserve the same hidden coupling.
+
+Root cause
+StructuredAgent had only one canonical input path. ResearchTask was serialized once for budget preflight and serialized again inside run(), with no durable retrieval boundary. Search results therefore had no separate identity, checkpoint, reservation, failure class, or recovery path. ResearchResult could also return source identities that were not members of any application-owned retrieved set.
+
+Design correction
+1. StructuredAgent now has an async prepare_provider_input() hook. Its default is an exact no-op.
+2. The prepared dictionary is computed once and used unchanged by budget preflight and the actual Provider call.
+3. Research Planner remains retrieval-free because its RD and prompt explicitly prohibit evidence collection.
+4. General Opinion Analyst receives a lightweight retrieval view. Seven Researcher specialists receive strategy-specific evidence retrieval views.
+5. Canonical PMP payloads and ResearchTask objects are never extended or rewritten. retrieval_context is a runtime-only Provider view.
+6. Retrieval has provider-neutral models, a replaceable provider protocol, Mock and OpenRouter Web Search adapters, deterministic retrieval/source identities, separate reservations, and durable contexts.
+7. Retrieval is persisted before the LLM reservation/call. An LLM operator-retry identity maps back to the original retrieval identity, so the search call count remains zero during LLM recovery.
+8. A reservation without a context is classified as ambiguous and blocks automatic duplicate retrieval.
+9. ResearchResult strict schemas bind source_id, URL, title, and excerpt to retrieved values. Local validation also checks source pairing and grounded identity metadata. General Opinion URLs and labels are similarly bounded.
+10. Doctor reports the 31 Reasoning models and eight retrieval-required agents as separate capability dimensions.
+
+Search provider decision
+The OpenRouter openrouter:web_search server tool was selected behind a provider adapter. It exposes URL citation annotations containing URL, title, and excerpt while allowing the later PRDCP Structured Output call to remain independent. PRDCP forces the search tool for the retrieval request, caps total results, persists citations, then performs structured reasoning in a separate call. The adapter remains replaceable; no agent imports OpenRouter transport details.
+
+Failure-mode audit
+- Default agents accidentally receiving retrieval: prevented by opt-in hook overrides and a ResearchTask schema guard.
+- Researcher Quality Reviewer sharing ResearcherAgent: explicitly remains retrieval-free.
+- Preflight/actual input mismatch: one prepared object is reused for both.
+- Search success followed by LLM failure: persisted context is reused.
+- Search failure followed by retry: reservation blocks an automatic duplicate.
+- Revision and external Researcher Return: revision task identity creates a new retrieval identity; existing evidence remains in the report.
+- Provider retry/contract repair/capability repair: suffixes reuse the original retrieval identity.
+- Hallucinated URL/source/title/excerpt: Provider schema and local contract reject values outside retrieval context.
+- General Opinion with fewer than three retrieved sources: LLM call is blocked as RETRIEVAL_NO_RESULTS instead of inventing sources.
+- Safe Mode loophole: search reservations are independent and one-shot, including when LLM Safe Mode would otherwise allow a call.
+- Downstream regressions: Producer, Researcher, Deliberation, Conclusion, and Playwright all passed the full verification suite.
+
+Regression and fault results
+- compileall active surface: PASS (retrieval added to maintained surface)
+- unittest discover: PASS, 438 tests
+- strict Structured Output root schemas: PASS
+- default prepare_provider_input no-op: PASS
+- Research Planner retrieval N/A: PASS
+- General Opinion lightweight retrieval: PASS
+- Researcher-only context injection: PASS
+- canonical ResearchTask unchanged: PASS
+- retrieval persisted before LLM: PASS
+- preflight input equals generated input: PASS
+- LLM retry reuses retrieval, search call count 0: PASS
+- retrieval provider failure reservation blocks duplicate: PASS
+- un-retrieved source rejection: PASS
+- retrieval-bound strict schema: PASS
+- internal/external revision and Researcher Return regressions: PASS
+- five-layer isolated Mock E2E: PASS
+- six delivery artifacts: PASS
+
+Provider calls and cost
+OpenRouter chat completion calls: 0
+OpenRouter web-search calls: 0
+Estimated/observed API cost: USD 0.00
+Reason: all architecture, schema, recovery, and fault behavior was verifiable without a paid request. The final Real E2E budget remains untouched.
+
+System-design meaning
+Search is now an explicit, durable source-acquisition subsystem instead of an undocumented property of a selected LLM. Reasoning models can be selected for strict JSON reliability, while Search Providers can be selected for source quality and cost. Recovery can reuse acquired evidence without duplicate external calls, and downstream traceability begins at an application-owned retrieval source identity.
+
+Prevention
+The new tests fail if a future change mutates canonical payloads, prepares different preflight and send inputs, retries retrieval after an ambiguous failure, lets retrieval-free agents search, or accepts a ResearchResult source outside its retrieval context. Doctor blocks a Real workflow unless both Reasoning and Retrieval capability dimensions are ready.
+
+Self-audit
+Root cause identified: YES
+Local symptom-only patch avoided: YES
+Same failure mode audited across all layers: YES
+State/PMP/schema/checkpoint/reservation/outbox impact checked: YES
+Regression tests added: YES
+Recovery/Fault conditions checked: YES
+Debug report generated: YES
+Design meaning documented: YES
+Unnecessary Provider calls avoided: YES
+Existing storage rewritten or migrated: NO
+
+Production deployment verification
+- deployment target: C:\Users\kpi01\OneDrive\デスクトップ\PRDCP_v2
+- deployed code/docs/tests/report files: 33; staging/production SHA-256 matches: 33/33
+- runtime .env keys updated mechanically without exposing or replacing secrets: 12
+- CLI help: PASS; --deliberation-recover is present
+- CLI status for 15f3f5c5-4167-447d-b255-069fc7f5beb2: PASS
+- existing workflow layers: Producer COMPLETED, Researcher COMPLETED_REVISION, Deliberation COMPLETED, Conclusion COMPLETED, Playwright COMPLETED
+- workflow-related files before/after: 120/120
+- aggregate SHA-256 before/after: 9A28E529B3A17460973463E239D8AD279B03C2475D07C2E76F43D34FD5B9C1FD (unchanged)
+- production Doctor with an isolated data directory and read-only copies of the two existing verified model bindings: READY
+- Reasoning Compatible: 31/31; Unknown: 0; Failed: 0
+- Retrieval Required: 8; Retrieval Ready: 8/8
+- paid chat completion or web search during production verification: 0
+- note: the Windows `py` launcher is not installed in this environment, so the configured bundled Python 3.12 runtime executed the same `main.py` CLI.
+
+References
+https://openrouter.ai/docs/guides/features/server-tools/web-search
+https://openrouter.ai/docs/guides/features/server-tools/overview

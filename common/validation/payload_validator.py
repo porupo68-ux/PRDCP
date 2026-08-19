@@ -13,6 +13,11 @@ class PayloadValidator:
         try:
             return schema.model_validate(payload)
         except ValidationError as exc:
-            raise PayloadValidationError(str(exc)) from exc
-
-
+            raise PayloadValidationError(
+                str(exc),
+                invalid_payload=payload,
+                validation_errors=exc.errors(
+                    include_url=False,
+                    include_context=False,
+                ),
+            ) from exc

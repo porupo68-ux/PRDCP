@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -25,7 +25,7 @@ class SpecificFact(BaseModel):
 
     fact_id: str = Field(min_length=1)
     statement: str = Field(min_length=1)
-    verification_status: str = Field(min_length=1)
+    verification_status: Literal["verified", "inferred", "unknown", "unverified"]
     evidence_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
     research_gap: str = ""
@@ -189,6 +189,7 @@ class StakeholderResponseAnalysisResult(BaseModel):
 
     analysis_id: str = Field(
         min_length=1,
+        pattern=r"^stakeholder_analysis_.+",
         description="Unique stakeholder analysis identifier using stakeholder_analysis_*",
     )
     task_id: str = Field(min_length=1)
@@ -259,7 +260,7 @@ class StakeholderResponseAnalysisResult(BaseModel):
             raise ValueError("interests reference an unknown stakeholder_id")
         if any(item.stakeholder_id not in known for item in self.authority_and_capacity):
             raise ValueError("authority_and_capacity references an unknown stakeholder_id")
-        concrete_statements = _collect_specific_statements(
+        concrete_statements = _collect_unbound_specific_statements(
             self.model_dump(mode="json", exclude={"specific_facts", "research_gaps"})
         )
         uncovered = [
@@ -302,4 +303,26 @@ def _collect_specific_statements(value: Any) -> list[str]:
             found.extend(_collect_specific_statements(item))
     elif isinstance(value, str) and _SPECIFIC_INFORMATION_PATTERN.search(value):
         found.append(value)
+    return list(dict.fromkeys(found))
+
+
+def _collect_unbound_specific_statements(value: Any) -> list[str]:
+    """Find concrete text that has neither a local Evidence link nor a fact record."""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        locally_bound = bool(value.get("evidence_ids")) or bool(value.get("evidence_id"))
+        for key, item in value.items():
+            if key.endswith("_id") or key.endswith("_ids"):
+                continue
+            if key in {"uncertainties", "research_gaps", "limitations"}:
+                continue
+            if isinstance(item, str):
+                if not locally_bound and _SPECIFIC_INFORMATION_PATTERN.search(item):
+                    found.append(item)
+            else:
+                found.extend(_collect_unbound_specific_statements(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_collect_unbound_specific_statements(item))
     return list(dict.fromkeys(found))

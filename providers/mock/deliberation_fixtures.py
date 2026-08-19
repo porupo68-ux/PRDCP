@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from common.ids import new_id
 
 
@@ -149,10 +151,34 @@ def initial_integration(input_data: dict) -> dict:
         for item in report["evidence_items"]
     }
     argument_analysis_id = argument.get("analysis_id")
+    causal_analysis_id = analyses.get(
+        "deliberation.causal_structural_analyst", {}
+    ).get("analysis_id")
+    stakeholder_analysis_id = analyses.get(
+        "deliberation.stakeholder_response_analyst", {}
+    ).get("analysis_id")
     fallback_analysis_ids = [
         analysis["analysis_id"]
         for analysis in analyses.values()
         if analysis.get("analysis_id")
+    ]
+    source_analysis_ids = list(
+        dict.fromkeys(
+            identifier
+            for identifier in (
+                argument_analysis_id,
+                causal_analysis_id,
+                stakeholder_analysis_id,
+            )
+            if identifier
+        )
+    )
+    integrated_claims = [
+        {
+            **claim,
+            "source_analysis_id": argument_analysis_id or "deliberation.manager",
+        }
+        for claim in claims
     ]
     return {
         "integration_id": new_id("integration_initial"),
@@ -160,13 +186,32 @@ def initial_integration(input_data: dict) -> dict:
             "topic": report["topic"],
             "general_opinion": report["general_opinion"],
             "definition": "生成AIによる業務代替と雇用全体の変化を区別して分析する",
+            "source_analysis_ids": source_analysis_ids,
         },
-        "key_claims": claims,
-        "causal_structure": {"summary": "導入→業務代替・補完→職務再構成", "structural_factors": ["再訓練制度"]},
-        "stakeholder_structure": {"primary": ["労働者", "雇用主"], "distribution": "影響は不均等"},
+        "key_claims": integrated_claims,
+        "causal_structure": {
+            "summary": "導入→業務代替・補完→職務再構成",
+            "structural_factors": ["再訓練制度"],
+            "source_analysis_id": causal_analysis_id or "deliberation.manager",
+        },
+        "stakeholder_structure": {
+            "primary": ["労働者", "雇用主"],
+            "distribution": "影響は不均等",
+            "source_analysis_id": (
+                stakeholder_analysis_id or "deliberation.manager"
+            ),
+        },
         "existing_response_assessment": [{"response": "再訓練", "assessment": "適用範囲が限定的"}],
-        "agreements": [{"agreement_id": new_id("agreement"), "summary": "影響は職種・導入条件に依存する"}],
-        "conflicts": [{"conflict_id": new_id("conflict"), "summary": "雇用純減の規模は一致していない"}],
+        "agreements": [{
+            "agreement_id": new_id("agreement"),
+            "summary": "影響は職種・導入条件に依存する",
+            "supporting_analysis_ids": source_analysis_ids,
+        }],
+        "conflicts": [{
+            "conflict_id": new_id("conflict"),
+            "summary": "雇用純減の規模は一致していない",
+            "involved_analysis_ids": source_analysis_ids,
+        }],
         "unresolved_items": [{"item_id": new_id("unresolved"), "summary": "長期純効果"}],
         "candidate_viewpoints": [
             _viewpoint(viewpoint_id, claims, evidence_ids, "条件依存の変化", "単純な全面代替ではなく職務再構成として捉える")
@@ -209,7 +254,7 @@ def counterargument_analysis(input_data: dict) -> dict:
         "task_id": input_data["task_id"],
         "steelman_arguments": [
             {
-                "challenge_id": new_id("steelman"),
+                "challenge_id": new_id("challenge"),
                 "target_claim_ids": claim_ids,
                 "argument": "代替速度が補完業務の創出を上回る可能性がある",
                 "evidence_ids": evidence_ids,
@@ -234,7 +279,7 @@ def counterargument_analysis(input_data: dict) -> dict:
         "contrary_evidence": [{"evidence_ids": evidence_ids, "summary": "反対方向の観測も含まれる"}],
         "exception_conditions": [{"condition": "急速かつ広範な導入"}],
         "falsification_conditions": [{"condition": "長期にわたり職務・雇用の両方へ影響がないこと"}],
-        "alternative_interpretations": [{"interpretation_id": new_id("interpretation"), "summary": "雇用消失より職務再編が中心"}],
+        "alternative_interpretations": [{"interpretation_id": new_id("alt_interp"), "summary": "雇用消失より職務再編が中心"}],
         "overlooked_stakeholders": [{"stakeholder": "再訓練を提供できない小規模企業"}],
         "false_balance_risks": [{"risk": "証拠量が非対称な見解を同等扱いしない"}],
         "required_revisions": [
@@ -274,13 +319,30 @@ def final_integration(input_data: dict) -> dict:
     viewpoint["counterarguments"] = [item["argument"] for item in counter["counterarguments"]]
     viewpoint["strongest_objections"] = [counter["counterarguments"][0]["argument"]]
     source_counter_ids = [counter["counterarguments"][0]["counterargument_id"]]
+    interpretation = counter["alternative_interpretations"][0]
+    causal_structure = deepcopy(initial["causal_structure"])
+    traceability_index = deepcopy(initial["traceability_index"])
+    # The legacy summary-shaped fixture is normalized by Pydantic and cannot carry
+    # nested alternatives. Runtime Manager input is the full persisted model shape.
+    if "summary" not in causal_structure:
+        causal_structure.setdefault("alternative_explanations", []).append(
+            {
+                "item_id": interpretation["interpretation_id"],
+                "description": interpretation["summary"],
+                "evidence_linked": evidence_ids,
+                "source_counterargument_ids": source_counter_ids,
+            }
+        )
+        traceability_index[0].setdefault("causal_item_ids", []).append(
+            interpretation["interpretation_id"]
+        )
     change_id = new_id("change")
     return {
         "integration_id": new_id("integration_final"),
         "previous_integration_id": initial["integration_id"],
         "problem_definition": initial["problem_definition"],
         "key_claims": claims,
-        "causal_structure": initial["causal_structure"],
+        "causal_structure": causal_structure,
         "stakeholder_structure": initial["stakeholder_structure"],
         "existing_response_assessment": initial["existing_response_assessment"],
         "major_viewpoints": [viewpoint],
@@ -313,7 +375,7 @@ def final_integration(input_data: dict) -> dict:
                 "acceptance_conditions": counter["counterarguments"][0]["acceptance_conditions"],
             }
         ],
-        "traceability_index": initial["traceability_index"],
+        "traceability_index": traceability_index,
     }
 
 
@@ -353,7 +415,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
     evidence_ids = [item["evidence_id"] for item in report["evidence_items"]]
     base = {
         "review_id": new_id("deliberation_review"),
-        "conclusion_readiness": "READY",
+        "conclusion_readiness": "ready",
         "findings": [],
         "blocking_finding_ids": [],
         "revision_scope": "none",
@@ -368,7 +430,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
         return {
             **base,
             "status": "revision_required",
-            "conclusion_readiness": "NOT_READY",
+            "conclusion_readiness": "not_ready",
             "reason": "Argument AnalysisのEvidence mappingを再確認する必要がある",
             "findings": [
                 {
@@ -389,7 +451,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
         return {
             **base,
             "status": "revision_required",
-            "conclusion_readiness": "NOT_READY",
+            "conclusion_readiness": "not_ready",
             "reason": "因果主張を検証する一次Evidenceが不足している",
             "findings": [
                 {
@@ -478,7 +540,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
         return {
             **base,
             "status": "blocked",
-            "conclusion_readiness": "NOT_READY",
+            "conclusion_readiness": "not_ready",
             "reason": "決定論的検証または必須Workflow条件を満たしていない",
             "findings": [
                 {
@@ -497,7 +559,7 @@ def quality_review(input_data: dict, decision: str | None) -> dict:
         return {
             **base,
             "status": "approved_with_conditions",
-            "conclusion_readiness": "READY_WITH_CONDITIONS",
+            "conclusion_readiness": "ready_with_conditions",
             "reason": "開示済みの制約を保持すればConclusionへ進める",
             "limitations_to_disclose": input_data.get("limitations") or ["一部Evidenceの代表性に制約がある"],
         }

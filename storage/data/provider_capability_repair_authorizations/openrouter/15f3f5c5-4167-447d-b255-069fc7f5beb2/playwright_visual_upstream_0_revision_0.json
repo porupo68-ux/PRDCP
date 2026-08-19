@@ -1,0 +1,19 @@
+{
+  "authorization_id": "ba8751c1-f4f6-4316-9731-a574df75466c",
+  "workflow_id": "15f3f5c5-4167-447d-b255-069fc7f5beb2",
+  "provider_id": "openrouter",
+  "agent_id": "playwright.visual_director",
+  "original_task_id": "playwright_visual_upstream_0_revision_0",
+  "repair_task_id": "playwright_visual_upstream_0_revision_0_provider_capability_repair_1",
+  "source_error_message_id": "2f783abf-df0d-4a7a-893b-9f4be3eff2d6",
+  "source_error_class": "NonRetryableAgentError",
+  "source_http_status": 404,
+  "failure_signature": "structured_output_endpoint_unavailable",
+  "failed_model_id": "z-ai/glm-4.5-air",
+  "repair_model_id": "openai/gpt-5-mini",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-17T05:02:19.782344Z",
+  "consumed_at": "2026-08-17T05:02:19.994462Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\15f3f5c5-4167-447d-b255-069fc7f5beb2\\playwright_visual_upstream_0_revision_0_provider_capability_repair_1.json"
+}

@@ -1,0 +1,21 @@
+{
+  "authorization_id": "a0aac407-284f-47cb-83aa-824cb1254d86",
+  "workflow_id": "35fc624a-d8ac-451b-97f6-f3e94e13a951",
+  "provider_id": "openrouter",
+  "agent_id": "producer.general_opinion_analyst",
+  "original_task_id": "producer.general_opinion_analyst",
+  "retry_task_id": "producer.general_opinion_analyst_operator_retry_1",
+  "repair_task_id": "producer.general_opinion_analyst_provider_output_repair_1",
+  "source_retry_authorization_id": "2cf26975-91fc-4e42-b1fe-5e325745ec28",
+  "source_error_message_id": "5eee762a-578d-4121-994b-d7922bb0628c",
+  "source_error_class": "NonRetryableAgentError",
+  "failure_signature": "retrieval_metadata_hydration_contract",
+  "model_id": "google/gemini-3.7-flash",
+  "retrieval_id": "retrieval_f354b54b51f6c2f44f4dbfd1",
+  "retrieval_context_sha256": "bfe69d5cb5d26993a7482c9de28c1e2fbc6a68b504360507943ee5d13f1b9455",
+  "authorized_by": "cli.operator",
+  "status": "CONSUMED",
+  "authorized_at": "2026-08-17T15:27:12.237882Z",
+  "consumed_at": "2026-08-17T15:27:12.858219Z",
+  "reservation_path": "C:\\Users\\kpi01\\OneDrive\\デスクトップ\\PRDCP_v2\\storage\\data\\provider_call_reservations\\openrouter\\35fc624a-d8ac-451b-97f6-f3e94e13a951\\producer.general_opinion_analyst_provider_output_repair_1.json"
+}

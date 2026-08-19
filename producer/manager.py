@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import os
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from common.ids import new_workflow_id
@@ -14,12 +17,22 @@ from common.models.pmp import (
     PMPRouting,
 )
 from common.models.workflow import WorkflowStatus
+from common.provider_retry import (
+    ProviderRetryAuthorization,
+    ProviderRetryAuthorizationStore,
+    ProviderRetryStatus,
+)
+from common.provider_output_repair import (
+    ProviderOutputRepairAuthorization,
+    ProviderOutputRepairAuthorizationStore,
+)
 from common.validation import PMPValidator
 from common.role_definitions import RoleDefinitionExtractor, RoleDefinitionLoader
 from producer.registry import ProducerRegistry
 from producer.schemas.review import QualityReviewOutput
 from producer.state import ProducerWorkflowState, RevisionRecord, utc_now
 from producer.workflow import AGENT_ORDER, DISPLAY_NAMES
+from retrieval.models import RetrievedContext
 from storage.workflow_repository import WorkflowRepository
 
 
@@ -40,10 +53,330 @@ class ProducerManager:
     ) -> None:
         self.registry = registry
         self.repository = repository
+        if (
+            getattr(self.registry.provider, "reservation_root", None) is None
+            and not os.getenv("PRDCP_DATA_DIR", "").strip()
+        ):
+            self.registry.provider.reservation_root = (
+                repository.data_dir / "provider_call_reservations"
+            )
+        self.registry.bind_retrieval_data_dir(repository.data_dir)
         self.demo_safe_mode = demo_safe_mode
         self.max_revisions = 0 if demo_safe_mode else max_revisions
         self.pmp_validator = PMPValidator()
         self.rd_loader = rd_loader or registry.rd_loader
+        self.provider_retry_store = ProviderRetryAuthorizationStore(repository.data_dir)
+        self.provider_output_repair_store = ProviderOutputRepairAuthorizationStore(
+            repository.data_dir
+        )
+
+    def authorize_provider_retry(
+        self,
+        workflow_id: str,
+    ) -> ProviderRetryAuthorization:
+        """Authorize one repaired General Opinion reasoning request.
+
+        Cycle 030 migrates the already-persisted generic HTTP 400 into the
+        precise request-schema failure classification only after correlating
+        the PMP error, original request, agent, endpoint and reservation.
+        """
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Operator provider retry is available only while Demo Safe Mode is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Producer must be FAILED before an operator provider retry")
+        next_index = self._recovery_start_index(state)
+        agent_id = AGENT_ORDER[next_index]
+        if agent_id != "producer.general_opinion_analyst":
+            raise ValueError(
+                "Cycle 030 provider retry is limited to the failed General Opinion checkpoint"
+            )
+        error_response = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.sender_agent_id == agent_id
+                and message.receiver_agent_id == self.agent_id
+                and message.message_type == MessageType.ERROR.value
+            ),
+            None,
+        )
+        if error_response is None:
+            raise ValueError("No persisted General Opinion error was found")
+        request = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.message_id == error_response.parent_message_id
+            ),
+            None,
+        )
+        error_message = str(error_response.payload.get("message") or "")
+        if (
+            request is None
+            or request.sender_agent_id != self.agent_id
+            or request.receiver_agent_id != agent_id
+            or request.message_type != MessageType.TASK.value
+            or error_response.payload.get("provider") != "openrouter"
+            or error_response.payload.get("http_status") != 400
+            or "INVALID_ARGUMENT" not in error_message
+        ):
+            raise ValueError(
+                "Persisted General Opinion failure is not the correlated Gemini "
+                "request-schema rejection"
+            )
+        provider_id = getattr(self.registry.get(agent_id).provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            raise ValueError("General Opinion provider has no stable logical provider ID")
+        original_task_id = str(error_response.payload.get("task_id") or agent_id)
+        return self.provider_retry_store.authorize_once(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            agent_id=agent_id,
+            original_task_id=original_task_id,
+            source_error_message_id=error_response.message_id,
+            source_error_class="ProviderRequestSchemaError",
+        )
+
+    async def retry_provider_call(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProducerWorkflowState:
+        """Run exactly the failed reasoning checkpoint, never downstream agents."""
+
+        authorization = self.authorize_provider_retry(workflow_id)
+        await self._emit(
+            progress_callback,
+            "Operator one-time General Opinion retry authorized: "
+            + authorization.retry_task_id,
+        )
+        return await self.recover(
+            workflow_id,
+            progress_callback=progress_callback,
+            stop_after_checkpoint=True,
+        )
+
+    def authorize_provider_output_repair(
+        self,
+        workflow_id: str,
+    ) -> ProviderOutputRepairAuthorization:
+        """Authorize the post-Cycle-030 output hydration repair exactly once."""
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Provider output repair is available only while Demo Safe Mode is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Producer must be FAILED before a provider output repair")
+        start_index = self._recovery_start_index(state)
+        agent_id = AGENT_ORDER[start_index]
+        if agent_id != "producer.general_opinion_analyst":
+            raise ValueError(
+                "Provider output repair is limited to the failed General Opinion checkpoint"
+            )
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if provider_id != "openrouter":
+            raise ValueError("General Opinion output repair requires OpenRouter")
+
+        original_task_id = agent_id
+        prior_authorization = self.provider_retry_store.for_original_task(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            original_task_id=original_task_id,
+        )
+        if (
+            prior_authorization is None
+            or prior_authorization.status != ProviderRetryStatus.CONSUMED.value
+        ):
+            raise ValueError(
+                "Provider output repair requires the consumed Cycle 030 retry authorization"
+            )
+        existing_repair = self.provider_output_repair_store.for_original_task(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            original_task_id=original_task_id,
+        )
+        if existing_repair is not None:
+            if existing_repair.status != "PENDING":
+                raise ValueError(
+                    "The one-time provider output repair was already consumed"
+                )
+            return self.provider_output_repair_store.require_pending_repair(
+                workflow_id=workflow_id,
+                provider_id=provider_id,
+                agent_id=agent_id,
+                repair_task_id=existing_repair.repair_task_id,
+                model_id=agent.model,
+            )
+        error_response = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.sender_agent_id == agent_id
+                and message.receiver_agent_id == self.agent_id
+                and message.message_type == MessageType.ERROR.value
+            ),
+            None,
+        )
+        if error_response is None:
+            raise ValueError("No persisted General Opinion output error was found")
+        request = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.message_id == error_response.parent_message_id
+            ),
+            None,
+        )
+        error_message = str(error_response.payload.get("message") or "")
+        failed_task_id = str(error_response.payload.get("task_id") or "")
+        failed_model_id = str(error_response.payload.get("model_id") or "")
+        if (
+            request is None
+            or request.sender_agent_id != self.agent_id
+            or request.receiver_agent_id != agent_id
+            or request.message_type != MessageType.TASK.value
+            or request.metadata.extensions.get("provider_task_id")
+            != prior_authorization.retry_task_id
+            or failed_task_id != prior_authorization.retry_task_id
+            or error_response.payload.get("error_class")
+            != "NonRetryableAgentError"
+            or not error_message.startswith(
+                "OUTPUT_CONTRACT_ERROR: General Opinion contains source references "
+                "absent from or changed relative to retrieval context:"
+            )
+            or failed_model_id != agent.model
+        ):
+            raise ValueError(
+                "Persisted failure is not the correlated Cycle 030 Retrieval metadata "
+                "hydration contract failure"
+            )
+
+        context_root = (
+            self.repository.data_dir / "retrieval_contexts" / workflow_id
+        )
+        contexts: list[tuple[RetrievedContext, Path]] = []
+        if context_root.is_dir():
+            for path in sorted(context_root.glob("*.json")):
+                context = RetrievedContext.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                if (
+                    context.workflow_id == workflow_id
+                    and context.agent_id == agent_id
+                ):
+                    contexts.append((context, path))
+        if len(contexts) != 1:
+            raise ValueError(
+                "Provider output repair requires exactly one saved General Opinion "
+                "Retrieval Context"
+            )
+        context, context_path = contexts[0]
+        if len(context.sources) < 3:
+            raise ValueError(
+                "Saved General Opinion Retrieval Context no longer has enough sources"
+            )
+        context_sha256 = hashlib.sha256(context_path.read_bytes()).hexdigest()
+        return self.provider_output_repair_store.authorize_once(
+            workflow_id=workflow_id,
+            provider_id=provider_id,
+            agent_id=agent_id,
+            original_task_id=original_task_id,
+            source_error_message_id=error_response.message_id,
+            source_error_class="NonRetryableAgentError",
+            model_id=failed_model_id,
+            retrieval_id=context.retrieval_id,
+            retrieval_context_sha256=context_sha256,
+        )
+
+    async def repair_provider_output(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProducerWorkflowState:
+        """Run only General Opinion reasoning with the repaired output adapter."""
+
+        authorization = self.authorize_provider_output_repair(workflow_id)
+        await self._emit(
+            progress_callback,
+            "One-shot General Opinion output repair authorized: "
+            + authorization.repair_task_id,
+        )
+        state = self.repository.load(workflow_id)
+        start_index = self._recovery_start_index(state)
+        state.error = None
+        state.completed_at = None
+        self.repository.save(state)
+        return await self._run_from(
+            state,
+            start_index,
+            progress_callback,
+            provider_task_id_overrides={
+                "producer.general_opinion_analyst": authorization.repair_task_id
+            },
+            stop_after_index=start_index,
+        )
+
+    async def recover(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        stop_after_checkpoint: bool = False,
+    ) -> ProducerWorkflowState:
+        """Resume from the first incomplete Producer checkpoint.
+
+        A previously reserved failed Provider task requires a pending one-shot
+        authorization.  Saved Retrieval is resolved by its canonical identity,
+        so recovering reasoning cannot start another search.
+        """
+
+        state = self.repository.load(workflow_id)
+        if state.status == WorkflowStatus.COMPLETED.value:
+            return state
+        start_index = self._recovery_start_index(state)
+        agent_id = AGENT_ORDER[start_index]
+        provider_id = getattr(self.registry.get(agent_id).provider, "provider_id", None)
+        task_overrides: dict[str, str] = {}
+        if isinstance(provider_id, str):
+            authorization = self.provider_retry_store.for_original_task(
+                workflow_id=workflow_id,
+                provider_id=provider_id,
+                original_task_id=agent_id,
+            )
+            original_reservation = self.provider_retry_store.reservation_path(
+                provider_id=provider_id,
+                workflow_id=workflow_id,
+                task_id=agent_id,
+            )
+            if (
+                authorization is not None
+                and authorization.status == ProviderRetryStatus.PENDING.value
+            ):
+                task_overrides[agent_id] = authorization.retry_task_id
+            elif original_reservation.exists():
+                raise ValueError(
+                    "Producer recovery found a prior Provider reservation for the "
+                    f"incomplete checkpoint {agent_id}; use --producer-provider-retry"
+                )
+        state.error = None
+        state.completed_at = None
+        self.repository.save(state)
+        return await self._run_from(
+            state,
+            start_index,
+            progress_callback,
+            provider_task_id_overrides=task_overrides,
+            stop_after_index=start_index if stop_after_checkpoint else None,
+        )
 
     async def start(
         self,
@@ -79,6 +412,9 @@ class ProducerManager:
         state: ProducerWorkflowState,
         start_index: int,
         progress_callback: ProgressCallback | None,
+        *,
+        provider_task_id_overrides: dict[str, str] | None = None,
+        stop_after_index: int | None = None,
     ) -> ProducerWorkflowState:
         state.status = WorkflowStatus.RUNNING
         self.repository.save(state)
@@ -92,7 +428,12 @@ class ProducerManager:
             )
             self.repository.save(state)
 
-            request = self._create_task_message(state, agent_id, index)
+            request = self._create_task_message(
+                state,
+                agent_id,
+                index,
+                provider_task_id=(provider_task_id_overrides or {}).get(agent_id),
+            )
             state.message_history.append(request)
             self.repository.save(state)
 
@@ -115,9 +456,27 @@ class ProducerManager:
                 progress_callback,
                 f"[{index + 1}/5] {DISPLAY_NAMES[agent_id]} 完了",
             )
+            if index == stop_after_index:
+                state.current_agent_id = None
+                state.status = WorkflowStatus.RUNNING
+                state.error = None
+                state.completed_at = None
+                self.repository.save(state)
+                await self._emit(
+                    progress_callback,
+                    "Recovered checkpoint saved; downstream Provider calls were not run",
+                )
+                return state
         return await self._fail(state, "Quality Reviewerを通過せずに処理が終了しました", progress_callback)
 
-    def _create_task_message(self, state: ProducerWorkflowState, agent_id: str, index: int) -> PMPMessage:
+    def _create_task_message(
+        self,
+        state: ProducerWorkflowState,
+        agent_id: str,
+        index: int,
+        *,
+        provider_task_id: str | None = None,
+    ) -> PMPMessage:
         previous_stage = AGENT_ORDER[index - 1] if index > 0 else "producer.manager"
         next_stage = AGENT_ORDER[index + 1] if index + 1 < len(AGENT_ORDER) else "producer.manager"
         return PMPMessage.create(
@@ -135,9 +494,40 @@ class ProducerManager:
             ),
             metadata=PMPMetadata(
                 status=MessageStatus.QUEUED,
-                extensions={"role_definition": state.role_definition_usage[-1]},
+                extensions={
+                    "role_definition": state.role_definition_usage[-1],
+                    **(
+                        {"provider_task_id": provider_task_id}
+                        if provider_task_id is not None
+                        else {}
+                    ),
+                },
             ),
         )
+
+    @staticmethod
+    def _recovery_start_index(state: ProducerWorkflowState) -> int:
+        completed = list(dict.fromkeys(state.completed_agents))
+        expected_prefix = AGENT_ORDER[: len(completed)]
+        if completed != expected_prefix:
+            raise ValueError(
+                "Producer checkpoint is not a contiguous completed-agent prefix"
+            )
+        if len(completed) >= len(AGENT_ORDER):
+            raise ValueError("Producer has no incomplete checkpoint to recover")
+        required_artifacts = (
+            (1, bool(state.topic_candidates), "topic_candidates"),
+            (2, state.selected_topic is not None, "selected_topic"),
+            (3, state.general_opinion is not None, "general_opinion"),
+            (4, state.research_plan is not None, "research_plan"),
+        )
+        for completed_count, present, name in required_artifacts:
+            if len(completed) >= completed_count and not present:
+                raise ValueError(
+                    f"Producer checkpoint says {completed_count} agents completed but "
+                    f"{name} is missing"
+                )
+        return len(completed)
 
     def _build_payload(self, state: ProducerWorkflowState, agent_id: str) -> dict[str, Any]:
         revision_context = (

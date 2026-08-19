@@ -1,0 +1,247 @@
+PRDCP Debug Report
+
+ID: 026
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Playwright / Common Provider Control Plane
+Agent: playwright.visual_director
+Error Class: PROVIDER / CONFIG / RESERVATION / RECOVERY
+
+1. 発生した現象
+
+Cycle 025の明示的一回Playwright retryで、保存済みNarrativeを再利用し、ScriptwriterとEvidence & Citation Editorは成功した。
+続くVisual DirectorだけがOpenRouter HTTP 404
+`No endpoints found that can handle the requested parameters`を返した。StateはFAILED、message 11件、
+completed agentsはNarrative、Scriptwriter、Citationの3件、Visual/Deliveryは未完了だった。
+
+2. 発生地点
+
+- workflow_id: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+- task_id: playwright_visual_upstream_0_revision_0
+- request message_id: f78f7c27-6732-4b2b-aec9-f87e099561bf
+- error message_id: 2f783abf-df0d-4a7a-893b-9f4be3eff2d6
+- provider: openrouter
+- configured model: z-ai/glm-4.5-air
+- HTTP status: 404
+- saved error class: NonRetryableAgentError
+- Safe Mode: true
+- state SHA-256: 5334E5FB90323C5529AE23D5F48458B7ECC6686CA69C542BB8C7E4C76E9C11DE
+
+3. 再現条件
+
+OpenRouter Structured Output要求は`response_format.type=json_schema`と`provider.require_parameters=true`を送る。
+指定モデルについて、その必須パラメータを処理できるendpointが一つもない場合に404となる。
+同一model/taskを再送してもrouting条件は変わらないため解決しない。
+
+4. 根本原因
+
+`require_parameters=true`は、Structured Outputsを無視するendpointへのroutingを防ぐ安全機構として正しく動作した。
+根本原因はVisual Directorの設定モデルと必須Structured Output contractの能力不一致である。
+一方、実装はこの特定404を汎用NonRetryableAgentErrorへ分類しており、次の三つを制御上区別できなかった。
+
+- 一時障害なので同一モデルを一回retryするケース
+- 応答本文が契約違反なので二回失敗後に別モデルへ修復するケース
+- endpoint能力がないため最初の失敗直後に同一モデルを避けて別モデルへ移るケース
+
+5. なぜこの問題が発生したか
+
+Conclusionには応答契約違反用のdistinct-model repairがあったが、それは元callとoperator retryの二回が
+ProviderResponseContractErrorになった場合だけを対象としていた。能力404は同一モデルretryが無意味であり、その前提に一致しない。
+Playwrightには能力不一致専用authorization、model override、互換性bindingの利用経路がなかった。
+
+6. なぜ既存テストで発見できなかったか
+
+既存OpenRouter HTTP分類テストは404を他の非retryable statusと同じグループで検証していた。
+Playwright recoveryテストは途中切断とPayload/contract failureを扱ったが、`require_parameters` routingが返す
+endpoint能力404と、同一モデルを避ける必要性をFault Injectionしていなかった。
+
+7. 修正計画
+
+E2E Plan v2と照合し、次の順序を採用した。
+
+1) exact Error PMP、reservation、state/checkpointを保存してFailure Capture。
+2) OpenRouter公式Structured Outputs/Models仕様と照合。
+3) Provider層で能力404を専用分類する。
+4) 共通Base Agentに専用一回authorization/reservation enforcementを追加する。
+5) Playwright Managerにcheckpoint-aware distinct-model recoveryを追加する。
+6) 成功後だけprovider-Agent-output schema互換bindingを記録し、将来taskで再利用する。
+7) Static -> Unit -> Targeted -> Integration -> Mock -> Fault -> exact saved-state clone。
+8) productionへstorageを除外して反映後、VisualだけをReal一回実行する。
+
+8. 実際の修正内容
+
+- `ProviderCapabilityError`を追加し、該当404をautomatic retry不可で分類。
+- `ProviderCapabilityRepairAuthorizationStore`を追加。
+- task suffixを`_provider_capability_repair_1`に固定。
+- 元reservation、workflow、Agent、元model、Error PMP、HTTP 404、完全なfailure signatureを照合。
+- repair modelが元modelと同一ならProvider call前に拒否。
+- Base AgentはPENDING authorizationと完全一致するrepair task/modelだけをreservation作成後にCONSUMEDへ更新。
+- Playwright recoveryはNarrative/Script/Citationを再利用し、Visualだけにtask/model overrideを適用。
+- repair responseがPydantic output検証を通過した場合だけ互換性bindingを保存。
+- bindingはprovider、Agent、output schema、configured model完全一致時だけ将来taskへ適用。
+- 旧checkpointのNonRetryableAgentErrorもHTTP 404と完全な文言が一致する場合だけ読込互換。
+- CLIに`--playwright-capability-repair WORKFLOW_ID REPAIR_MODEL_ID`を追加。
+- RD 1.0.2とREADMEを更新。
+
+9. 変更したファイル
+
+- common/models/errors.py
+- common/models/__init__.py
+- providers/openrouter_provider.py
+- common/provider_capability_repair.py
+- common/agents/base.py
+- common/provider_model_compatibility.py
+- playwright/manager.py
+- cli_app/arguments.py
+- cli_app/commands.py
+- role_definitions/playwright/manager.json
+- README.md
+- tests/unit/test_openrouter_provider.py
+- tests/unit/test_playwright_manager.py
+- tests/unit/test_maintainability.py
+- tests/unit/test_rd_loader.py
+- debug_reports/025_playwright_checkpoint_recovery_and_operator_retry.txt
+- debug_reports/026_structured_output_model_capability_repair.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Provider failureを「もう一度試すか」だけで扱わず、「同じmodel contractで成功可能か」を実行制御へ昇格した。
+能力不一致では安全機構を緩めず、元taskを再送せず、別task・別model・別reservationとして監査可能にする。
+成功実績を広いmodel allowlistにせず、provider-Agent-output schema-configured modelの狭い契約として記録することで、
+将来の同系統taskは同じ失敗を避けつつ、設定変更時に古いbindingが誤適用されない。
+
+11. 他Layerへの影響
+
+- Producer/Researcher/Deliberation/Conclusionのstate、schema、checkpoint、outboxは変更しない。
+- 全Agentが共通Base Agentのauthorization enforcementを使うため、未認可repair suffixは全層でProvider call前に拒否される。
+- 既存Conclusion contract repairとoperator retryのsuffix/台帳/意味は変更しない。
+- 現在のproduction E2Eでは他30 Agentの設定モデルは保存済みOpenRouter成功結果を持ち、今回の能力404はVisualだけで観測された。
+- 今回CLI orchestrationを追加したのは実障害が存在するPlaywright。別層で同じ404が新規観測された場合は、その層のcheckpoint依存関係に沿う明示経路が必要になる。
+
+12. 同系統Failure Mode監査結果
+
+- 同一モデルretry: 明示的に拒否、call 0。
+- unrelated 404: exact signature不一致で拒否、authorization 0、call 0。
+- 旧generic NonRetryable 404: exact status/signature/parent/task相関時だけ許可。
+- 未認可repair suffix: Base Agentで拒否。
+- consumed authorization再利用: 一回限りで拒否。
+- unanswered repair request: redispatch禁止。
+- saved repair result後のcheckpoint fault: valid responseを復元し、bindingをbackfill可能。
+- configured model変更: 旧bindingを適用しない。
+- strict schema / require_parameters: 無効化・緩和なし。
+
+13. Regression Test
+
+- Targeted関連: 93 PASS。
+- Full discovery: 408 PASS。
+- Compile/static: PASS。
+- Doctor Mock: READY。
+- Role Definitions: 31 RD STRICT PASS。
+- OpenRouter strict Structured Output: 22 root schema recursive audit PASS。
+- 5-layer Mock CLI E2E: Producer -> Delivery COMPLETED。
+- Delivery artifacts: 6。
+
+14. Recovery / Fault Test
+
+Fault A: ProviderCapabilityError HTTP 404をVisual初回へ注入。
+- plain recover: call 0で停止。
+- operator retry: 非対象としてcall 0で拒否。
+- same-model capability repair: call 0で拒否。
+- distinct-model repair: Visualだけ1 call、Narrative/Script/Citation 0、COMPLETED。
+- repair task、authorization CONSUMED、binding、将来taskでのbinding再利用を確認。
+
+Fault B: unrelated HTTP 404文言へ改変。
+- authorization生成なし、Provider call 0。
+
+Exact production clone:
+- production FAILED stateとOpenRouter reservationsを隔離領域へread-only copy。
+- plain recover 0、same-model repair 0。
+- Visual distinct-model Mock 1だけ実行。
+- Narrative/Script/Citation hash不変。
+- messages 11 -> 13、authorization CONSUMED、binding記録。
+- 既存Citation内容に対するdeterministic validationが5件を検出してBLOCKED。
+  内訳はCITATION_MAPPING_MISSING 3、CITATION_LOCATOR_MISSING 1、LIMITATION_DISCLOSURE_MISSING 1。
+  これはcapability repairとは別Failure Modeであり、Real Visual後も残ればCycle 027で扱う。
+
+15. Provider Call数
+
+- Cycle 026 failure capture追加Real: 0（Cycle 025のVisual 1を再利用）。
+- implementation/test Real: 0。
+- Targeted/Full/Exact clone: Mockのみ。
+- Exact clone: Mock Visual 1、他stage 0。
+- production予定: Visual `openai/gpt-5-mini` 1回、他stage 0。
+- automatic retry: 0。
+- duplicate logical task: 0。
+
+16. API Cost
+
+Cycle 026実装・検証時点のReal API costは$0。予定RealはVisual 1回だけ。
+OpenRouter reservationにはusage/costが保存されないため実測costはunknown。
+正常なNarrative、Scriptwriter、Citationの再実行3回を防止した。
+
+17. Existing Workflowへの影響
+
+pre-deploy時点のproduction state SHA-256は
+5334E5FB90323C5529AE23D5F48458B7ECC6686CA69C542BB8C7E4C76E9C11DE。
+本番storage/dataは実装・Mock・clone検証で変更していない。deploy対象からstorage/dataを除外する。
+正規CLI Real実行時だけcapability authorization、repair reservation、Visual Result、binding、stateを追記・更新する。
+
+18. Remaining Risk
+
+- `openai/gpt-5-mini`はConclusionのstrict Structured Outputで成功済みだが、VisualPlanとの組合せはReal一回で最終確認する。
+- Visual成功後、exact cloneで既に見えたCitation/limitation validation findingがproductionでも残る可能性が高い。
+  その場合は追加Provider callを自動実行せず、Cycle 027として原因・revision routingを分離する。
+- OpenRouter model endpoint能力は将来変わり得る。成功bindingは実測結果に基づくが永久保証ではない。
+
+19. Result
+
+PASS / NEW FAILURE CAPTURED。
+Production deployとDoctor後、ユーザーの個別承認を得て明示的distinct-model Real Visualを1回実行した。
+`openai/gpt-5-mini`はVisualPlan Structured OutputとPydantic検証に成功した。Narrative、Scriptwriter、Citation、
+上流4層のProvider callは0で、既存成果物hashは不変だった。authorizationはCONSUMEDとなり、
+`openrouter / playwright.visual_director / VisualPlan / z-ai/glm-4.5-air -> openai/gpt-5-mini`
+の互換性bindingを保存した。
+
+続く決定論的検証は計18件を検出してPlaywrightをBLOCKEDで停止した。内訳は、
+CITATION_MAPPING_MISSING 3、CITATION_LOCATOR_MISSING 1、LIMITATION_DISCLOSURE_MISSING 1、
+VISUAL_UNKNOWN_ASSET 11、VISUAL_FACT_ADDITION 2。能力修復は完了しているため、これらは
+Citation/Visual revision routingの別Failure ModeとしてCycle 027へ移行する。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 404だけを握り潰す局所patchで終わっていない
+[YES] Sibling Failureを全Provider Agent共通境界まで監査した
+[YES] 他Layerへの影響を確認した
+[YES] Stateを確認した
+[YES] Checkpointと保存済み3段階再利用を確認した
+[YES] Schemaとmodel capability contractを確認した
+[YES] PMP parent/task/Error相関を確認した
+[YES] Reservationと専用authorizationを確認した
+[YES] Outbox / Deliveryを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。Full E2Eを最初から再実行せず、Visual checkpointだけを明示再開する。
+
+Production Real追記
+
+- 実行CLI: `--playwright-capability-repair 15f3f5c5-4167-447d-b255-069fc7f5beb2 openai/gpt-5-mini --provider openrouter --safe-mode`
+- Real Provider call: Visual Director 1、その他0、automatic retry 0。
+- task_id: `playwright_visual_upstream_0_revision_0_provider_capability_repair_1`
+- model: `openai/gpt-5-mini`
+- Result PMP: 04c5f1a9-6094-4012-a1ee-5531714ea96b
+- authorization: CONSUMED。
+- compatibility binding: verified / pydantic_output_validated。
+- State: BLOCKED、messages 13、completed agents 4、failed agents 0、Visual保存済み、Delivery未生成。
+- state SHA-256: 23C8826BA73453A322DCAECFB446084EFED705F84036FE2D9ACCB6C7010259EB
+- Producer/Researcher/Deliberation/Conclusion/Narrative/Script/Citation/Playwright outbox: hash不変。
+- workflow OpenRouter reservations: 64 -> 65。
+- API cost: usage/costがreservationにないためunknown。

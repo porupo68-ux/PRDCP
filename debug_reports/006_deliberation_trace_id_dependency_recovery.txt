@@ -1,0 +1,141 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 006
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Researcher -> Deliberation
+Agents: Researcher Manager / all specialist Researchers / Deliberation Manager / primary analysts
+Error Class: CROSS-LAYER TRACE ID CONTRACT / REVISION DEPENDENCY / CHECKPOINT IDENTITY
+
+1. 何が起きたか
+
+Cycle 005でResearcher Quality Reviewがapprovedとなったため、保存済みDeliberation `WAITING_UPSTREAM_REVISION`から正規CLIを一度だけ再開した。Researcher revision resultの受領後、最初のStakeholder & Response AnalystがOpenRouter応答を返したが、local schema validationで停止した。
+
+失敗箇所:
+`specific_facts[0].evidence_ids`に`ev_1_kishida_newcapitalism_20230425_ai_employment`が含まれ、Deliberationの`evidence_*`契約に違反した。
+
+CLI結果: Deliberation FAILED
+完了した新規Agent: 0
+未実行: Deliberation Manager initial integration / Counterargument / final integration / Quality Reviewer
+Provider retry_count: 0
+
+2. なぜ起きたか
+
+ResearcherのResearchSource/ResearchReport schemaはsource_id/evidence_idを非空文字列としてしか検証せず、OpenRouterが`ev_*`、`src_*`、`source-*`を返しても保存できた。一方、Deliberationのtraceability schemaはqf_002対応として`evidence_*`/`source_*`だけを許可していた。Producer側の契約ではなく、Researcher出力境界とDeliberation入力境界が異なる規則を持つcross-layer contract mismatchだった。
+
+保存済み22-source Reportの監査結果:
+- canonical evidence_id: 8
+- non-canonical evidence_id: 14
+- canonical source_id: 6
+- non-canonical source_id: 16
+- research_question_id: 2/2 canonical
+
+3. 同系統Failure Modeと影響範囲
+
+Researcher ReturnでReport Evidence集合は旧37-source Reportから新22-source Reportへ全面更新された。しかし保存済みArgument/Causal/Stakeholder分析は旧Evidence IDを各7件参照し、新Reportとの一致は全Agentで0件だった。Quality Reviewerの明示targetはStakeholder/Counterargument/Managerだったが、依存関係上Argument/Causalもstaleであり、再利用するとtraceabilityを破壊する。
+
+さらに、Deliberation resumeは新しいanalysis_tasksをstateへ置いた後、実際のrevision taskには別のランダムtask_idを生成してmessageだけへ保存していた。通常運転`--no-safe-mode`ではpersistent reservationも作られず、障害後の重複呼び出し防止とcheckpoint identityが不十分だった。
+
+全Layer監査では、task_idを持たないProducer/Conclusion/Playwrightへ通常運転reservationを一律適用するとrevisionがAgent ID fallbackで衝突することもFault Testで検出した。通常運転reservationは明示logical task_idを持つ呼び出しに限定し、既存Safe Mode fallbackは維持した。
+
+4. 修正計画とv2照合
+
+- 新規Researcher Structured Outputではsource_* / evidence_*をJSON Schemaとlocal Pydanticの両方で強制する。
+- 旧保存JSONは書き換えず、Managerの読込境界でだけSHA-256由来の決定論的canonical IDへ変換する。
+- ResearchReport内のsources、evidence_items、metadata、quality assessments、question coverage、cross-source observations、category referencesを同一ID集合でcross-checkする。
+- Researcher ReturnでEvidence集合が変わった場合、保存済み分析の参照集合を比較し、stale primary Agentをrevision routingへ依存関係として追加する。
+- Revision taskはworkflow/revision/agentから決定論的IDを作り、dispatch前にstateへ保存する。
+- task_idを持つ通常OpenRouter呼び出しとDeliberation Manager integrationにpersistent reservationを作る。
+- 保存済みinvalid_payloadはcanonical化後に再検証する。意味上不正なpayloadは推測修復せず、一回限りcontract_repair taskへ分離する。
+- transport結果が不明で再利用payloadがない場合は自動再送せず、明示authorization要求で停止する。
+
+5. 保存済みpayload再利用判定
+
+今回のinvalid_payloadはID canonical化後も`authority_and_capacity`が未定義`st_companies`を参照し、定義済みstakeholderは`st_employers`だった。意味を推測してalias置換することは行わない。このpayloadは再利用不能と判定し、Stakeholderは`contract_repair_1`として一回だけ再実行対象にする。
+
+Argument/Causalは新ReportとのEvidence一致が0件のためstale dependencyとして追加する。従って次の局所Recoveryの予定callは、primary 3、Manager integration 2、Counterargument 1、Quality Review 1の計7件。旧primary/integration checkpointを無条件に再利用するのではなく、revision provenanceがcurrentでない段階だけ再構築する。
+
+6. 実装
+
+- `EvidenceId` / `SourceId`をprefix pattern付き型として追加。
+- `canonicalize_legacy_trace_ids`を追加。旧IDは`evidence_legacy_<hash>` / `source_legacy_<hash>`へin-memory変換。
+- ResearchSourceとResearchReportの全trace fieldをcanonical型へ統一し、参照整合性validatorを強化。
+- Researcher Managerのsaved result読込だけcompatibility adapterを適用。
+- Deliberation handoff読込、saved task、saved invalid payloadへ同じadapterを適用。
+- upstream Evidence dependency closureを追加し、stale primary targetsをrevision recordへ追記。
+- revision taskとManager integrationのlogical identityを決定論化。
+- normal mode persistent reservationをtask_id保有呼び出しへ拡張。
+- recoverでcontract repair可能/ambiguous transportを分離し、required primaryが未完了のまま下流へ進むことを禁止。
+- RD Manager 2件、Researcher prompt 7件、READMEを更新。
+- Role Definition単独テストで発見したimport順依存を、package `__init__`のeager agent_runtime import除去で解消。
+
+7. Regression / Mock / Fault Injection / Recovery
+
+Compile: PASS
+Strict Structured Output / Researcher payload / Deliberation targeted: 77 PASS
+New targeted regression/fault: 5 PASS
+Cross-layer Producer/Conclusion/Playwright revision: 39 PASS
+Role Definition standalone/import order: 36 PASS
+Unit full: 280 PASS
+Integration: 9 PASS
+Doctor: READY、31 RD STRICT PASS
+Mock CLI E2E: Integration suite内でProducer -> Playwright COMPLETED
+
+Production state read-only copy Mock Recovery:
+- status: COMPLETED
+- provider calls: Argument, Causal, Stakeholder contract repair, initial integration, Counterargument, final integration, Quality Review
+- calls: 7
+- failed_agents: []
+- checkpoint revision: primary 3件および全downstream stageがrevision 1
+- persistent reservations: 7
+- revision target dependency closure: Stakeholder / Counterargument / Manager / Argument / Causal
+
+Fault A: non-canonical source/evidence IDを新規ResearchSourceへ入力し拒否。
+Fault B: 旧IDをexplicit read adapterへ入力し決定論的・冪等にcanonical化。
+Fault C: Evidence集合を全変更し、明示target外のArgument/Causalもstaleとして再実行。
+Fault D: semantic-invalid Stakeholder payloadを保存し、recoverが一回限りcontract repair taskを作り、revision_countを増やさず完了。
+Fault E: invalid_payloadのない曖昧なprovider failureではrecoverがprovider call 0で停止。
+Fault F: required revision Agent失敗時に2/3 primaryだけで下流へ進まない。
+
+8. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: 実運用はFAILED、revision_count=1、upstream_revision_count=1。既存checkpointは保持。
+PMP: Research revision result、Stakeholder revision request、PayloadValidationError responseを49-message historyへ正規保存。invalid_payloadも保持。
+Schema: 新規Researcher outputはcanonical prefixesを送信schemaで強制。旧データは読込時だけ互換変換。
+Checkpoint: revision taskはdispatch前保存。checkpoint_revisionsがcurrent revision未満なら該当段階以降だけ再構築。
+Reservation: 失敗時の旧コードではStakeholder reservationなし。修正後はtask_idを持つnormal mode callとManager integrationを永続予約。
+Outbox: Researcher approved revision resultは保持。Deliberation conclusion outboxは未更新。
+
+9. Provider CallとCost
+
+Cycle 006 Real API Calls before fix: Stakeholder 1
+Automatic retry: 0
+Downstream real calls: 0
+API Cost: CLIから取得不能のためunknown
+Next localized recovery budget: maximum 7 logical calls。Full E2Eの最初からの再実行は行わない。
+
+10. Storage Safety
+
+既存workflow/storageを手動編集・削除・初期化していない。実運用stateの変更は承認済み正規CLI resumeによるものだけ。Mock/Fault/Recoveryは隔離tempまたは実運用stateのread-only copyで実施した。配備対象にstorage/dataを含めない。
+
+11. 設計上の意味と再発防止
+
+Trace IDはDeliberation内部だけの規則ではなく、Researcherが生成する時点から同じ型とschemaで保証する。Researcher Returnは「指定targetだけを再実行する」処理ではなく、新Evidence集合によって既存分析の依存が失効したかを閉包計算してからroutingする。Recovery identityとpersistent reservationをstate/PMPに結び付けることで、正常完了checkpointを再利用しつつ、曖昧なprovider callを自動再送しない。
+
+12. Result
+
+IMPLEMENTATION / MOCK / FAULT / RECOVERY PASS - READY FOR LOCALIZED DELIBERATION RECOVERY
+
+Plan Compliance Review
+
+[YES] Provider responseとlocal validation field pathを保存
+[YES] 根本原因をcross-layer schemaまで特定
+[YES] 全22 Report IDと全3 primary dependencyを監査
+[YES] 他Layerのnormal-mode reservation collisionを検証・修正
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outboxを確認
+[YES] Regression Test追加、Unit 280、Integration 9 PASS
+[YES] 実運用state read-only copyでRecovery/Faultを確認
+[YES] Debug Reportを生成
+[YES] 設計上の意味と再発防止を説明
+[YES] Full E2Eを最初から再実行していない
+[YES] Cycle 006のReal APIは失敗箇所の1 callだけ、retry 0

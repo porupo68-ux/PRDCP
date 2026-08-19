@@ -1,0 +1,207 @@
+Cycle 041 — Researcher Repair Contract Synchronization and Discord Failure Closure
+Date: 2026-08-18 JST
+Production workflow: 4b837e0e-9e1c-4150-97e1-ac31ef87024e
+
+1. What happened
+
+Cycle 040 correctly persisted two zero-call Research Report repair artifacts. One of
+them used the new repair_kind report_limitation_exact_deduplication. Researcher state,
+the Human Evidence Decision, and the Deliberation outbox all contained that valid
+artifact. Deliberation, however, still treated the older official-industry source
+reclassification shape as the only HumanEvidenceIntegrityRepair contract. The saved
+Researcher handoff therefore failed before Deliberation could create a workflow.
+
+The same exception escaped the Discord command path after the status channel had
+already shown RUNNING. Discord then attempted to send the complete validation error
+and traceback. A sufficiently long exception exceeded Discord's 2000-character
+message limit, causing a second notification failure and leaving the operational
+status at RUNNING.
+
+2. Why it happened
+
+The shared contract did not have one canonical validation owner. Researcher had
+introduced ResearchReportIntegrityRepair, while the direct Deliberation consumer
+still performed local validation against the legacy class. Producer, persistence,
+and consumer had therefore drifted even though each individual model was valid.
+
+Discord execution commands also caught only selected exception types. The global
+handler re-raised other failures, and exception text was sent without an operational
+size limit. State/status failure closure was consequently dependent on which Python
+exception class happened to cross the command boundary.
+
+3. How it was fixed
+
+- researcher.schemas.human_evidence now owns one canonical discriminated union for:
+  - official_industry_source_reclassification
+  - recognized_media_source_reclassification
+  - report_limitation_exact_deduplication
+- The canonical module owns the TypeAdapter and public validation function.
+  Deliberation imports that validator instead of rebuilding or narrowing the union.
+- ResearcherWorkflowState persistence and DeliberationResearchContext both use the
+  same union. Unknown repair_kind values fail closed; malformed known variants also
+  fail closed with an artifact validation error.
+- The union is declared after both concrete models, removing the consumer-visible
+  forward-reference dependency.
+- Discord now emits a single-line operational summary capped at 700 characters.
+  Complete exception and traceback information is retained in application logs.
+- Every Researcher, Deliberation, Conclusion, and Playwright execution path, including
+  automatic layer chaining, catches execution failures through one helper. That helper
+  sends the bounded summary and always routes the layer status to ERROR. The route
+  update itself is protected so a notification failure cannot hide the original fault.
+- Non-execution Discord commands also use bounded summaries; direct ctx.send(str(exc))
+  and the old re-raise path were removed.
+
+4. Design meaning
+
+The repair artifact is now a versioned, discriminated event contract instead of an
+implementation-specific Researcher class. Adding a new repair variant requires a
+change at the canonical owner and is then validated consistently during state load,
+outbox reload, and direct downstream consumption. The system does not silently coerce
+unknown repairs and does not regenerate the saved Research Report.
+
+Discord is now an operational projection of workflow execution rather than an
+unbounded traceback transport. Logs preserve diagnostic fidelity, while the control
+plane communicates a stable, bounded failure state. A handoff validation error cannot
+leave the visible layer in RUNNING merely because the error message is large.
+
+5. Canonical owner to Delivery audit
+
+Canonical owner:
+- researcher/schemas/human_evidence.py owns all repair variants and validation.
+
+Producer:
+- Producer does not construct or reinterpret Researcher repair artifacts. Its saved
+  workflow and Researcher handoff boundary remain unchanged.
+
+Persistence:
+- ResearcherWorkflowState uses HumanEvidenceIntegrityRepairRecord, which aliases the
+  canonical union. The production state with both Cycle 040 variants reloads without
+  migration or JSON rewriting.
+
+Direct consumer:
+- Deliberation validates the handoff and builds DeliberationResearchContext through
+  the canonical validator. No local TypeAdapter(HumanEvidenceIntegrityRepair), legacy
+  class model_validate call, or official-only repair_kind check remains.
+
+Transitive downstream:
+- Deliberation consumes repair audit records to establish that hard findings were
+  repaired. Its canonical result forwards the Human Evidence Decision, accepted
+  Evidence Gaps, repaired Research Report facts, and limitations to Conclusion.
+- Conclusion and Playwright do not reinterpret repair variants. They validate and
+  preserve Human Decision, accepted gaps, limitations, evidence, and source identity.
+
+Delivery:
+- The exact production clone produced all six canonical Delivery files. Human Decision
+  and accepted Evidence Gaps were identical between Final Conclusion and Playwright
+  Production Context. No accepted gap became Evidence.
+
+Post-change search result:
+- old direct consumer assumptions: 0 active matches
+- direct ctx.send(str(exc)) / unhandled raise error paths in discord_app: 0 matches
+- storage/data and archive were excluded from source-contract searches
+
+6. Regression and fault verification
+
+Static:
+- Active Python compileall: PASS
+- Optional Ruff command: NOT RUN (ruff is not installed in the attached runtime)
+
+Targeted Cycle 041:
+- canonical union accepts old classification and new deduplication variants: PASS
+- unknown repair_kind fails closed: PASS
+- persist -> reload -> outbox -> Deliberation validation with mixed repairs: PASS
+- long Discord exception is shortened below the operational limit: PASS
+- full traceback remains in logs: PASS
+- handoff execution failure routes RUNNING to ERROR: PASS
+- final targeted rerun: 5 tests / PASS
+
+Related:
+- Human Evidence Gate plus Discord: 25 tests / PASS
+- 31 RD, 22 Structured Output, and five-layer limitation propagation: 43 tests / PASS
+- One earlier related run observed a transient Windows PermissionError in the existing
+  concurrent-decision filesystem test. An immediate isolated rerun passed 25/25, and
+  the same test later passed inside the complete 561-test verification.
+
+Full verification:
+- compileall active surface: PASS
+- unittest discovery: 561 tests / 473.625 seconds / PASS
+- Mock Doctor: READY, fail=0, 31 RD loaded in STRICT mode
+- model configuration: 31/31
+- OpenRouter Structured Output recursive audit: all 22 roots / PASS
+- five-layer Mock CLI E2E: Producer -> Researcher -> Deliberation -> Conclusion ->
+  Playwright -> Delivery / PASS
+- Delivery artifact set: 6/6 / PASS
+
+7. Production clone
+
+The source workflow boundary was copied to temporary storage and executed using only
+MockModelProvider. The production files were hash-checked before and after the clone.
+
+- Researcher: COMPLETED
+- saved sources: 27
+- saved Human Decision: ACCEPT_WITH_LIMITATIONS
+- saved repair variants: recognized media reclassification + exact limitation dedup
+- Deliberation: COMPLETED
+- Conclusion: WAITING_HUMAN_SELECTION, then explicit clone-only first-candidate choice
+- Conclusion after clone-only selection: COMPLETED
+- Playwright: COMPLETED
+- Delivery: 6/6 files
+- Mock Provider calls: 15
+- Real Provider calls: 0
+- Retrieval calls: 0
+- source production storage mutated: false
+
+Protected source hashes:
+- Researcher state:
+  6c12d9f85ce12adef2c68ebc31f98e93e604a20ddce8ec51ccd86d6518a1e9b3
+- Research Report:
+  52d2ec719cbd05d781e1e88d2dbd60fea79d5d100e46a14dea81da5cfb681fbb
+- Deliberation outbox:
+  0f567d0b1fb1d031c5524ddb404fdd835fe0a6e3f405f834b7716cda090f6159
+- Human Decision artifact:
+  3ff9ae389c083b6db379a03b78b0900ab806daab834ee5d058ecc2973b18f7f8
+
+8. Provider, reservation, and storage safety
+
+Cycle 041 Real Provider calls: 0
+Cycle 041 Real Retrieval calls: 0
+Production state/messages/reservations/contexts/outbox writes: 0
+
+Existing workflow reservation audit:
+- OpenRouter Provider reservations: 15, all Producer/Researcher tasks
+- OpenRouter Retrieval reservations: 10, all existing upstream searches
+- Deliberation/Conclusion/Playwright production reservations: 0
+
+No existing reservation was deleted, consumed, replaced, or replayed. The production
+clone used a separate temporary reservation root. Existing Research Report, 27 sources,
+Human Decision, repair artifacts, PMP messages, and outbox were not regenerated.
+
+9. Production workflow final state
+
+- Producer: COMPLETED (5 agents)
+- Researcher: COMPLETED (5 successful specialists, 27 sources)
+- Human Evidence Decision: ACCEPT_WITH_LIMITATIONS
+- accepted Evidence Gaps: 1
+- integrity repair artifacts: 2
+- Researcher revision_count: 0
+- active Researcher error: none
+- Deliberation: not started in production; corrected handoff is ready
+- Conclusion: not started in production
+- Playwright: not started in production
+- Delivery: not created in production for this workflow
+
+Production was intentionally not resumed because Cycle 041 required zero Real API
+calls during repair. A future production start must first retain the audited upstream
+reservations and then execute only the new Deliberation stage; existing Producer,
+Researcher, Retrieval, Human Decision, and outbox work must not be replayed.
+
+10. Prevention
+
+- Shared persisted unions are validated only at their canonical schema owner.
+- New repair kinds require persist/reload/direct-consumer regression coverage.
+- The cross-layer production clone verifies transitive downstream and Delivery impact.
+- Unknown discriminators fail closed before any Provider call.
+- Discord exception text is bounded independently of diagnostic logging.
+- Execution error handling always closes the visible layer status as ERROR.
+- Read-only clone hashing and isolated reservations prevent validation from mutating
+  production workflow data.

@@ -1,0 +1,282 @@
+PRDCP Debug Report
+
+ID: 027
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Playwright / Common Structured Output Boundary
+Agent: playwright.manager / playwright.evidence_citation_editor / playwright.visual_director
+Error Class: VALIDATION / REVISION / SCHEMA / CHECKPOINT / RESERVATION / OPERATOR
+
+1. 発生した現象
+
+Cycle 026でVisual DirectorのStructured Output model capability repairは成功したが、続く決定論的検証が
+計18件の内部修正可能なfindingを検出した。内訳はCitation mapping不足3、locator不足1、limitation disclosure不足1、
+Visualの未宣言asset参照11、paragraph外evidence参照2だった。
+
+しかしDemo Safe ModeではManagerのrevision capacityが0へ上書きされ、内部修正可能な結果がBLOCKEDとして保存された。
+また、保存済みfindingを一回だけ明示的に消費してCitation/Visualだけを再実行するCLI経路がなかった。
+
+2. 発生地点
+
+- workflow_id: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+- pre-repair Playwright state: BLOCKED
+- pre-repair state SHA-256: 23C8826BA73453A322DCAECFB446084EFED705F84036FE2D9ACCB6C7010259EB
+- revision_count: 0
+- completed agents: Narrative / Scriptwriter / Citation / Visual
+- failed agents: 0
+- deterministic findings: 18
+- revision targets: playwright.evidence_citation_editor / playwright.visual_director
+- upstream_required: false（全finding）
+- provider: openrouter
+- repair model: openai/gpt-5-mini
+- Safe Mode: true
+
+3. 再現条件
+
+保存済みCitationまたはVisual出力がPydantic shape検証を通過する一方、次のcross-artifact条件を満たさない場合に再現する。
+
+- citation_required paragraphにCitationMappingがない。
+- source/evidence locatorがmanifestにない。
+- canonical limitationsの開示記録が不足する。
+- Visual Cueが同じVisualPlan内に宣言されていないasset IDを参照する。
+- Visual Cueが対象paragraphに存在しないevidence/source IDを追加する。
+
+この状態で旧Safe Modeを使うと、修正可能性と自動再実行禁止が混同され、明示Revisionの入口が存在しなかった。
+
+4. 根本原因
+
+根本原因は三つの責務混在だった。
+
+第一に、Safe Modeが「自動遷移を止める」という実行制御ではなく、Managerの設定済みrevision capacityそのものを0へ
+書き換えていた。このため修正可能なREVISION_REQUIREDと修復不能なBLOCKEDを区別できなかった。
+
+第二に、Providerへ渡すstrict schemaは型のshapeを保証していたが、現在のrequestに存在するsection/paragraph/evidence/
+source/claim/asset ID集合まで拘束していなかった。LLMは構文上有効でも入力に存在しない参照を返せた。
+
+第三に、limitations_to_discloseというManager所有のcanonical pass-through metadataをCitation LLMへ全文再転記させていた。
+113件を一字一句再生成させる設計は、生成処理に不変metadataの完全コピー責務を負わせていた。
+
+5. なぜこの問題が発生したか
+
+Playwright初回実行の成功条件が、各Agent単体のPydantic validationと最終deterministic validationへ分離されていた一方、
+その間にあるrequest-bound reference integrityをProvider response境界へ引き上げていなかった。
+また、Conclusionで実装済みのSafe Mode明示一cycleという運用契約がPlaywrightへまだ一般化されていなかった。
+
+6. なぜ既存テストで発見できなかったか
+
+既存schemaテストは全object nodeのadditionalProperties=false、required完全一致、$defs/items/anyOf再帰を検証していたが、
+request固有IDのenum化は対象外だった。Playwright recoveryテストもProvider failureからのcheckpoint復元を中心にしており、
+決定論的gateが複数Agentを内部revision targetにした後のSafe Mode明示一cycleを扱っていなかった。
+canonical limitation 113件とLLM返却3件の乖離、VisualPlan内のcue→asset自己参照もGolden Failureになっていなかった。
+
+7. 修正計画
+
+E2E Plan v2と照合し、次の順序で修正した。
+
+1) 18 finding、PMP、state、reservation、artifact hashをFailure Captureする。
+2) Safe Modeとrevision capacityの責務を分離する。
+3) 明示的一回だけ保存findingを消費するPlaywright revision CLIを追加する。
+4) Citation/Visualのrequest固有IDをstrict schema enumへspecializeする。
+5) same-output cross-artifact invariantをPydantic modelへ追加する。
+6) canonical disclosureをManagerで決定論的に保持する。
+7) finding detailsとPrompt/RDを同じ契約へ揃える。
+8) Static -> Unit -> Targeted -> Integration -> Mock -> Fault -> exact saved-state cloneを実行する。
+9) productionへstorageを除外して反映し、Citation/VisualだけをOpenRouterへ各1回まで送る。
+
+8. 実際の修正内容
+
+- `PlaywrightManager.revise(workflow_id)`と`--playwright-revise WORKFLOW_ID`を追加。
+- Safe Modeでも設定済みmax_revisionsを保持し、自動loopだけを停止。
+- 明示Revisionはplan/count/historyを最初のProvider call前に保存し、dependency closureだけを消去。
+- 旧BLOCKED checkpointは保存済みdeterministic validationから修正可能性を再導出する読込互換を追加。
+- Revision task IDを`playwright_citation_upstream_0_revision_1`と
+  `playwright_visual_upstream_0_revision_1`へ決定化。
+- CitationEditingResult / VisualPlanにrequest-specific strict output schema specializationを追加。
+- Citationのbranchをparagraph単位のclaim/evidence/source enumへ拘束。
+- Visualのcue/chart branchをsection/paragraph/evidence/source enumへ拘束。
+- CitationのValidated ScriptとManifestのcross-artifact ID一致を必須化。
+- Visual Cueのasset_requirement_idsが同じVisualPlanのasset_requirementsに存在することを必須化。
+- canonical limitations 113件をManagerがValidated Scriptとdisclosure checksへ決定論的に保存。
+- missing mapping/locator、unknown evidence/assetのfinding detailsを具体化。
+- Citation/Visual Prompt、RD、README、CLI status guidanceを更新。
+
+9. 変更したファイル
+
+- playwright/schemas/strict_references.py
+- playwright/schemas/citation_manifest.py
+- playwright/schemas/visual_plan.py
+- playwright/manager.py
+- playwright/validator.py
+- playwright/prompts/evidence_citation_editor.md
+- playwright/prompts/visual_director.md
+- cli_app/arguments.py
+- cli_app/commands.py
+- cli_app/output.py
+- tests/unit/test_playwright_schemas.py
+- tests/unit/test_playwright_manager.py
+- tests/unit/test_maintainability.py
+- tests/unit/test_rd_loader.py
+- role_definitions/playwright/manager.json
+- role_definitions/playwright/evidence_citation_editor.json
+- role_definitions/playwright/visual_director.json
+- README.md
+- playwright/README.md
+- cli_app/README.md
+- debug_reports/027_playwright_safe_mode_explicit_revision_and_reference_integrity.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Safe Modeの責務を「追加Provider call直前で自動遷移を停止すること」に限定し、Workflowが持つrevision capacityや
+品質判断の意味を改変しないようにした。Operatorが明示した一回だけを新しいlogical taskとreservationで実行するため、
+安全性、監査性、費用上限を同時に維持できる。
+
+参照整合性は、汎用JSON Schemaのstrict化だけではなく、現在の入力集合に束縛されたrequest-specific schemaとlocal
+cross-checkの二段防御にした。また、生成すべき文章とコピーすべきcanonical metadataを分離し、Manager所有の不変情報は
+LLMに再生成させない。この設計によりStructured Outputを厳格化しても自由形式payloadの意味を破壊しない。
+
+11. 他Layerへの影響
+
+- Producer/Researcher/Deliberation/Conclusionのstate、checkpoint、message、outbox、artifactを変更しない。
+- common strict schemaの全object再帰条件は緩和せず、22 root schema監査を維持。
+- Playwright Resumeは新Conclusion Handoff用、Recoverは障害復旧用、Reviseは保存済み品質判断の明示消費用のまま分離。
+- Provider retry/capability repair/contract repairのauthorizationとsuffixは変更しない。
+- Citation/Visual以外の正常なNarrative/Scriptwriterをrevision dependency closureから除外。
+- PMP保存形式とDelivery保存形式は変更しない。
+
+12. 同系統Failure Mode監査結果
+
+- nested model / array items / $defs / anyOf内object: 22 rootすべてrecursive strict audit PASS。
+- propertiesを持つobject: required == properties.keys()を維持。
+- 自由形式dict: 機械的なadditionalProperties=falseによる意味破壊なし。
+- request外ID: schema enumとlocal validationの両方で拒否。
+- Visual内unknown asset: model-level validationでProvider成功保存前に拒否。
+- cross-artifact ID mismatch: Citation model-level validationで拒否。
+- legacy BLOCKED: findingが内部修正可能な場合だけ明示Revisionへ変換。
+- persistent invalid result: 一cycle終了後にBLOCKEDし、第二cycleへ自動遷移しない。
+- crash after Citation: recoveryはCitation保存Resultを再利用しVisualだけを再開。
+- unrelated/answered request: redispatchしない。
+- upstream_required finding: Playwright内部revisionへ誤ルーティングしない。
+
+13. Regression Test
+
+- Focused Playwright/CLI/RD: 66 PASS。
+- Full verification: 417 PASS（552.797秒）。
+- Compile/static: PASS。
+- Role Definitions: 31 RD STRICT PASS。
+- OpenRouter Structured Output: 22 root schema recursive audit PASS。
+- 5-layer Mock CLI E2E: Producer -> Delivery COMPLETED。
+- Mock Delivery artifacts: 6。
+- production CLI `--help`: `--playwright-revise`を確認。
+- production Doctor OpenRouter Safe Mode: READY、31 model configured、31 RD strict、API key configured。
+
+14. Recovery / Fault Test
+
+Exact production-state clone:
+- 隔離コピーで`--playwright-revise ... --provider mock --safe-mode`を実行。
+- Revision 1、gate APPROVED_WITH_LIMITATIONS、deterministic valid、findings 0、messages 18、Delivery完了。
+- limitations/disclosure checks 113、citation mappings 6、visual cues 25。
+- Citation/VisualのMock reservationだけを各1件追加。
+- Producer/Researcher/Deliberation/Conclusion/Narrative/Scriptのhash不変。
+
+Fault A: Citation成功保存後、Visual直前で中断。
+- recoveryはCitationを再送せずVisualだけを実行。
+
+Fault B: Citationが再びinvalidな応答を返す。
+- 明示一cycle終了後にBLOCKED。
+- 自動でrevision 2へ入らず、Provider call上限を維持。
+
+Production Real:
+- 保存済み18 findingから明示Revisionを開始。
+- Citation Resultを保存後、Visual reservation中も重複予約なし。
+- Visual Result後、deterministic validationはerrors 0。
+- Final Gate APPROVED_WITH_LIMITATIONS、Delivery 6件、Playwright COMPLETED。
+
+15. Provider Call数
+
+- Cycle 027 implementation / Static / Unit / Integration: Real 0。
+- Mock E2E / exact clone / Fault: Mockのみ。
+- Production明示Revision action: 1回。
+- Production Real payload: Citation 1、Visual 1、合計2。
+- Narrative / Scriptwriter: 0（保存済みResult再利用）。
+- Producer / Researcher / Deliberation / Conclusion: 0。
+- automatic retry: 0。
+- revision 2: 0。
+- duplicate logical task: 0。
+- revision 1 OpenRouter reservation: 正確に2件。
+
+16. API Cost
+
+OpenRouter reservationとPMPにはtoken usage/costが保存されないため実測costはunknown。
+追加Real callはCitation/Visual各1回に限定した。保存済みNarrative/Scriptおよび上流4層を再実行せず、少なくとも6段階の
+不要なProvider再送を防止した。残高はCLIから取得していない。
+
+17. Existing Workflowへの影響
+
+既存JSONを手動編集・削除・初期化していない。変更は正規CLIによるrevision history、PMP messages、OpenRouter
+reservations、Citation/Visual artifact、gate、Deliveryの追記・更新だけである。
+
+最終state:
+- Playwright status: COMPLETED
+- revision_count: 1
+- messages: 18
+- deterministic validation: is_valid=true / errors=0
+- checked counts: sections 10、paragraphs 25、citation mappings 6、visual cues 25、chart requests 2
+- gate: APPROVED_WITH_LIMITATIONS / READY_WITH_LIMITATIONS / findings 0
+- completed agents: 4 / failed agents: 0
+- deliveries: 6、全ファイル存在
+- post-repair Playwright state SHA-256: E233F86773A2798E2FB3BE9D352ED11EB0F942947E959DC28E05C2414C052919
+
+不変性:
+- Producer state: F733D4AE7C8A4281E56CA878CD1D9D40A5E589931383273E7D5540F8821CB752
+- Researcher state: 802A04AD958516B3E8ABBEDECF3E186A74FABE33B38E02BA9454BA98B7154227
+- Deliberation state: F0B8A84868E656EE7172807424512EC265CC0BE612F2D87A66E52AFC7A72DD7D
+- Conclusion state: 8A4BF8833F2055B333743EC346E981302711EF6FBB3326D4D8AB05331C99DEBC
+- Narrative artifact: EE6A5E1F00410CAD5440B2D30A8A598F7F65654A7BC958F34B620270AD2A6DAE
+- Script artifact: D7715EAE7B47E55020BC23F5A45E3A932FDA0A5F70F1E78DFCA07D8ED9C40114
+
+production `--status`はProducer COMPLETED、Researcher COMPLETED_REVISION、Deliberation COMPLETED、
+Conclusion COMPLETED、Playwright COMPLETEDと6 delivery pathを正常に表示した。
+
+18. Remaining Risk
+
+- 本workflowのProducerには過去のMock reservationが存在するため、今回証明したのは保存済み上流結果を再利用した
+  provider=openrouter Recovery/Revision E2Eの最終完走であり、新規workflowを全段階OpenRouterだけで開始するFresh Full Real
+  Acceptanceではない。Fresh実行は多数のProvider callを伴うため、このCycleの個別承認範囲には含めていない。
+- OpenRouterは使用量/costを現在の永続reservationへ保存しないため、予算の実測監視はDashboard依存。
+- output品質はAPPROVED_WITH_LIMITATIONSであり、113件の調査上の限界は意図的に成果物へ開示される。
+- request-specific enum schemaは入力集合の大きさに比例する。将来極端に大きいPlaywright payloadではschema size監視が必要。
+
+19. Result
+
+PASS。
+
+Cycle 027のFailure Classは修正され、保存済みcheckpointからCitation/VisualだけをOpenRouterへ各1回実行して、
+PlaywrightはCOMPLETED、deterministic validation errors 0、Final Gate APPROVED_WITH_LIMITATIONS、Delivery 6件へ到達した。
+Safe Mode、strict schema、validation、reservation、PMP、checkpointを無効化せず、automatic retryと二重呼び出しは0だった。
+
+既存workflowのCLI Recovery/Revision E2Eはprovider=openrouterで最終Deliveryまで完走した。全段階を新規にOpenRouterで呼ぶ
+Fresh Full Real Acceptanceは、多数callが必要な別の費用判断として残す。
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所的な18 findingだけを通すpatchで終わっていない
+[YES] Sibling Failureをrequest-bound schema / Safe Mode / recovery境界まで監査した
+[YES] 他Layerへの影響を確認した
+[YES] Stateと遷移を確認した
+[YES] Checkpointと保存済みResult再利用を確認した
+[YES] Schemaの全object再帰条件とrequest固有参照を確認した
+[YES] PMP parent/request/result相関を確認した
+[YES] Reservationとlogical task identityを確認した
+[YES] Outbox / Deliveryを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。E2E全体を最初から再実行せず、保存済みPlaywright checkpointからCitation/Visualだけを再開した。

@@ -1,0 +1,224 @@
+PRDCP Debug Report
+
+ID: 019
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Conclusion
+Agents: conclusion.manager / conclusion.position_generator
+Error Class: REVISION / OPERATOR / VALIDATION / CHECKPOINT
+
+1. 発生した症状
+
+Cycle 018の明示的一回Quality Reviewは、Schema/PMP上有効な
+revision_required / not_ready / targeted / conclusion.position_generatorを保存した。
+Demo Safe Modeは自動revision直前で正しく停止したが、保存済みReviewを人間が一回だけ
+承認して再開するConclusion CLIがなく、workflowは正規CLIだけでは先へ進めなかった。
+
+同時に、Quality findingはPosition Candidate 2件のsupporting_claim_idsへ
+claim_task_reorganization_observedが入ったことを指摘した。このIDはfull Deliberation stateには
+存在するが、Conclusion Decision Contextのkey_claim_idsには存在しない非正規IDだった。
+
+2. 発生地点
+
+- State: Conclusion BLOCKED、revision_count=0
+- Saved review: revision_required / targeted / conclusion.position_generator
+- Deterministic validation: unknown supporting claim IDを2件検出
+- Safe Mode: automatic Manager re-dispatch直前で停止
+- CLI: --conclusion-recoverはFAILED専用、--conclusion-resumeは上流修正専用
+
+3. 再現条件
+
+OpenRouter + Demo Safe ModeでConclusion Quality Reviewerが内部revisionを返し、
+revision対象が保存された状態でCLI一覧を確認すると、当該保存Reviewを消費する操作がない。
+またPositionGenerationTaskには正規化済みDecision Contextとfull Deliberation resultの両方が
+含まれるため、PromptがID正本を明示しないと後者の非正規artifact IDを採用できてしまう。
+
+4. 根本原因
+
+Safe Modeを「自動追加Provider callの禁止」と定義した一方、Conclusionにはその停止境界を
+越える一回限りのoperator actionが実装されていなかった。さらにTraceabilityの型検証は
+claim_ prefixまでは保証したが、同じprefix内でDecision Contextが選定したcanonical集合との
+一致規則がPosition GeneratorのPrompt/RD/Schema descriptionに明示されていなかった。
+
+5. なぜこの問題が発生したか
+
+従来のConclusion内部revisionはSafe Mode OFFのwhile loopだけを前提としていた。
+Safe Modeではmax_revisionsも0化されていたため、正しいReview保存と自動実行停止の後に
+operatorが何を実行するかという責務が空白だった。Mock fixtureはDecision Context内のIDだけを
+返すため、full payloadにだけ存在する同prefix IDをLLMが拾う条件も再現していなかった。
+
+6. なぜ既存テストで発見できなかったか
+
+既存テストはSafe Modeが自動revisionを止めることと、Safe Mode OFFでrevision loopが動くことを
+別々に検証していたが、保存済みrevision_requiredからの明示的一回再開を検証していなかった。
+Traceabilityテストも未知ID拒否は検証していたが、LLMへ渡す二つの入力集合のうちどちらを
+canonical allowlistとするかをPrompt/RDまで固定していなかった。
+
+7. 修正計画
+
+1) 保存済み内部revision Reviewだけを受理する--conclusion-reviseを追加する。
+2) revision planと依存checkpoint無効化を最初のProvider call前に永続化する。
+3) 一回のCLI操作では一サイクルだけ実行し、再Reviewがrevision_requiredなら再停止する。
+4) Decision ContextをTraceability IDの唯一のcanonical allowlistとしてPrompt/RD/Schemaへ明記する。
+5) Mock、Fault Injection、exact saved-state cloneで再実行範囲と復旧性を証明する。
+
+8. 実際の修正内容
+
+- ConclusionManager.revise(workflow_id)を追加した。
+- Safe Modeでも設定済みrevision上限を保持し、明示操作だけが1 cycleを消費できるようにした。
+- BLOCKED、saved revision_required、内部targetありを実行前条件にした。
+- deliberation_return、真のblocked、空targetを拒否した。
+- revision_count/history、依存closureのcheckpoint無効化、REVISING stateをProvider call前に保存した。
+- --conclusion-reviseをCLI parser/dispatcherへ追加し、Safe Mode OFFでは拒否した。
+- BLOCKED summaryが条件一致時に明示コマンドを案内するようにした。
+- Position Generator Prompt/RD/Field descriptionへDecision Context allowlistを固定した。
+
+9. 変更したファイル
+
+- conclusion/manager.py
+- conclusion/schemas/position_candidate.py
+- conclusion/prompts/position_generator.md
+- role_definitions/conclusion/position_generator.json
+- cli_app/arguments.py
+- cli_app/commands.py
+- cli_app/output.py
+- tests/unit/test_conclusion_manager.py
+- tests/unit/test_maintainability.py
+- tests/unit/test_rd_loader.py
+- README.md
+- debug_reports/019_conclusion_explicit_revision_and_canonical_trace_ids.txt
+- debug_reports/debug_summary.txt
+
+10. 修正の設計上の意味
+
+Safe Modeの責務を「state transitionの全面禁止」ではなく「未承認の自動Provider再実行禁止」に
+統一した。Quality Reviewという永続decision checkpointと、operatorが開始するrevision executionを
+分離したため、Safe Modeを無効化せずに監査可能な一回の修正だけを進められる。
+
+またTraceability IDの正本を「payload内に見えるすべてのID」から「ManagerがDecision Contextへ
+選定した有限集合」へ変更した。prefix型検証と集合membership検証の責務が明確になり、
+非正規artifactからの同prefix ID混入を、Promptとdeterministic validatorの二重境界で防止する。
+
+11. 他Layerへの影響
+
+Researcherには既に--researcher-reviseがあり、同じoperator-authorized one-cycle原則を使用する。
+Deliberationはupstream state transitionと自動Agent実行を分離済みである。
+Producerは初期生成の再dispatch、PlaywrightはLLM Quality Reviewerではなくdeterministic final gateと
+upstream returnを持つため、同じCLIを機械的に共用せず各state machineとして監査を継続する。
+今回の変更は共通PMP、StructuredAgent、reservation、outbox形式を変更しない。
+
+12. 同系統Failure Mode監査結果
+
+- Researcher: 明示的一回revisionあり。保存taskを再利用する。
+- Deliberation: recover/provider retry/upstream resumeが既存。Safe Modeは自動実行境界で停止する。
+- Conclusion: 明示内部revisionが欠落していたため今回追加。
+- Producer: Safe Mode revisionは再dispatch型。現在workflowはCOMPLETEDで再実行対象外。
+- Playwright: deterministic final gateとConclusion upstream return型。現在workflow開始前であり、
+  実Playwright時はrevision/upstream gateを重点監視する。
+- 全22 OpenRouter output roots: strict schema監査PASS。今回Schema変換への変更なし。
+
+13. Regression Test
+
+- --conclusion-revise parser contract
+- BLOCKED summaryの次操作案内
+- Position Prompt/RD canonical allowlist contract
+- Safe Modeの明示revision 1 cycleでWAITING_HUMAN_SELECTION
+- revision task IDがrevision_1で4工程すべて一意
+- 二度目のrevision_required後に自動で第2 cycleへ進まない
+- 真のblocked reviewをrevisionとして実行しない
+- Targeted related suite: 96 PASS
+- OpenRouter/strict/runtime/Safe Mode related: 50 PASS
+- Full Unit: 357 PASS in 300.812s
+- Integration: 9 PASS in 28.852s
+- 31 RD STRICT: PASS
+- 全22 OpenRouter root recursive strict schema audit: PASS
+- Mock CLI Producer -> Researcher -> Deliberation -> Conclusion -> Playwright -> Delivery: PASS
+
+14. Recovery / Fault Test
+
+revision_1のPosition保存後、Decision EvaluatorでProviderResponseContractErrorを注入した。
+StateはFAILED、revision_count=1、failed_agent=Decision Evaluatorを保存した。明示provider retry後は
+保存済みrevision Positionを再利用し、Position callを増やさずEvaluatorから再開して
+WAITING_HUMAN_SELECTIONへ復旧した。
+
+productionの現在stateを読み取り専用で隔離複製し、--conclusion-reviseをMock実行した結果、
+revision_1のPosition/Evaluation/Integration/Quality ReviewだけでWAITING_HUMAN_SELECTIONへ到達した。
+
+15. Provider Call数
+
+- 実装/Unit/Integration/Mock/Fault: Real 0
+- exact production-state clone: Mock 4、Real 0
+- 保存済みupstream結果の再実行: 0
+- automatic retry: 0
+- explicit Real revision CLI: 1回
+- Real Provider call: Position Generator 1
+- Decision Evaluator / Decision Integrator / Quality Reviewer: 0
+- automatic retry: 0
+
+16. API Cost
+
+明示Real revisionはPosition Generator 1 callで停止した。CLI/state/reservationにusage/costが
+保存されていないため実測API costはunknown。後続3 callとautomatic retryは発生していない。
+
+17. Existing Workflowへの影響
+
+実装・Mock/Fault中のproduction storageはread-onlyだった。
+Deliberation state/messages、Conclusion state/messages/outbox、provider reservationsを削除・初期化・
+手動上書きしていない。production反映前のConclusionはBLOCKED、revision_count=0、saved reviewは
+revision_required / targeted / conclusion.position_generatorである。
+
+正規CLIによるReal実行後はrevision_count=1とrevision historyを最初のcall前に保存し、
+Position request/error PMPとreservationを追記してFAILEDになった。Deliberation state/messagesと
+Conclusion outboxはhash不変で、Playwright outboxは未生成のままである。
+
+18. Remaining Risk
+
+Real Position GeneratorはPrompt応答の意味検証へ到達する前に、root floatを返した。
+model_idはqwen/qwen3.5-flash-02-23で、Cycle 016に同じAgentの別taskをopenai/gpt-5-miniへ
+一回限りcontract repairした後も、新しいrevision taskは非互換な既定model mappingへ戻っていた。
+task-local contract repairが将来taskのmodel compatibilityへ昇格されない問題をCycle 020で扱う。
+Playwright実行時のdeterministic internal revision/upstream returnも重点監視対象である。
+
+19. Result
+
+PASS。Implementation / Static / Unit / Targeted / Integration / Mock / Fault /
+Exact Saved-State Recovery / production限定反映 / 明示的一回Real invocationは完了した。
+新CLIは正しいrevision_1 task、checkpoint、reservationを作り、再送なしでfail-closedした。
+Real Provider responseはroot floatのためFAILEDとなり、model compatibility persistenceを
+独立したCycle 020へ移行する。
+
+Real Invocation Addendum
+
+- task_id: conclusion_position_generation_upstream_0_revision_1
+- request_message_id: db60df21-4e72-4ea9-ba59-6b990592901d
+- error_message_id: 78813a89-cb1e-4df2-a1b3-03a780a798ab
+- error_class: ProviderResponseContractError
+- model_id: qwen/qwen3.5-flash-02-23
+- response hash: 1eb1e64d569ddb83ba3d6d0248571ad0653d892e72b9af04cf760a72d089033f
+- response length: 22
+- root / invalid path: float / $
+- automatic retry: 0
+- saved state: FAILED、revision_count=1、failed_agent=conclusion.position_generator
+
+Plan Compliance Review
+
+照合計画: PRDCP_CLI_E2E_EXECUTION_PLAN_v2
+SHA-256: BB4823AAAEDCA1B7C4A089DAE03CE2B043966BD2F5C244E979586688D60BBA38
+
+[YES] Root Causeまで特定した
+[YES] 局所的な症状だけを修正していない
+[YES] Sibling Failureを監査した
+[YES] 他Layerを確認した
+[YES] Stateを確認した
+[YES] Checkpointを確認した
+[YES] Schemaを確認した
+[YES] PMPを確認した
+[YES] Reservationを確認した
+[YES] Outboxを確認した
+[YES] Regression Testを追加した
+[YES] Recovery/Fault Testを行った
+[YES] Debug Reportを書いた
+[YES] 設計上の意味を説明した
+[YES] 不必要なProvider Callを避けた
+
+NO項目なし。E2E全体は再実行せず、既存Conclusion checkpointからのみ再開する。

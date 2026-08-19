@@ -1,0 +1,151 @@
+PRDCP Debug Report
+
+ID: Debug Cycle 008
+Date: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Layer: Deliberation
+Agents: Causal & Structural Analyst / Deliberation Manager / Counterargument Analyst
+Error Class: CROSS-SCHEMA ITEM ID CONTRACT / MANAGER RAW PAYLOAD CHECKPOINT / LOGICAL TASK IDENTITY
+
+1. 何が起きたか
+
+Cycle 007修正後の明示的一回Real Recoveryでは、保存済みStakeholder payloadがProvider
+call 0で復旧し、primary revision 1 checkpoint 3件が揃った。続いてOpenRouterへ
+Initial Integrationを1回送信したが、応答のtraceability_index.causal_item_idsに
+`cc_1`, `mech_1`, `sf_1`, `fb_1`, `alt_1`等が入り、InitialIntegratedAnalysisが
+許可するcanonical prefixと一致せずlocal validationで停止した。
+
+Counterargument、Final Integration、Quality Reviewは未実行。自動retryは0だった。
+
+2. なぜ起きたか
+
+CausalStructuralAnalysisResultでは、causal_claims、mechanisms、structural_factors、
+feedback_loops、alternative_explanationsがすべて共通`CausalItem`を使い、item_idは
+単なる非空文字列だった。一方、Initial/Final IntegrationのTraceabilityEntryは、
+役割別の`causal_`, `mechanism_`, `structure_/structural_`, `feedback_`,
+`alternative_/alt_exp_`だけを許可していた。
+
+保存済みCausal checkpointは前者のSchemaを通過して`cc_`等を持ち、Managerはその
+IDを正しく再利用した結果、後者のSchemaで拒否された。個別fieldの問題ではなく、
+ProducerとなるPrimary SchemaとConsumerとなるIntegration Schemaの契約差だった。
+
+さらにDeliberation ManagerはStructuredAgentを経由せず直接Registry.integrateを
+使うため、local PayloadValidationErrorのraw payloadをPMP/stateへ保存していなかった。
+したがって今回のOpenRouter応答はプロセス終了後に再検証できず、既reservationだけが残った。
+
+3. 同系統Failure Modeと影響範囲
+
+- Final Integrationにも同じTraceabilityEntryがあり、同じcausal ID不整合が起こり得る。
+- Causal Analystの新規出力Schemaが役割別prefixを強制しない限り再発する。
+- saved checkpointへ新Schemaを直接適用すると高コストなCausal Analystを再実行してしまう。
+- Manager local rejection rawを保存しないとSchema修正後もProvider応答を再利用できない。
+- Counterargument task_idが乱数だと、response保存後・checkpoint保存前の障害で再呼出しが起こり得る。
+- Manager integrationのreservationがある状態で同じlogical IDを再利用すると重複防止で停止するため、一回性contract repair identityが必要。
+
+4. v2との照合と修正計画
+
+- 新規Structured Output境界: Causal itemを役割別Pydantic型へ分離し、JSON Schemaにもpatternを出す。
+- 旧保存データ: JSONを書き換えず、読込時だけ決定的canonical IDへ変換する。
+- 参照整合: evidence_mappingsおよびIntegration raw内の参照を同じ変換表で置換する。
+- Manager raw checkpoint: Initial/Final両stageのPayloadValidationError rawとvalidation_errorsをstateへ保存する。
+- Recovery: Providerを呼ぶ前に保存rawを再検証する。
+- Legacy failure: rawが保存されていない今回だけ、決定的`contract_repair_1` IDを一回発行する。
+- Counterargument: revisionごとの決定的task IDと、保存済みresult再利用を追加する。
+
+PMP routing、revision_count、Researcher Return、Safe Mode、既存checkpoint JSON、
+provider reservationの排他形式は維持する。
+
+5. どう直したか
+
+- CausalClaimItem / MechanismItem / StructuralFactorItem / FeedbackLoopItem /
+  AlternativeExplanationItemを追加し、fieldごとのID patternをStrict Schemaへ反映。
+- `canonicalize_legacy_causal_item_ids`を追加し、旧IDをfield名+旧IDのSHA-256から
+  決定的canonical IDへ変換。evidence_mappingsの参照も同時変換。
+- `canonicalize_legacy_causal_references`を追加し、Manager saved raw内の参照を
+  保存Causal checkpoint由来の対応表だけで変換。
+- integration、review、validator、result構築へ渡すprimary analysesをin-memory正規化。
+- DeliberationWorkflowStateへmanager_invalid_payloadsとmanager_payload_recoveriesを追加。
+- Initial/Final integrationを共通Recovery境界へ集約し、raw保存→再検証→必要時のみcallとした。
+- 旧Failure markerから`initial_integration ... recovery_1_contract_repair_1`を一回だけ生成。
+- Counterargument taskを`counter_task_revision_<n>`へ決定化し、保存responseをcheckpoint前障害から再利用。
+- Causal/Manager Prompt、Role Definition、READMEを更新。
+
+6. Regression / Mock / Fault Injection / Recovery
+
+Compile: PASS
+Structured Output全root再帰監査: PASS
+Targeted Causal/Manager Fault tests: 4 PASS
+Deliberation Manager/Payload/Structured Output suite: PASS
+Role Definition strict tests: 20 PASS
+Unit full: PASS
+Integration: 9 PASS
+
+Fault A: 新規Causal Schemaへ`cc_1/mech_1/sf_1/alt_1`を入れるとFAIL。
+Fault B: 同じ旧payloadをread adapterへ入れると役割別canonical IDへ変換されPASS。
+Fault C: evidence_mappings内の旧参照も同じcanonical IDsへ変換。
+Fault D: Manager Initial rawがlocal validationで失敗するとraw/field errorsをstateへ保存。
+Fault E: explicit recoverで一回だけcontract repair reservationを作りCOMPLETED。
+Fault F: 保存Manager rawが新Schemaで有効ならProvider call 0で再利用。
+Fault G: Counterargument result保存後・checkpoint前Failureを注入し、Provider call 0で再利用。
+
+本番Failure stateのread-only copy Mock Recovery:
+- Status: COMPLETED
+- Primary calls: 0
+- Initial Integration: 1 contract repair call
+- Counterargument: 1 call (`counter_task_revision_1`)
+- Final Integration: 1 call
+- Quality Review: 1 call, approved_with_conditions
+- Total mock calls/reservations: 4
+- failed_agents: []
+- all revision 1 checkpoints: present
+- saved Causal JSON IDs: `cc_`等のまま（非破壊）
+
+7. State / PMP / Schema / Checkpoint / Reservation / Outbox
+
+State: 新規Manager raw checkpoint fieldsはdefault付きで旧state読込互換。通常実行でのみ追記。
+PMP: Primary/Counterargument result経路を維持。Counterargument saved responseを再利用可能。
+Schema: Producer側Causal itemとConsumer側Traceabilityのprefix契約を統一。
+Checkpoint: primary 3件は再実行せず、initial以降だけrevision 1で再構築。
+Reservation: 旧initial reservationは保持。contract repairは別の決定的IDで一回のみ。
+Outbox: Mock copyでConclusion outbox生成を確認。本番outboxはCycle 008検証中未変更。
+
+8. Provider CallとCost
+
+Cycle 008 failure capture Real calls: Initial Integration 1
+Primary calls: 0
+Counterargument/Final/Quality Review calls: 0
+Automatic retry: 0
+API Cost: CLIから実測値を取得できないためunknown
+
+次の局所Real Recoveryの最大budgetは4 logical calls。Full E2E先頭からの再実行はしない。
+
+9. 設計上の意味と再発防止
+
+ID型はConsumer側だけで検査せず、IDを生成するSchema自身が同じnamespaceを強制する。
+旧データ互換は保存JSON migrationではなく、権威ある保存artifactから作る決定的read adapter
+に限定する。またManagerを含むすべての高コストStructured Output境界で、Provider rawと
+logical task identityをcheckpoint化し、local Schema修正をAPI callなしで回復可能にする。
+
+10. Storage Safety
+
+実装、Unit、Fault、Mock Recoveryでは本番storageを削除・初期化・手動上書きしていない。
+本番state/messagesはread-only copyへ複製して検証した。Cycle 008の本番変更は、承認済み
+CLI Real Recoveryが通常保存したstate/messages/reservationのみである。
+
+11. Result
+
+IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS
+READY FOR ONE LOCALIZED REAL DELIBERATION RECOVERY
+
+Plan Compliance Review
+
+[YES] Provider応答のfield pathと実Causal checkpointを保存
+[YES] 根本原因をProducer/Consumer Schema契約まで特定
+[YES] Initial/Final/Counterargumentの同系統Failure Modeを監査・修正
+[YES] State / PMP / Schema / Checkpoint / Reservation / Outbox影響を確認
+[YES] Regression Testを追加
+[YES] Recovery/Fault条件を確認
+[YES] Debug Reportを生成
+[YES] 設計上の意味と再発防止を説明
+[YES] Real Provider callは失敗捕捉のInitial 1回、自動retry 0
+[YES] Full E2Eを最初から再実行していない

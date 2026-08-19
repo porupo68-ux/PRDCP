@@ -1,20 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import socket
+from http.client import IncompleteRead
+from math import ceil
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel
 
-from common.models.errors import NonRetryableAgentError, RetryableAgentError
+from common.models.errors import (
+    NonRetryableAgentError,
+    ProviderCapabilityError,
+    ProviderResponseContractError,
+    RetryableAgentError,
+)
+from common.provider_schema_compatibility import validate_provider_schema_compatibility
 from common.structured_outputs import strict_output_schema
+from providers.openrouter_capabilities import OpenRouterModelCapabilityClient
 
 
 RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600
+MODEL_INPUT_CONTEXT_LIMITS = {
+    # OpenRouter's DeepSeek R1 endpoint returned this exact limit during the
+    # saved Deliberation recovery. Unknown models are not guessed locally.
+    "deepseek/deepseek-r1": 64_000,
+}
+CONTEXT_INPUT_SAFETY_RATIO = 0.90
+
+
+def estimate_openrouter_input_tokens(value: str) -> int:
+    """Conservative dependency-free estimate for mixed Japanese/ASCII prompts."""
+
+    units = sum(1.0 if ord(character) > 127 else 0.25 for character in value)
+    return ceil(units)
 
 
 class OpenRouterModelProvider:
@@ -27,6 +51,7 @@ class OpenRouterModelProvider:
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: int = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
         reservation_root: Path | None = None,
+        capability_client: OpenRouterModelCapabilityClient | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required")
@@ -36,6 +61,9 @@ class OpenRouterModelProvider:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.reservation_root = reservation_root
+        self.capability_client = capability_client or OpenRouterModelCapabilityClient(
+            base_url=self.base_url,
+        )
 
     async def generate_structured(
         self,
@@ -51,9 +79,39 @@ class OpenRouterModelProvider:
                 "OpenRouter model ID is not configured for this agent",
                 provider="openrouter",
             )
-        schema = strict_output_schema(output_schema)
-        body = {
+        self.validate_request_budget(
+            model=model,
+            system_prompt=system_prompt,
+            input_data=input_data,
+            output_schema=output_schema,
+        )
+        body = self.build_request_body(
+            model=model,
+            system_prompt=system_prompt,
+            input_data=input_data,
+            output_schema=output_schema,
+        )
+        return await asyncio.to_thread(self._post, body, timeout_seconds)
+
+    @staticmethod
+    def build_request_body(
+        *,
+        model: str,
+        system_prompt: str,
+        input_data: dict,
+        output_schema: type[BaseModel],
+    ) -> dict:
+        """Build the exact secret-free JSON body posted to OpenRouter."""
+
+        schema = strict_output_schema(output_schema, input_data=input_data)
+        validate_provider_schema_compatibility(model, schema)
+        return {
             "model": model,
+            # OpenRouter otherwise defaults this to false and may route a
+            # response_format request to an endpoint that ignores parameters it
+            # does not implement. Every PRDCP call is a Structured Output call,
+            # so parameter support is a hard routing requirement.
+            "provider": {"require_parameters": True},
             "messages": [
                 {
                     "role": "system",
@@ -73,7 +131,54 @@ class OpenRouterModelProvider:
                 },
             },
         }
-        return await asyncio.to_thread(self._post, body, timeout_seconds)
+
+    def validate_request_budget(
+        self,
+        *,
+        agent_id: str | None = None,
+        model: str,
+        system_prompt: str,
+        input_data: dict,
+        output_schema: type[BaseModel],
+    ) -> int:
+        """Reject a known-overflow request locally before HTTP is attempted."""
+
+        try:
+            self.capability_client.require_compatible(model)
+        except ProviderCapabilityError as exc:
+            if not agent_id:
+                raise
+            raise ProviderCapabilityError(
+                f"MODEL_CAPABILITY_ERROR: agent={agent_id}; model={model}; "
+                "required=response_format=json_schema, json_schema.strict=true, "
+                "provider.require_parameters=true; "
+                f"reason={exc}. No paid chat completion request was sent.",
+                provider="openrouter",
+                model_id=model,
+            ) from exc
+        context_limit = MODEL_INPUT_CONTEXT_LIMITS.get(model.lower())
+        schema = strict_output_schema(output_schema, input_data=input_data)
+        validate_provider_schema_compatibility(model, schema)
+        serialized = "\n".join(
+            (
+                system_prompt,
+                json.dumps(input_data, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+            )
+        )
+        estimated_tokens = estimate_openrouter_input_tokens(serialized)
+        if context_limit is None:
+            return estimated_tokens
+        safe_budget = int(context_limit * CONTEXT_INPUT_SAFETY_RATIO)
+        if estimated_tokens > safe_budget:
+            raise NonRetryableAgentError(
+                "OpenRouter local context budget exceeded before provider request: "
+                f"estimated_input_tokens={estimated_tokens}, safe_budget={safe_budget}, "
+                f"model_context_limit={context_limit}. No HTTP request was sent.",
+                provider="openrouter",
+                model_id=model,
+            )
+        return estimated_tokens
 
     def _post(self, body: dict, timeout_seconds: int | None = None) -> dict:
         request_timeout = self.timeout if timeout_seconds is None else timeout_seconds
@@ -90,16 +195,33 @@ class OpenRouterModelProvider:
         )
         try:
             with urlopen(request, timeout=request_timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                response_text = response.read().decode("utf-8")
+                result = self._decode_strict_json_object(
+                    response_text,
+                    model_id=str(body.get("model") or "") or None,
+                    document_name="response envelope",
+                )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            safe_detail = self._safe_detail(detail)
+            if (
+                exc.code == 404
+                and "no endpoints found that can handle the requested parameters"
+                in safe_detail.lower()
+            ):
+                raise ProviderCapabilityError(
+                    f"OpenRouter HTTP {exc.code}: {safe_detail}",
+                    http_status=exc.code,
+                    provider="openrouter",
+                    model_id=str(body.get("model") or "") or None,
+                ) from exc
             error_type = (
                 RetryableAgentError
                 if exc.code in RETRYABLE_HTTP_STATUSES
                 else NonRetryableAgentError
             )
             raise error_type(
-                f"OpenRouter HTTP {exc.code}: {self._safe_detail(detail)}",
+                f"OpenRouter HTTP {exc.code}: {safe_detail}",
                 http_status=exc.code,
                 provider="openrouter",
                 model_id=str(body.get("model") or "") or None,
@@ -121,7 +243,18 @@ class OpenRouterModelProvider:
                 provider="openrouter",
                 model_id=str(body.get("model") or "") or None,
             ) from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except IncompleteRead as exc:
+            # The provider may have completed and billed the generation even
+            # though the response body was truncated in transit.  Classify it
+            # as recoverable, but require a persisted operator authorization
+            # instead of automatically duplicating the logical task.
+            raise RetryableAgentError(
+                "OpenRouter response body was interrupted before completion",
+                provider="openrouter",
+                model_id=str(body.get("model") or "") or None,
+                automatic_retry_allowed=False,
+            ) from exc
+        except UnicodeDecodeError as exc:
             raise NonRetryableAgentError(
                 "OpenRouter returned an invalid JSON response body",
                 provider="openrouter",
@@ -131,13 +264,86 @@ class OpenRouterModelProvider:
             content = result["choices"][0]["message"]["content"]
             if isinstance(content, list):
                 content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-            return json.loads(content)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            if not isinstance(content, str):
+                raise TypeError("message content must be text")
+            return self._decode_strict_json_object(
+                content,
+                model_id=str(body.get("model") or "") or None,
+                document_name="structured message content",
+            )
+        except ProviderResponseContractError:
+            raise
+        except (KeyError, IndexError, TypeError) as exc:
             raise NonRetryableAgentError(
                 "OpenRouter did not return a valid JSON object",
                 provider="openrouter",
                 model_id=str(body.get("model") or "") or None,
             ) from exc
+
+    @classmethod
+    def _decode_strict_json_object(
+        cls,
+        content: str,
+        *,
+        model_id: str | None,
+        document_name: str,
+    ) -> dict:
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite numeric constant {value}")
+
+        try:
+            parsed = json.loads(content, parse_constant=reject_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ProviderResponseContractError(
+                f"OpenRouter {document_name} violated the strict JSON contract: {exc}",
+                provider="openrouter",
+                model_id=model_id,
+                response_content_sha256=content_hash,
+                response_content_length=len(content),
+                response_invalid_path="$",
+            ) from exc
+
+        invalid_path = cls._first_non_finite_path(parsed)
+        if invalid_path is not None:
+            raise ProviderResponseContractError(
+                f"OpenRouter {document_name} contains a non-finite number at {invalid_path}",
+                provider="openrouter",
+                model_id=model_id,
+                response_content_sha256=content_hash,
+                response_content_length=len(content),
+                response_root_type=type(parsed).__name__,
+                response_invalid_path=invalid_path,
+            )
+        if not isinstance(parsed, dict):
+            raise ProviderResponseContractError(
+                f"OpenRouter {document_name} root must be a JSON object, got "
+                f"{type(parsed).__name__}",
+                provider="openrouter",
+                model_id=model_id,
+                response_content_sha256=content_hash,
+                response_content_length=len(content),
+                response_root_type=type(parsed).__name__,
+                response_invalid_path="$",
+            )
+        return parsed
+
+    @classmethod
+    def _first_non_finite_path(cls, value: object, path: str = "$") -> str | None:
+        if isinstance(value, float) and not math.isfinite(value):
+            return path
+        if isinstance(value, dict):
+            for key, item in value.items():
+                found = cls._first_non_finite_path(item, f"{path}/{key}")
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                found = cls._first_non_finite_path(item, f"{path}/{index}")
+                if found is not None:
+                    return found
+        return None
 
     def _safe_detail(self, detail: str) -> str:
         return detail.replace(self.api_key, "<redacted>")[:500]

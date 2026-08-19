@@ -68,6 +68,7 @@ class ArgumentAnalysisResult(BaseModel):
 
     analysis_id: str = Field(
         min_length=1,
+        pattern=r"^argument_analysis_.+",
         description="Unique argument analysis identifier using argument_analysis_*",
     )
     task_id: str = Field(min_length=1)

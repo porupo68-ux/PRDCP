@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from researcher.schemas.human_evidence import AcceptedEvidenceGap, HumanEvidenceDecision
 
 
 def utc_now() -> datetime:
@@ -26,6 +27,8 @@ class FinalConclusion(BaseModel):
     accepted_risks: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    human_evidence_decision: HumanEvidenceDecision | None = None
+    accepted_evidence_gaps: list[AcceptedEvidenceGap] = Field(default_factory=list)
     supporting_claim_ids: list[str] = Field(min_length=1)
     supporting_analysis_ids: list[str] = Field(min_length=1)
     supporting_evidence_ids: list[str] = Field(min_length=1)

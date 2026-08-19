@@ -1,0 +1,110 @@
+PRDCP CLI E2E Debug Cycle 011 Report
+
+作成日: 2026-08-17
+Workflow: 15f3f5c5-4167-447d-b255-069fc7f5beb2
+Failure Stage: CounterargumentAnalysisResult local validation after successful OpenRouter response
+状態: IMPLEMENTATION / REGRESSION / MOCK / FAULT / RECOVERY PASS - LOCALIZED DOWNSTREAM REAL RECOVERY ATTEMPTED
+
+1. 何が起きたか
+
+Cycle 010の明示的一回Real Retryは64K context errorを解消し、OpenRouterからCounterargument JSONを受領した。しかしstrict response_format schemaにPydantic validatorの条件が表現されておらず、次の2件をlocal validationが拒否した。
+
+- analysis_id=`counteranalysis_20260817_japan_ai_employment`。canonical prefix `counterargument_analysis_`ではない。
+- `counter_polarization_1`はrequired_revision=falseだが、revision_target_agent_idsに`deliberation.researcher`を含めた。
+
+同じrawでは、required_revision=trueの`counter_employment_impact_1`も`deliberation.researcher`を内部Agent targetとして含めていた。これは最初の2 validation errorには現れなかったが、Researcher routingと内部revision routingの責務混在である。
+
+2. なぜ起きたか
+
+Pydantic runtimeではanalysis_id field validatorとCounterargument model validatorが正しく拒否していた。一方、OpenRouterへ送ったJSON Schemaはanalysis_idを単なるminLength string、required_revisionをbool、revision_target_agent_idsを自由なstring arrayとして表現していた。
+
+つまり「strict Structured Output schema」と「受信後Pydantic validation」が同じ契約を表していなかった。Providerは送信schemaには完全適合し得るJSONを返したが、ローカルの隠れた条件に失敗した。
+
+3. 根本修正
+
+- CounterargumentAnalysisResult.analysis_idへ`^counterargument_analysis_` patternを追加した。
+- Primary 3分析のanalysis_id、Initial/Final integration_idにもcanonical patternを追加し、同系統を横断修正した。
+- Counterargument itemをrequired_revision=true/falseの明示的Pydantic unionへ分割した。strict schemaではarray items以下にanyOfが生成される。
+- true branchは内部Deliberation RevisionAgent enum、minItems=1、acceptance_conditions minItems=1。
+- false branchはrevision_target_agent_ids maxItems=0。
+- IntegrationRevisionのrevision_target_agent_idsも同じ内部Agent enumに限定した。
+- Researcher追加調査は`research_gap_required=true`で表し、架空の`deliberation.researcher`をinternal targetとして許可しない。
+- Counterargument prompt/RD/READMEへ同じ契約を明記した。
+
+4. 保存rawの非破壊Recovery
+
+Real応答はerror PMPのinvalid_payloadに保存済みである。再送せず、次の一意に推論できる互換変換だけをread時に行う。
+
+- `counteranalysis_<suffix>` → `counterargument_analysis_<suffix>`
+- internal Agent enum外のrevision targetを除外
+- required_revision=falseのrevision targetを空にする
+- required_revision=trueで有効internal targetが残らなければ自動補完せずvalidation failureを維持
+
+本workflowでは`counter_employment_impact_1`から`deliberation.researcher`だけを除き、`deliberation.causal_structural_analyst`を保持した。`counter_polarization_1`はfalse branchなので`deliberation.researcher`を除き空配列にした。原JSONは上書きせず、counterargument_payload_recoveriesへsource_message_id、before/after ID、除去targetを監査記録する。
+
+5. 同系統Failure Mode監査
+
+- Argument/Causal/Stakeholder/Counterargument analysis_id: schema pattern追加。
+- Initial/Final integration_idとFinal previous_integration_id: schema pattern追加。
+- Counterargument revision target: enum化。
+- required_revision条件: anyOf分岐でschema可視化。
+- task_id: responseは入力task_idとの完全一致をManagerが検査する。旧checkpoint互換を壊す一律pattern化は行わない。
+- cross-array uniqueness、参照先存在、Final change lineageなどJSON Schemaだけで表現できない関係制約: deterministic/local validatorを維持し、raw保存・checkpoint recoveryで扱う。
+- 22 root strict再帰監査: anyOfの各objectもadditionalProperties=false、required==properties.keys()を確認。
+
+6. Test / Fault / Recovery結果
+
+- Targeted schema/adapter/RD tests: 64 PASS
+- Unit full: 297 PASS (225.344s)
+- Integration full: 9 PASS (27.172s)
+- RD STRICT / Doctor: READY
+- all 22 Structured Output recursive strict audit: PASS
+- Fault: invalid analysis prefix、non-internal target、false branch targetをschema/modelで拒否
+- Saved raw adapter: canonical IDとtarget除去を監査付きで復元
+
+実workflow state/messagesだけのread-only copy Recovery:
+
+- Result: COMPLETED
+- Counterargument Provider call: 0
+- Final Integration Mock call: 1
+- Quality Review Mock call: 1
+- Counterargument checkpoint revision: 1
+- recovered analysis_id: counterargument_analysis_20260817_japan_ai_employment
+- removed targets: counter_employment_impact_1 / counter_polarization_1 の`deliberation.researcher`
+- Stored Research Report: unchanged
+- Final request: 115,799 chars / 46,787 estimated tokens
+- Quality Review request: 187,443 chars / 80,498 estimated tokens（GPT-5.5 route）
+
+7. 設計上の意味
+
+Providerに見える契約と受信後validatorの契約を一致させた。直接JSON Schemaで表現できる条件を「promptで守る想定」のままにせず、anyOf/const/minItems/maxItems/enum/patternへ昇格した。一方、複数artifact間の参照整合のようなSchemaで表現困難な条件はlocal deterministic validationへ残し、責務を分離した。
+
+保存rawを再利用することで、同じ論理Counterargument taskへの三度目のProvider callを発生させない。context repair reservationとinvalid rawを保持したまま、次のRecoveryはFinal Integrationから開始できる。
+
+8. 自己監査
+
+- 根本原因: strict schemaとruntime validatorの契約差まで特定。
+- 局所症状だけの修正: 回避。全Deliberation output identity prefixとrevision conditionを監査。
+- 他Layer: 22 strict再帰testを再実行。共通strict変換は維持。
+- State: optional audit fieldだけ追加。旧stateはdefaultで読込可能。
+- PMP: invalid rawとsource messageを保持。
+- Schema: anyOf以下もstrict条件通過。
+- Checkpoint: Primary/Initial/Counterargumentの高コスト処理を再実行しない。
+- Reservation: 既存base/context repair reservationを削除しない。
+- Outbox: 本番は未変更。Mockだけ一時領域。
+- Regression/Fault/Recovery: 追加・PASS。
+- Debug Report: 本書。
+- Provider call: Cycle 011起点Real call 1、automatic retry 0。修正検証中Real call 0。
+
+9. Provider Cost
+
+- Counterargument context repair Real call: 1（JSON応答受領後local reject）
+- Counterargument追加再送: 0
+- Mock calls: 課金なし
+- API cost: CLIに利用額がないため不明
+
+10. 局所Real Recovery結果
+
+本番反映とstorage hash確認後、`--deliberation-recover --provider openrouter --no-safe-mode`を一回実行した。保存rawからCounterargumentはProvider call 0でcheckpoint化され、Final Integrationだけが1回送信された。Quality Reviewには到達しなかった。
+
+Final Integration応答の受信途中で`IncompleteRead(5962 bytes read)`が発生し、WorkflowはFAILEDで停止した。Final/Deterministic Validation/Quality Review checkpointは未保存、元Final reservationは保持、自動retryは0だった。Counterargument schema-visible contract修正そのものは本番で成立したため、通信途中切断をCycle 012の独立Failureとして扱う。Full E2Eは最初から再実行しない。

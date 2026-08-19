@@ -1,0 +1,207 @@
+PRDCP v2 Debug Report
+Cycle: 034
+Title: Researcher Excerpt Hydration and One-Shot Runtime Output Repair
+Date: 2026-08-18 JST
+Workflow: 35fc624a-d8ac-451b-97f6-f3e94e13a951
+Status: REAL OUTPUT REPAIR 1/1 STOPPED SAFELY AT SOURCE IDENTITY CONTRACT; CONTINUED IN CYCLE 035
+
+1. What happened
+
+Cycle 033 persisted all nine missing Researcher Retrieval Contexts and then invoked the
+first Gemini Structured Reasoning task. Gemini selected a source_id that exists in the
+saved Context, but returned relevant_excerpt as a reformatted or paraphrased string. The
+local output contract correctly rejected a quotation that was not an exact substring of
+the immutable source text.
+
+The consumed task identity was:
+
+task_1abf9d163f0f4c20980e4221ca960e1e_runtime_model_repair_1
+
+The correlated ERROR PMP was d9dad747-bc78-4d6b-9fc0-83650caf7a3e. The workflow stopped
+before the remaining eight reasoning calls and before Researcher Quality Review.
+
+2. Root cause
+
+Cycle 030 had already established the correct boundary for immutable Retrieval metadata:
+the model selects source_id, while title, URL and retrieved_at are restored from the
+persisted Context. relevant_excerpt was unintentionally left on the model-generated side
+of that boundary.
+
+An excerpt is a quotation, not an analytical judgment. Asking a generative model to copy
+it byte-for-byte and then enforcing exact-substring validation created an unstable
+contract: a semantically faithful whitespace change or paraphrase was rejected after a
+successful paid call. The validator was correct; the producer of the field was wrong.
+
+3. Why Mock and Doctor did not detect it
+
+The Mock Researcher fixture returned an excerpt already copied from its synthetic
+Retrieval content, so it never injected the observed paraphrase/formatting difference.
+Cycle 030 Fault Injection covered long titles, large dynamic enums and all eight
+Retrieval-agent schemas, but did not mutate relevant_excerpt after source_id selection.
+
+Doctor verifies current configuration, RD loading, model capability and Retrieval
+availability. It does not and should not predict semantic formatting choices in a future
+provider response. The missing protection belonged in the deterministic output adapter
+and its Fault Injection tests.
+
+4. Repair design
+
+All seven Researcher specialists share one repaired ResearcherAgent adapter:
+
+* relevant_excerpt is removed from the Provider-bound strict schema together with title,
+  URL and retrieved_at;
+* the model still selects only an allowed source_id and generates analytical fields;
+* after response parsing, the adapter restores a bounded exact slice (maximum 1,000
+  characters) from the persisted source content;
+* the existing exact-substring validation remains enabled;
+* unknown source_id and ungrounded identity metadata remain rejected.
+
+This avoids weakening traceability. It strengthens it by making the stored quote a
+deterministic function of the immutable Retrieval checkpoint.
+
+5. Recovery identity and billing safety
+
+The consumed Cycle 032 runtime repair identity is never reopened. A new command was
+added:
+
+py main.py --researcher-runtime-output-repair WORKFLOW_ID --provider openrouter --safe-mode
+
+It creates exactly one new identity:
+
+<original_task_id>_runtime_model_output_repair_1
+
+Authorization requires all of the following before a Provider reservation is created:
+
+* the matching runtime-model repair authorization is CONSUMED;
+* its Provider reservation matches workflow, task, agent and model;
+* the correlated ERROR PMP is NonRetryableAgentError with the exact excerpt-contract
+  prefix and a source_id present in the saved Context;
+* Retrieval ID and file SHA-256 still match the consumed authorization;
+* no consumed runtime-output repair already exists.
+
+The new authorization is consumed only after its distinct Provider reservation is durably
+written and before the Provider invocation. Failure or ambiguity therefore blocks any
+second output-repair call. A PENDING authorization created before reservation can be
+resumed safely; a CONSUMED authorization cannot.
+
+After the repaired result is durably stored, the existing Cycle 032 state machine handles
+only the eight untouched tasks, integration and Quality Review. Retrieval is never
+re-executed.
+
+6. Same-family impact audit
+
+The schema and hydration change applies uniformly to Expert, Academic, Government, News,
+Public Opinion, Politician and Industry Researcher agents. Producer General Opinion uses
+a separate SupportingSource adapter and was not changed. Deliberation, Conclusion and
+Playwright do not produce ResearchSource excerpts and are unaffected.
+
+The common provider reservation pipeline gained only a suffix-specific authorization
+branch. Existing operator retry, contract repair, capability repair, Producer output
+repair and runtime-model repair identities retain their previous stores and semantics.
+
+7. Verification
+
+PASS  Static compile of the maintained runtime and tests
+PASS  Targeted Cycle 030/032/033/034 and Retrieval tests: 58/58
+PASS  Long payload and schema Fault Injection across all 8 Retrieval agents
+PASS  Paraphrased excerpt overwritten by exact, bounded persisted source slice
+PASS  Changed Retrieval hash rejected with 0 Provider calls
+PASS  Failed/consumed runtime-output repair rejected on second invocation with 0 calls
+PASS  Full unit/integration suite: 471/471
+PASS  31 Role Definitions loaded in STRICT mode
+PASS  22 OpenRouter Structured Output schema roots recursively validated
+PASS  Doctor mock READY, fail=0
+PASS  Five-layer Mock CLI E2E through Playwright COMPLETED
+
+Exact production clone result:
+
+* initial Researcher status: FAILED
+* eligible excerpt-contract failure: 1
+* Retrieval calls: 0
+* Structured Reasoning calls: 9 (1 output repair + 8 untouched tasks)
+* Quality Review calls: 1
+* runtime-output repair authorizations: 1
+* total runtime-model repair authorizations: 9
+* duplicate calls: 0
+* final Researcher status: COMPLETED
+* production source state/messages changed: NO
+
+Deployment verification:
+
+* the verified code, README, tests and Cycle 033/034 reports were applied to the
+  production source tree;
+* direct production-tree tests were intentionally not granted write access to the real
+  RD log and stopped at that sandbox boundary (21 identical PermissionError setup
+  failures; no product assertion failed and workflow storage hashes did not change);
+* the deployed production code was then executed through the isolated production-clone
+  harness and again reached COMPLETED with Retrieval 0, Reasoning 9, Review 1 and
+  duplicate 0;
+* CLI help exposes --researcher-runtime-output-repair;
+* read-only status loading still reads the saved Producer COMPLETED / Researcher FAILED
+  workflow;
+* production state/messages hashes and all Context/reservation counts remained unchanged.
+
+8. State, PMP, reservation, Context and outbox impact
+
+Implementation and all non-billable verification used isolated storage. Production
+workflow state, messages, the ten saved Retrieval Contexts, Retrieval reservations,
+existing Provider reservations, outbox and authorization records were not edited during
+Cycle 034 verification.
+
+On a newly authorized Real continuation, expected writes are limited to one
+runtime-output authorization/reservation and RESULT or ERROR PMP for the failed task;
+then up to eight normal runtime-model repair authorization/reservation/result groups;
+then the integrated Research Report, one Quality Review and normal Researcher outbox if
+all stages succeed. Existing records are not deleted, reset or overwritten.
+
+9. Provider call and cost accounting
+
+Paid calls that exposed this failure in the immediately preceding Real run:
+
+* Retrieval: 9
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+* automatic retries: 0
+
+Cycle 034 implementation/verification paid calls:
+
+* Retrieval: 0
+* Gemini Structured Reasoning: 1
+* Quality Review: 0
+
+Exact OpenRouter cost was not persisted by the runtime and must be read from the
+operator's account. All Cycle 034 tests and the production clone were non-billable.
+
+10. Real continuation result
+
+After a new explicit authorization, the production command invoked exactly one
+runtime-model output-repair task. The excerpt hydration repair succeeded and validation
+advanced to the next contract. It then stopped on:
+
+OUTPUT_CONTRACT_ERROR: ungrounded source identity metadata for
+source_008333aebcd976549e1a618a: Japan, 内閣府知的財産戦略推進事務局
+
+The saved source contains the organization with PDF layout whitespace ("推 進"), and its
+saved URL is under .go.jp. The validator nevertheless required byte-like textual
+occurrence for both organization and country. No Retrieval, remaining reasoning or
+Quality Review call occurred. The consumed task is not reused. Cycle 035 separates
+identity canonicalization and URL-derived country grounding from analytical
+classification values.
+
+11. Debug Cycle self-audit
+
+Root cause identified: YES
+Symptom-only patch avoided: YES
+Same Failure Mode audited across all 7 Researcher specialists: YES
+Other layer and common reservation impact checked: YES
+State/PMP/Schema/Checkpoint/Reservation/Context/Outbox impact checked: YES
+Regression tests added: YES
+Recovery and fault conditions verified: YES
+Production clone verified: YES
+Debug Report generated: YES
+Design meaning explained: YES
+Unnecessary Provider calls: NO; Cycle 034 Real calls were limited to 1
+Safety mechanisms disabled: NO
+
+Cycle 034 completed its bounded Real attempt and handed the next proven contract failure
+to Cycle 035.
