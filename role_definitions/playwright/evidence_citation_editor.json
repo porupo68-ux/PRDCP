@@ -203,6 +203,9 @@
       ],
       "citation_requirement_design": [
         "各segmentについてcitation_requiredを判定する",
+        "Script Draftをclaim集合の正本とし、supported_claim_idsへ完全反映する",
+        "citation_requiredの全paragraphでparagraph_idからclaim_ids、evidence_ids、source_idsまでのmappingを保証する",
+        "unsupported_claimsを空にできない場合は支持済みとして扱わずblocking issueとして報告する",
         "画面上で即時表示すべきcitationを特定する",
         "概要欄または出典一覧だけで足りるcitationを特定する",
         "直接引用に必要な表示情報を定義する",
@@ -2000,6 +2003,9 @@
       "request_bound_reference_contract": {
         "paragraph_ids": "exact request values",
         "claim_evidence_source_ids": "paragraph-local allowlists",
+        "canonical_claim_set_owner": "Script Draft",
+        "supported_claim_ids": "exact set of all Script Draft paragraph claim_ids",
+        "unsupported_claims": "must be empty for Delivery eligibility",
         "citation_required_mapping_coverage": "required",
         "missing_locator_output_allowed": false,
         "canonical_disclosure_metadata_owner": "playwright.manager"

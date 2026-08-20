@@ -17,3 +17,5 @@
 5 Layerは同じ`workflow_id`を共有します。旧Prototype固有パスを新規データへ書き込みません。
 
 Workflow、PMP、Result、Human Decision、Outbox、Reservation、AuthorizationはRecoveryの監査入力です。Recoveryの都合だけで既存JSONを削除・初期化せず、通常のState更新はatomic writeで行います。旧Schema互換は読込時adapterまたは新しい監査recordで扱います。
+
+Researcherの決定論的integrity repairは`data/artifacts/human_evidence_integrity_repairs/<workflow_id>/<repair_id>.json`へcreate-onceで保存します。state/report保存後にartifact書込が中断しても、同じrepair identityとhashが一致する場合だけ再実行で補完し、異なる内容での上書きは拒否します。

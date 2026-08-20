@@ -1,0 +1,57 @@
+{
+  "provider_id": "mock",
+  "checked_at": "2026-08-20T10:29:29.948643+00:00",
+  "entries": [
+    {
+      "agent_id": "producer.general_opinion_analyst",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "producer.manager",
+      "configured_model": "moonshotai/kimi-k3",
+      "runtime_model": "moonshotai/kimi-k3",
+      "compatibility_binding_models": [],
+      "resolved_model": "moonshotai/kimi-k3",
+      "drifted": false
+    },
+    {
+      "agent_id": "producer.quality_reviewer",
+      "configured_model": "moonshotai/kimi-k3",
+      "runtime_model": "moonshotai/kimi-k3",
+      "compatibility_binding_models": [],
+      "resolved_model": "moonshotai/kimi-k3",
+      "drifted": false
+    },
+    {
+      "agent_id": "producer.research_planner",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "producer.topic_scout",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "producer.topic_selector",
+      "configured_model": "moonshotai/kimi-k3",
+      "runtime_model": "moonshotai/kimi-k3",
+      "compatibility_binding_models": [],
+      "resolved_model": "moonshotai/kimi-k3",
+      "drifted": false
+    }
+  ],
+  "drift_count": 0,
+  "workflow_id": null,
+  "operation": "producer"
+}

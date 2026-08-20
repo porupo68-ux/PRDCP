@@ -57,6 +57,7 @@ from conclusion.schemas import (
     default_value_profiles,
 )
 from conclusion.state import (
+    CandidateCoverageAudit,
     ConclusionManagerRepairRecord,
     ConclusionRevisionRecord,
     ConclusionUpstreamRevisionRecord,
@@ -79,6 +80,10 @@ from storage.conclusion_workflow_repository import ConclusionWorkflowRepository
 
 
 ProgressCallback = Callable[[str], Awaitable[None]]
+
+CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX = (
+    "_candidate_coverage_contract_repair_1"
+)
 
 
 class ConclusionManager:
@@ -451,6 +456,12 @@ class ConclusionManager:
                     raise ValueError(
                         "The one-time Conclusion provider contract repair is exhausted"
                     )
+                if original_task_id.endswith(
+                    CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX
+                ):
+                    raise ValueError(
+                        "The one-time Conclusion candidate coverage contract repair is exhausted"
+                    )
                 if original_task_id.endswith(OPERATOR_RETRY_SUFFIX):
                     base_task_id = original_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
                     repair_authorization = (
@@ -487,6 +498,32 @@ class ConclusionManager:
                     model_overrides[next_agent] = (
                         repair_authorization.repair_model_id
                     )
+                elif self._is_candidate_coverage_contract_failure(
+                    state,
+                    request,
+                    _error_response,
+                ):
+                    repair_task_id = (
+                        original_task_id
+                        + CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX
+                    )
+                    if self._has_unanswered_task_request(
+                        state,
+                        next_agent,
+                        repair_task_id,
+                    ):
+                        raise ValueError(
+                            "Conclusion recovery found an unanswered candidate coverage "
+                            "contract repair request; automatic redispatch is blocked"
+                        )
+                    self._clear_from_failed_stage(state, next_agent)
+                    self._record_candidate_coverage_audit(
+                        state,
+                        task_id=original_task_id,
+                        payload=_error_response.payload.get("invalid_payload"),
+                        recovery_task_id=repair_task_id,
+                    )
+                    task_id_overrides[next_agent] = repair_task_id
                 else:
                     authorization = self.provider_retry_store.for_original_task(
                         workflow_id=workflow_id,
@@ -1066,7 +1103,14 @@ class ConclusionManager:
                     )
                     state.decision_evaluation = evaluation.model_dump(mode="json")
                     self.repository.save(state)
-                    await self._emit(progress_callback, "Decision Evaluator完了")
+                    audit = state.candidate_coverage_audit
+                    await self._emit(
+                        progress_callback,
+                        "Decision Evaluator完了: "
+                        f"positions={audit.candidate_count_position_generator if audit else 0}, "
+                        f"evaluated={audit.candidate_count_evaluation if audit else 0}, "
+                        f"matrix={audit.candidate_count_matrix if audit else 0}",
+                    )
                 else:
                     evaluation = DecisionEvaluationResult.model_validate(state.decision_evaluation)
 
@@ -1218,7 +1262,7 @@ class ConclusionManager:
             requested_candidate_count=3,
             revision_context=self._latest_revision_context(state),
         )
-        return await self._execute_agent(
+        result = await self._execute_agent(
             state,
             agent_id=POSITION_GENERATOR_ID,
             message_type=MessageType.POSITION_GENERATION_ASSIGNMENT,
@@ -1230,6 +1274,7 @@ class ConclusionManager:
             next_stage="conclusion.decision_evaluator",
             model_override=model_override,
         )
+        return result
 
     async def _evaluate_positions(
         self,
@@ -1255,7 +1300,7 @@ class ConclusionManager:
             evaluation_framework=framework,
             revision_context=self._latest_revision_context(state),
         )
-        return await self._execute_agent(
+        result = await self._execute_agent(
             state,
             agent_id=DECISION_EVALUATOR_ID,
             message_type=MessageType.DECISION_EVALUATION_ASSIGNMENT,
@@ -1267,6 +1312,23 @@ class ConclusionManager:
             next_stage=DECISION_INTEGRATOR_ID,
             model_override=model_override,
         )
+        audit = self._record_candidate_coverage_audit(
+            state,
+            task_id=result.task_id,
+            payload=result.model_dump(mode="json"),
+        )
+        if not audit.passed:
+            if DECISION_EVALUATOR_ID in state.completed_agents:
+                state.completed_agents.remove(DECISION_EVALUATOR_ID)
+            if DECISION_EVALUATOR_ID not in state.failed_agents:
+                state.failed_agents.append(DECISION_EVALUATOR_ID)
+            self.repository.save(state)
+            raise ValueError(
+                "Decision Evaluator candidate coverage does not match the "
+                "Position Generator checkpoint"
+            )
+        self.repository.save(state)
+        return result
 
     async def _integrate_decision(
         self,
@@ -1425,6 +1487,12 @@ class ConclusionManager:
         state.current_agent_ids = []
         error = self._validate_response_envelope(request, response, agent_id, expected_type.value)
         if error:
+            if agent_id == DECISION_EVALUATOR_ID:
+                self._record_candidate_coverage_audit(
+                    state,
+                    task_id=str(payload.get("task_id") or "unknown_task"),
+                    payload=response.payload.get("invalid_payload"),
+                )
             if agent_id not in state.failed_agents:
                 state.failed_agents.append(agent_id)
             self.repository.save(state)
@@ -1450,6 +1518,111 @@ class ConclusionManager:
                 result_message_id=response.message_id,
             )
         return (result, response) if return_response else result
+
+    @staticmethod
+    def _unique_candidate_ids(records: Any) -> list[str]:
+        if not isinstance(records, list):
+            return []
+        return list(
+            dict.fromkeys(
+                item.get("candidate_id")
+                for item in records
+                if isinstance(item, dict)
+                and isinstance(item.get("candidate_id"), str)
+                and item.get("candidate_id")
+            )
+        )
+
+    def _record_candidate_coverage_audit(
+        self,
+        state: ConclusionWorkflowState,
+        *,
+        task_id: str,
+        payload: Any,
+        recovery_task_id: str | None = None,
+    ) -> CandidateCoverageAudit:
+        if (
+            recovery_task_id is None
+            and task_id.endswith(CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX)
+        ):
+            recovery_task_id = task_id
+        position_ids = list(
+            dict.fromkeys(
+                item.get("position_candidate_id")
+                for item in state.position_candidates
+                if isinstance(item, dict)
+                and isinstance(item.get("position_candidate_id"), str)
+                and item.get("position_candidate_id")
+            )
+        )
+        raw_payload = payload if isinstance(payload, dict) else {}
+        raw_evaluations = raw_payload.get("candidate_evaluations")
+        raw_matrix = raw_payload.get("comparison_matrix")
+        evaluation_ids = self._unique_candidate_ids(raw_evaluations)
+        matrix_ids = self._unique_candidate_ids(raw_matrix)
+        position_set = set(position_ids)
+        evaluation_set = set(evaluation_ids)
+        matrix_set = set(matrix_ids)
+        missing = sorted(
+            (position_set - evaluation_set) | (position_set - matrix_set)
+        )
+        extra = sorted(
+            (evaluation_set - position_set) | (matrix_set - position_set)
+        )
+        evaluation_row_count = (
+            len(raw_evaluations) if isinstance(raw_evaluations, list) else 0
+        )
+        matrix_row_count = len(raw_matrix) if isinstance(raw_matrix, list) else 0
+        expected_evaluation_count = len(position_ids) * len(DEFAULT_CRITERIA)
+        passed = (
+            bool(position_ids)
+            and evaluation_set == position_set
+            and matrix_set == position_set
+            and evaluation_row_count == expected_evaluation_count
+            and matrix_row_count == len(position_ids)
+        )
+        audit = CandidateCoverageAudit(
+            source_task_id=task_id,
+            recovery_task_id=recovery_task_id,
+            position_candidate_ids=position_ids,
+            evaluation_candidate_ids=evaluation_ids,
+            matrix_candidate_ids=matrix_ids,
+            candidate_count_position_generator=len(position_ids),
+            candidate_count_evaluation=len(evaluation_ids),
+            candidate_count_matrix=len(matrix_ids),
+            candidate_evaluation_row_count=evaluation_row_count,
+            expected_candidate_evaluation_row_count=expected_evaluation_count,
+            missing_candidate_ids=missing,
+            extra_candidate_ids=extra,
+            passed=passed,
+        )
+        state.candidate_coverage_checked = True
+        state.candidate_coverage_passed = passed
+        state.candidate_coverage_audit = audit
+        return audit
+
+    def _is_candidate_coverage_contract_failure(
+        self,
+        state: ConclusionWorkflowState,
+        request: PMPMessage,
+        error_response: PMPMessage,
+    ) -> bool:
+        if (
+            request.receiver_agent_id != DECISION_EVALUATOR_ID
+            or error_response.payload.get("error_class") != "PayloadValidationError"
+            or "candidate_evaluations and comparison_matrix must cover the same candidates"
+            not in str(error_response.payload.get("message") or "")
+        ):
+            return False
+        payload = error_response.payload.get("invalid_payload")
+        if not isinstance(payload, dict):
+            return False
+        audit = self._record_candidate_coverage_audit(
+            state,
+            task_id=str(request.payload.get("task_id") or "unknown_task"),
+            payload=payload,
+        )
+        return not audit.passed
 
     @staticmethod
     def _output_schema_id(output_schema: type[BaseModel]) -> str:
@@ -2748,6 +2921,9 @@ class ConclusionManager:
             state.position_generation = None
             state.position_candidates = []
             state.evaluation_framework = None
+            state.candidate_coverage_checked = False
+            state.candidate_coverage_passed = False
+            state.candidate_coverage_audit = None
         if failed_agent_id in {POSITION_GENERATOR_ID, DECISION_EVALUATOR_ID}:
             state.decision_evaluation = None
         if failed_agent_id in {

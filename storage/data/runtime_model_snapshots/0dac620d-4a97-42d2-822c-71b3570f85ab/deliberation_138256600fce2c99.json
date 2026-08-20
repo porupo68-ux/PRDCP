@@ -1,0 +1,57 @@
+{
+  "provider_id": "openrouter",
+  "checked_at": "2026-08-20T06:42:23.801696+00:00",
+  "entries": [
+    {
+      "agent_id": "deliberation.argument_analyst",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "deliberation.causal_structural_analyst",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "deliberation.counterargument_analyst",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "deliberation.manager",
+      "configured_model": "openai/gpt-5.5",
+      "runtime_model": "openai/gpt-5.5",
+      "compatibility_binding_models": [],
+      "resolved_model": "openai/gpt-5.5",
+      "drifted": false
+    },
+    {
+      "agent_id": "deliberation.quality_reviewer",
+      "configured_model": "openai/gpt-5.5",
+      "runtime_model": "openai/gpt-5.5",
+      "compatibility_binding_models": [],
+      "resolved_model": "openai/gpt-5.5",
+      "drifted": false
+    },
+    {
+      "agent_id": "deliberation.stakeholder_response_analyst",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    }
+  ],
+  "drift_count": 0,
+  "workflow_id": "0dac620d-4a97-42d2-822c-71b3570f85ab",
+  "operation": "deliberation"
+}

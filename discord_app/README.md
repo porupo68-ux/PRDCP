@@ -16,4 +16,6 @@ ResearcherのHuman Evidence Gateは`!researcher_evidence`で確認し、`!resear
 
 `!runtime_models [layer]`は起動時Runtime Model、現在のConfigured Model、検証済み互換bindingを分けて表示します。Driftがある場合はProvider Reservation前に停止します。
 
+Botへ実登録された全Discordコマンド、用途、外部API呼び出しの目安はルート`README.md`の「コマンド早見表（CLI / Discord）」へ一括掲載します。Discordには技術障害用のProvider retry、contract/capability repair、Playwright deterministic repairを公開していないため、これらは`--status`で状態を確認してCLIから明示実行します。
+
 例外の完全TracebackはApplication Logへ記録し、Discordには700文字以下のoperational summaryだけを送信します。Layer実行またはhandoff validationが失敗した場合は対応するstatus通知を`ERROR`へ閉じ、Discord表示に`RUNNING`を残しません。Discordの2000文字制限を回避するためTracebackや巨大payloadを直接投稿しません。

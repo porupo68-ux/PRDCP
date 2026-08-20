@@ -59,6 +59,14 @@ from providers.openrouter_capabilities import (
 )
 from researcher.registry import ResearcherRegistry
 from researcher.agents.base import canonical_country_from_url, canonical_source_label
+from researcher.integrity_repair import (
+    DuplicateTrackingPlan,
+    apply_duplicate_tracking_plan,
+    immutable_report_sha256,
+    is_duplicate_tracking_finding,
+    plan_duplicate_tracking_repair,
+    relation_metadata_sha256,
+)
 from researcher.schemas.human_evidence import (
     AcceptedEvidenceGap,
     EvidenceFindingDisposition,
@@ -71,6 +79,7 @@ from researcher.schemas.human_evidence import (
     HumanEvidenceIntegrityRepair,
     HumanEvidenceSourceReclassificationRepair,
     ResearchReportIntegrityRepair,
+    ResearchSourceDuplicateTrackingRepair,
     ResearchFindingType,
 )
 from researcher.schemas.research_report import (
@@ -1689,6 +1698,13 @@ class ResearcherManager:
         _repaired, changed = cls._canonicalize_recognized_media_source(source)
         return changed
 
+    @staticmethod
+    def _duplicate_tracking_repair_plan(
+        report: ResearchReport,
+        finding: Any,
+    ) -> DuplicateTrackingPlan | None:
+        return plan_duplicate_tracking_repair(report, finding)
+
     def _recompute_report_coverage_data(
         self,
         state: ResearcherWorkflowState,
@@ -2167,11 +2183,86 @@ class ResearcherManager:
         self.repository.save(state)
         return repaired
 
+    def _repair_duplicate_document_tracking(
+        self,
+        state: ResearcherWorkflowState,
+        report: ResearchReport,
+        *,
+        quality_review_id: str,
+        finding: Any,
+        plan: DuplicateTrackingPlan,
+    ) -> ResearchReport:
+        existing = next(
+            (
+                item
+                for item in state.human_evidence_integrity_repairs
+                if item.quality_review_id == quality_review_id
+                and item.finding_id == finding.finding_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if not isinstance(existing, ResearchSourceDuplicateTrackingRepair):
+                raise ValueError(
+                    "DUPLICATE_TRACKING_CONFLICT: finding already has another repair kind"
+                )
+            self.repository.create_human_evidence_integrity_repair_once(existing)
+            return report
+
+        family_source_ids = {plan.canonical_source_id, *plan.related_source_ids}
+        report_sha256_before = self._canonical_sha256(report.model_dump(mode="json"))
+        relation_sha256_before = relation_metadata_sha256(report, family_source_ids)
+        immutable_sha256_before = immutable_report_sha256(report)
+        repaired = apply_duplicate_tracking_plan(report, plan)
+        report_sha256_after = self._canonical_sha256(repaired.model_dump(mode="json"))
+        relation_sha256_after = relation_metadata_sha256(repaired, family_source_ids)
+        immutable_sha256_after = immutable_report_sha256(repaired)
+
+        repair = ResearchSourceDuplicateTrackingRepair(
+            repair_id=self._stable_human_evidence_id(
+                "integrity_repair",
+                state.workflow_id,
+                quality_review_id,
+                finding.finding_id,
+            ),
+            workflow_id=state.workflow_id,
+            quality_review_id=quality_review_id,
+            finding_id=finding.finding_id,
+            repair_kind="research_source_duplicate_tracking",
+            document_family_id=plan.document_family_id,
+            canonical_source_id=plan.canonical_source_id,
+            canonical_evidence_id=plan.canonical_evidence_id,
+            related_source_ids=list(plan.related_source_ids),
+            merged_evidence_ids=list(plan.merged_evidence_ids),
+            report_sha256_before=report_sha256_before,
+            report_sha256_after=report_sha256_after,
+            relation_metadata_sha256_before=relation_sha256_before,
+            relation_metadata_sha256_after=relation_sha256_after,
+            immutable_content_sha256_before=immutable_sha256_before,
+            immutable_content_sha256_after=immutable_sha256_after,
+            provider_calls=0,
+            retrieval_calls=0,
+            rationale=(
+                "Preserved every Source, Evidence, URL, Research Question and content field; "
+                "added only the deterministic same-document-family merged Evidence relation."
+            ),
+        )
+        state.human_evidence_integrity_repairs.append(repair)
+        state.research_report = repaired.model_dump(mode="json")
+        state.collected_sources = [
+            source.model_dump(mode="json") for source in repaired.sources
+        ]
+        self.repository.save_report(repaired)
+        self.repository.save(state)
+        self.repository.create_human_evidence_integrity_repair_once(repair)
+        return repaired
+
     def _gate_summary(
         self,
         state: ResearcherWorkflowState,
         *,
         apply_repairs: bool,
+        apply_duplicate_tracking_repair: bool = False,
     ) -> HumanEvidenceGateSummary:
         if state.research_report is None or state.review_result is None:
             raise ValueError("Human Evidence Gate requires a report and Quality Review")
@@ -2212,7 +2303,24 @@ class ResearcherManager:
                     finding
                 ) != ResearchFindingType.HARD_INTEGRITY_FAILURE:
                     continue
-                if self._limitation_dedupe_repair_is_applicable(report, finding):
+                if is_duplicate_tracking_finding(finding):
+                    if not apply_duplicate_tracking_repair:
+                        continue
+                    duplicate_plan = self._duplicate_tracking_repair_plan(
+                        report, finding
+                    )
+                    if duplicate_plan is None:
+                        raise ValueError(
+                            "Duplicate tracking finding lost its repair classification"
+                        )
+                    report = self._repair_duplicate_document_tracking(
+                        state,
+                        report,
+                        quality_review_id=quality_review_id,
+                        finding=finding,
+                        plan=duplicate_plan,
+                    )
+                elif self._limitation_dedupe_repair_is_applicable(report, finding):
                     report = self._repair_report_limitation_duplicates(
                         state,
                         report,
@@ -2358,11 +2466,62 @@ class ResearcherManager:
     ) -> HumanEvidenceGateSummary:
         return self._gate_summary(self.repository.load(workflow_id), apply_repairs=False)
 
+    def repair_human_evidence_integrity(
+        self,
+        workflow_id: str,
+    ) -> ResearcherWorkflowState:
+        """Run one local allowlisted integrity-repair pass without external calls."""
+
+        state = self.repository.load(workflow_id)
+        if state.human_evidence_decision is not None:
+            raise ValueError(
+                "Researcher integrity repair must run before the Human Evidence Decision"
+            )
+        if state.status not in {
+            WorkflowStatus.BLOCKED.value,
+            WorkflowStatus.WAITING_HUMAN_EVIDENCE_REVIEW.value,
+        }:
+            raise ValueError(
+                "Researcher integrity repair requires BLOCKED or WAITING_HUMAN_EVIDENCE_REVIEW"
+            )
+
+        duplicate_repairs = [
+            item
+            for item in state.human_evidence_integrity_repairs
+            if isinstance(item, ResearchSourceDuplicateTrackingRepair)
+        ]
+        current = self._gate_summary(state, apply_repairs=False)
+        if current.eligible and duplicate_repairs:
+            for repair in duplicate_repairs:
+                self.repository.create_human_evidence_integrity_repair_once(repair)
+            if state.status != WorkflowStatus.WAITING_HUMAN_EVIDENCE_REVIEW.value:
+                self._prepare_human_evidence_gate(state)
+            return state
+
+        repair_count_before = len(state.human_evidence_integrity_repairs)
+        summary = self._prepare_human_evidence_gate(
+            state,
+            apply_duplicate_tracking_repair=True,
+        )
+        if len(state.human_evidence_integrity_repairs) == repair_count_before:
+            raise ValueError(
+                "No allowlisted deterministic Researcher integrity finding is repairable"
+            )
+        if not summary.eligible:
+            return state
+        return state
+
     def _prepare_human_evidence_gate(
         self,
         state: ResearcherWorkflowState,
+        *,
+        apply_duplicate_tracking_repair: bool = False,
     ) -> HumanEvidenceGateSummary:
-        summary = self._gate_summary(state, apply_repairs=True)
+        summary = self._gate_summary(
+            state,
+            apply_repairs=True,
+            apply_duplicate_tracking_repair=apply_duplicate_tracking_repair,
+        )
         if not summary.eligible:
             state.status = WorkflowStatus.BLOCKED
             state.error = {

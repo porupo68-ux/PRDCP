@@ -26,6 +26,7 @@ from .human_evidence import (
     HumanEvidenceIntegrityRepairRecord,
     HumanEvidenceSourceReclassificationRepair,
     ResearchReportIntegrityRepair,
+    ResearchSourceDuplicateTrackingRepair,
     ResearchFindingType,
     validate_human_evidence_integrity_repair,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "HumanEvidenceIntegrityRepairRecord",
     "HumanEvidenceSourceReclassificationRepair",
     "ResearchReportIntegrityRepair",
+    "ResearchSourceDuplicateTrackingRepair",
     "validate_human_evidence_integrity_repair",
     "ObservationType",
     "RESEARCH_TARGET_MAP",

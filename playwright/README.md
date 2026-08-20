@@ -61,14 +61,19 @@ asset参照は同一VisualPlan内で解決必須です。`limitations_to_disclos
 
 ## 14. Deterministic Citation Repair
 
-`--playwright-recover <workflow_id>`は、通常の`FAILED` checkpoint recoveryに加えて、Final Gateが
-`CITATION_MAPPING_MISSING`だけで`BLOCKED`になった場合のlocal repairを扱います。Script段落の
+Citation ManifestはScript Draftをclaim集合の正本とし、全claimを`supported_claim_ids`へ明示します。
+`citation_required=true`の全ParagraphはParagraph→Claim→Evidence→Sourceのmappingが必須です。
+`--playwright-recover <workflow_id>`は通常の`FAILED` checkpoint recoveryに加えて、Final Gateが
+`CITATION_MAPPING_MISSING`、`UNSUPPORTED_CLAIM_LIST_NOT_EMPTY`、または
+`UNSUPPORTED_CLAIM_REMAINS`だけで`BLOCKED`になった場合のlocal repairを扱います。Script段落の
 claim/evidence、Production Contextのevidence→source、Citation Manifestのsource locator、および
-保存済みmappingの意味分類が一意に一致するときだけ、欠落mappingを決定論的IDで再構成します。
+保存済み非unsupported mappingの意味分類が一意に一致するときだけ、欠落mappingとstale issue metadataを
+決定論的に再構成します。
 
-この経路はallowlist方式で、Provider/Retrievalを呼ばず、`revision_count`を消費しません。mapping競合、
-未知Evidence、locator不足、意味分類の不一致、accepted unresolved gapのEvidence化、または別のERRORが
-ある場合はFail Closedです。修復履歴と前後hashは
+この経路はallowlist方式で、Provider/Retrievalを呼ばず、`revision_count`を消費しません。Script本文、
+Conclusion、Narrative、Visualは変更せず、Citation Manifestと対応するCitation issue metadataだけを同期します。
+mapping競合、未知Evidence、locator不足、未支持claim、意味分類の不一致、accepted unresolved gapのEvidence化、
+または別のERRORがある場合はFail Closedです。修復履歴、件数監査、対象ID、前後hashは
 `artifacts/playwright_deterministic_repairs/<workflow_id>/`へ保存されます。完了後の同じrecoverはno-opで、
 Deliveryを二重生成しません。
 

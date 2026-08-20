@@ -15,6 +15,9 @@ class PlaywrightRepairDisposition(str, Enum):
 
 class PlaywrightDeterministicRepairType(str, Enum):
     CITATION_MAPPING_RECONSTRUCTION = "CITATION_MAPPING_RECONSTRUCTION"
+    CITATION_MANIFEST_CONTRACT_RECONSTRUCTION = (
+        "CITATION_MANIFEST_CONTRACT_RECONSTRUCTION"
+    )
 
 
 class PlaywrightDeterministicRepairRecord(BaseModel):
@@ -27,10 +30,21 @@ class PlaywrightDeterministicRepairRecord(BaseModel):
     finding_ids: list[str] = Field(min_length=1)
     paragraph_ids: list[str] = Field(min_length=1)
     claim_ids: list[str] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(min_length=1)
-    source_ids: list[str] = Field(min_length=1)
-    mapping_ids_added: list[str] = Field(min_length=1)
-    donor_mapping_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    mapping_ids_added: list[str] = Field(default_factory=list)
+    donor_mapping_ids: list[str] = Field(default_factory=list)
+    missing_mapping_ids: list[str] = Field(default_factory=list)
+    unsupported_claim_ids: list[str] = Field(default_factory=list)
+    repaired_mapping_ids: list[str] = Field(default_factory=list)
+    cleaned_unsupported_paragraph_ids: list[str] = Field(default_factory=list)
+    script_claim_count: int = Field(default=0, ge=0)
+    manifest_claim_count_before: int = Field(default=0, ge=0)
+    manifest_claim_count_after: int = Field(default=0, ge=0)
+    unsupported_claim_count_before: int = Field(default=0, ge=0)
+    unsupported_claim_count_after: int = Field(default=0, ge=0)
+    citation_mapping_count_before: int = Field(default=0, ge=0)
+    citation_mapping_count_after: int = Field(default=0, ge=0)
     citation_manifest_hash_before: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     citation_manifest_hash_after: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     final_conclusion_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -38,6 +52,14 @@ class PlaywrightDeterministicRepairRecord(BaseModel):
     narrative_blueprint_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     script_draft_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     citation_validated_script_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    citation_validated_script_hash_before: str = Field(
+        default="sha256:" + "0" * 64,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    citation_validated_script_hash_after: str = Field(
+        default="sha256:" + "0" * 64,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
     visual_plan_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     provider_calls: int = Field(default=0, ge=0, le=0)
     retrieval_calls: int = Field(default=0, ge=0, le=0)

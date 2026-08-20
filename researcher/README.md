@@ -34,7 +34,7 @@ Producerから受信し、DeliberationへCanonical PMP messageを送信します
 
 ## 9. Storage
 
-`storage/data/workflows/researcher/`、`retrieval_contexts/`、Artifacts、各種Authorization/Reservation、Deliberation向けOutboxを使用します。Human Decisionは`artifacts/human_evidence_decisions/<workflow_id>/<quality_review_id>.json`へcreate-onceで保存し、State更新やOutbox保存が中断してもRecoveryで同じ決定を再利用します。
+`storage/data/workflows/researcher/`、`retrieval_contexts/`、Artifacts、各種Authorization/Reservation、Deliberation向けOutboxを使用します。Human Decisionは`artifacts/human_evidence_decisions/<workflow_id>/<quality_review_id>.json`へ、決定論的integrity repairは`artifacts/human_evidence_integrity_repairs/<workflow_id>/<repair_id>.json`へcreate-onceで保存します。State更新やartifact/Outbox保存が中断してもRecoveryで同じidentityを再利用します。
 
 ## 10. Discord Operations
 
@@ -44,7 +44,9 @@ Producerから受信し、DeliberationへCanonical PMP messageを送信します
 
 Quality Review完了後は常に`WAITING_HUMAN_EVIDENCE_REVIEW`で停止します。`ACCEPT`は未解決Evidence findingがない場合だけ、`ACCEPT_WITH_LIMITATIONS`は全Evidence findingを未解決gapとして開示する場合だけ許可します。受容されたgapはEvidenceでも事実確認でもなく、下流は引用・根拠として使用できません。`REVISE`は追加調査計画を0-callで保存して停止し、Provider呼び出しには別の明示的authorizationが必要です。Schema、PMP、provenance等のhard integrity failureは人間判断で上書きできません。
 
-`--researcher-recover`はHuman Decisionを推測せず、保存済みdecision/state/outboxを照合します。同時に、完全一致limitation重複除去と限定されたSource分類修復だけをProvider/Retrieval 0件で実行できます。修復artifactは`repair_kind`で識別するcanonical discriminated unionであり、分類修復と`report_limitation_exact_deduplication`をResearcher保存、Deliberation読込、下流Handoffで同じ契約として検証します。元Quality Review、Source identity、本文、URL、Human Decisionは変更しません。
+`--researcher-recover`はHuman Decisionを推測せず、保存済みdecision/state/outboxを照合します。同時に、完全一致limitation重複除去と限定されたSource分類修復だけをProvider/Retrieval 0件で実行できます。同一公式文書の複数Sourceに文書系列relationだけが欠けるHard Findingは、明示的な`--researcher-integrity-repair WORKFLOW_ID`で修復します。発行者・正規化title・版・canonical本文候補・既存relationを保存済みReportだけで一意に証明できる場合に限り、全Sourceを保持してcanonical Sourceの`merged_evidence_ids`を再構成します。曖昧性やconflictはFail Closedであり、Evidence Gap、Human Decision、Quality Review、Revision budgetを変更しません。
+
+修復artifactは`repair_kind`で識別するcanonical discriminated unionです。分類修復、`report_limitation_exact_deduplication`、`research_source_duplicate_tracking`をResearcher保存、Deliberation読込、下流Handoffで同じ契約として検証します。元Quality Review、Source identity、本文、URL、Research Question、Human Decisionは変更しません。
 
 旧実行の局所Recoveryには`--researcher-runtime-model-repair`、`--researcher-runtime-output-repair`、`--researcher-runtime-adapter-repair`、`--researcher-runtime-identity-repair`、`--researcher-runtime-provenance-repair`があります。すべて既存Retrievalのhashと監査台帳を要求し、旧taskを再送しません。Retrieval Context自体が欠け、オペレーターが新規検索を承認する場合だけ`--researcher-retrieval-reconstruct`を使います。
 

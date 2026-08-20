@@ -1,0 +1,286 @@
+Cycle 045 — Researcher Deterministic Duplicate Tracking Repair
+================================================================
+
+対象
+----
+
+Workflow:
+0dac620d-4a97-42d2-822c-71b3570f85ab
+
+目的:
+文部科学省「初等中等教育段階における生成AIの利活用に関する
+ガイドライン（Ver. 2.0）」について、PDF本文、掲載ページ、改訂通知が
+別Sourceとして正しく保存されている一方で、同一文書系列としての追跡関係が
+欠けていた問題を、Provider/Retrievalを呼ばずに修復する。
+
+
+何が起きたか
+------------
+
+Research Reportには21 Sourcesと3 Quality Findingsが保存されていた。
+
+- Evidence Sufficiency Finding 2件
+  - finding-rq001-missing-industry
+  - finding-rq003-missing-news
+- Hard Integrity Finding 1件
+  - finding-mext-guideline-duplicate-tracking
+
+Evidence不足2件はHuman Decisionの対象だが、duplicate tracking不整合は
+Human Overrideできないため、Human Evidence Gateは閉じたままBLOCKEDだった。
+
+
+なぜ起きたか
+------------
+
+URL identityとSource identityを分けて保持する設計は正しく働いていた。
+PDF本文、HTML掲載ページ、改訂通知はURLと役割が異なるため、3 Sourceとして
+保持するのが正しい。しかしSource統合後に「同一文書系列」というrelationを
+canonicalに記録する処理がなく、各Sourceのmerged_evidence_idsが自己参照だけに
+留まった。そのため、Evidence自体は失われていないが、重複・派生関係を下流が
+追跡できない状態になった。
+
+この問題は追加検索やLLM再分析では解決しない。保存済みmetadataから一意に
+証明できるrelationだけをローカルで再構成する必要があった。
+
+
+どう直したか
+------------
+
+1. Canonical owner
+   - repairability判定とrelation-only mutationをresearcher/integrity_repair.pyへ分離。
+   - Researcher AgentにはEvidence変更権限を追加していない。
+
+2. Fail Closed判定
+   - duplicate tracking系Manager findingであること。
+   - Findingが既存Sourceを2件以上明示すること。
+   - 全Sourceが同一公式host、同一発行組織、primary GOVERNMENTであること。
+   - 正規化文書title、単一version、Finding内Evidence IDが一致すること。
+   - 公式本文のcanonical Sourceを一意に選べること。
+   - 既存relationが別familyを指していないこと。
+   - 版、発行者、canonical候補、relationに曖昧性があれば無変更で停止すること。
+
+3. Content-preserving repair
+   - canonical Source:
+     source_494069a566daff953439ee54
+   - canonical Evidence:
+     evidence_mext_guideline_k12_2024
+   - related Sources:
+     source_5d706db6a0c176223171b43e
+     source_c621935f8f9c45d0c50924da
+   - merged Evidence:
+     evidence_mext_guideline_page
+     evidence_c621935f8f9c45d0c50924da_01
+   - document family:
+     docfam_77465bf609175fac55e833ab
+
+   Source/Evidenceの削除や統合は行わず、canonical Sourceと対応する
+   SourceMetadataRecordのmerged_evidence_idsだけを更新した。
+
+4. Canonical audit contract
+   - HumanEvidenceIntegrityRepair discriminated unionへ
+     research_source_duplicate_trackingを追加。
+   - artifact typeはRESEARCH_SOURCE_DUPLICATE_TRACKING_REPAIR。
+   - report、relation metadata、relation以外の不変Report内容について前後hashを保存。
+   - provider_calls=0、retrieval_calls=0を型で固定。
+   - Researcher state、standalone create-once artifact、Deliberation consumerが同じ
+     canonical unionを使用する。
+
+5. 明示的CLI境界
+   - --researcher-integrity-repair WORKFLOW_IDを追加。
+   - --researcher-recoverは障害復旧のままとし、新relation repairを暗黙実行しない。
+   - --researcher-reviseはEvidence不足用のまま維持。
+   - --statusは該当Hard Findingに専用repairコマンドを案内する。
+
+6. Fault recovery
+   - Report/state保存後、standalone artifact保存前に停止しても、state内の同一repair
+     identityとhashを照合してartifactを補完し、Human Gate遷移を完了できる。
+   - 異なるpayloadで同じrepair_idを上書きすることは拒否する。
+
+
+設計上の意味
+------------
+
+Sourceの重複は削除対象ではなく、同一文書系列として関係性を正規化する対象とした。
+これにより、PDF、landing page、notice等の異なるprovenanceを失わずに、下流が
+canonical Evidenceと関連Evidenceを追跡できる。
+
+また、Evidence不足とIntegrity不整合の責務を分離した。Evidence不足はHumanが
+ACCEPT_WITH_LIMITATIONSまたはREVISEを選択できるが、Integrity不整合は先に
+決定論的に直す必要がある。Integrity repairはLLM Revision budgetを消費しない。
+
+
+同系統Failure Mode監査
+----------------------
+
+変更後に以下を再検索・監査した。
+
+- merged_evidence_ids
+- canonical_source_id
+- document_family_id
+- duplicate tracking
+- researcher-integrity-repair
+- researcher-recover
+- researcher-revise
+- HumanEvidenceIntegrityRepairの全producer/persistence/direct consumer
+
+確認した伝播経路:
+
+canonical schema owner
+  -> Researcher Manager producer
+  -> Researcher state / standalone artifact persistence
+  -> Researcher Deliberation outbox
+  -> Deliberation direct consumer / Research Context
+  -> Conclusion / Playwright / Deliveryを含む5層Mock E2E
+
+旧単一repair型を再定義する現行consumerは残っていない。新relation metadataは既存の
+SourceSpecificMetadata拡張merged_evidence_idsを使用するため、22 OpenRouter Structured
+Output root schema数やLLM出力契約を増やしていない。RD上のAgent責務も変更していない。
+
+
+Regression / Fault Injection結果
+---------------------------------
+
+Targeted Cycle 045 tests: 9/9 PASS
+
+- basic three-Source repair
+- ID/URL/content/RQ/category保持
+- exact idempotency
+- generic researcher-recoverとの責務分離
+- different version拒否
+- different publisher拒否
+- ambiguous canonical拒否
+- existing correct relation no-op + audit
+- conflicting relation拒否
+- artifact write fault後の0-call recovery
+- ACCEPT_WITH_LIMITATIONS persist/reload/downstream validation
+- REVISE planとRevision 0/3維持
+
+全Regression:
+
+- 592 tests PASS（637.244秒）
+- compileall PASS
+- 31 Role Definitions STRICT PASS
+- 22 OpenRouter Structured Output root Schema recursive audit PASS
+- Doctor READY（fail=0、optional warning=3）
+- 5層Mock E2E PASS
+- Delivery 6 files PASS
+
+Doctorのwarningは、検証環境でDiscord optional dependency/tokenとOpenRouter API keyを
+設定していないことによる。今回の0-call修復とMock E2Eの失敗ではない。
+
+
+Production Clone
+----------------
+
+実storageを一切変更せず、一時data rootへworkflow全境界を複製して確認した。
+
+- initial status: BLOCKED
+- Sources: 21 -> 21
+- Revision: 0/3 -> 0/3
+- Hard Findings: 1 -> 0
+- Resolved Integrity Findings: 0 -> 1
+- Evidence Sufficiency Findings: 2 -> 2
+- gate: WAITING_HUMAN_EVIDENCE_REVIEW
+- clone-only Human ACCEPT_WITH_LIMITATIONS後のDeliberation contract: PASS
+- Provider calls: 0
+- Retrieval calls: 0
+- repeated repair writes: 0
+- production source storage mutated: false
+
+
+Production適用
+--------------
+
+実行前:
+
+- state SHA-256:
+  0EED237F9FA74EC82BA8D680CAD9AD69AD523BC365DC8AB3958F5F6E99B51EB1
+- report SHA-256:
+  C6FEF8EC5D6A45A3EA600A6C3CD966D71CE6A0C5776B3DA54AF267B1FA4533B8
+- workflow Provider reservations: 15
+- workflow Retrieval reservations: 10
+- global Provider reservations: 921
+- global Retrieval reservations: 30
+- repair artifacts: 0
+
+Mock Provider / Mock Retrieval / Safe Mode固定で、次のCLIを一度実行した。
+
+--researcher-integrity-repair 0dac620d-4a97-42d2-822c-71b3570f85ab
+
+実行後:
+
+- state: WAITING_HUMAN_EVIDENCE_REVIEW
+- Sources: 21
+- Revision: 0/3
+- Hard Integrity Findings: 0
+- Resolved Integrity Findings: 1
+- Evidence Sufficiency Findings: 2
+- Human Gate Eligible: YES
+- Human Decision: 未記録
+- repair state records: 1
+- standalone repair artifacts: 1
+- Provider calls: 0
+- Retrieval calls: 0
+- workflow Provider reservations: 15（不変）
+- workflow Retrieval reservations: 10（不変）
+- global Provider reservations: 921（不変）
+- global Retrieval reservations: 30（不変）
+- relation以外のimmutable content hash: 前後一致
+
+更新後hash:
+
+- state SHA-256:
+  5CD3C34B1A4A2DF567E0CD412774924C594659C1291EDDF2B6D66566072E34D4
+- report SHA-256:
+  F163E5F428889B4FA8CBA839A195687293BB63846DEA46EB75CBAB645B2D1CB3
+
+変更されなかった既存境界:
+
+- Producer state:
+  1183F884751FFCEF3E6E35567CC2EF37DD1B9C98CA2679BF87127BD4B9ED3AE8
+- Producer messages:
+  3AF63343549A23D5A654422CE3A34CA73C1904B59411B9A75D964F0D5B5FDDAB
+- Researcher messages:
+  D982EFB89EB2730AF73B17600B2C6102A950206E216F29EC8E42B6C00C35FA4A
+- Researcher outbox:
+  EF0B47CA9498A3A52B735C977A326D698D15A341E3AB298A52B12A2DF88F75C3
+
+
+Provider Cost
+-------------
+
+Cycle 045 Real Provider calls: 0
+Cycle 045 Retrieval calls: 0
+推定API cost: $0.00
+
+
+今後の防止
+----------
+
+- duplicate relation repairは専用CLIでだけ明示実行する。
+- 同一文書と判断できない類似文書は自動統合しない。
+- Source/Evidence/URL/content/RQ/categoryの不変hashを修復artifactへ固定する。
+- repair identityはQuality Review + Findingに対して決定的に生成し、create-once保存する。
+- persist -> reload -> downstream validationとFault Injectionを回帰に維持する。
+- canonical contract変更時はowner -> producer -> persistence -> direct consumer ->
+  transitive downstream -> Deliveryを必ず再監査する。
+
+
+Self Audit
+----------
+
+- 根本原因まで特定: YES
+- 症状だけの局所patch回避: YES
+- 同系統Failure Mode監査: YES
+- 他Layerへの影響確認: YES
+- State/PMP/Schema/Checkpoint/Reservation/Outbox影響確認: YES
+- Regression Test追加: YES
+- Recovery/Fault条件確認: YES
+- Debug Report生成: YES
+- 設計上の意味を説明: YES
+- 不要なProvider呼び出しなし: YES
+- 既存workflow削除/初期化なし: YES
+- Human Decisionの無断記録なし: YES
+
+Cycle 045の修復作業は完了。対象workflowは、残るEvidence Gap 2件に対する
+Human Decisionを待つ状態で停止している。

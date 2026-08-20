@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_9827364a7898082253bad290",
+  "workflow_id": "2cba35c8-aac6-41fa-bbf2-d2c60a77a524",
+  "task_id": "general_opinion_topic_6fc78830d6b64dad9b1243ee4033548f_74234e98",
+  "agent_id": "producer.general_opinion_analyst",
+  "strategy": "GENERAL_OPINION",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-20T10:29:31.857635+00:00"
+}

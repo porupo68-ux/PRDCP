@@ -59,7 +59,11 @@ from playwright.state import (
     PlaywrightWorkflowState,
     utc_now,
 )
-from playwright.validator import PlaywrightValidator, canonical_hash
+from playwright.validator import (
+    PlaywrightValidator,
+    canonical_hash,
+    canonical_script_claim_ids,
+)
 from playwright.workflow import (
     AGENT_ORDER,
     EVIDENCE_CITATION_EDITOR_ID,
@@ -612,6 +616,9 @@ class PlaywrightManager:
         self._validate_recovery_identity(state)
         result = self.deterministic_repairer.repair(state)
         state.citation_manifest = result.citation_manifest.model_dump(mode="json")
+        state.citation_validated_script = (
+            result.citation_validated_script.model_dump(mode="json")
+        )
         state.deterministic_repair_count += 1
         state.deterministic_repair_history.append(result.record)
         state.status = PlaywrightStatus.VALIDATING_PACKAGE
@@ -721,6 +728,7 @@ class PlaywrightManager:
                         self._preserve_canonical_disclosures(
                             citation_result,
                             context,
+                            script,
                         )
                     )
                     state.citation_validated_script = validated_script.model_dump(mode="json")
@@ -731,6 +739,26 @@ class PlaywrightManager:
                 else:
                     validated_script = CitationValidatedScript.model_validate(state.citation_validated_script)
                     citation_manifest = CitationManifest.model_validate(state.citation_manifest)
+
+                # Script Draft owns the claim set.  Bind and persist that
+                # canonical set before any downstream Provider receives the
+                # Citation Manifest, including recovery from older checkpoints.
+                citation_manifest = self._bind_canonical_manifest_claims(
+                    citation_manifest,
+                    script,
+                )
+                canonical_manifest_payload = citation_manifest.model_dump(mode="json")
+                if state.citation_manifest != canonical_manifest_payload:
+                    state.citation_manifest = canonical_manifest_payload
+                    self.repository.save_citation_manifest(
+                        citation_manifest,
+                        state.workflow_id,
+                    )
+                    self.repository.save(state)
+                self.validator.assert_manifest_claim_contract(
+                    script_draft=script,
+                    citation_manifest=citation_manifest,
+                )
 
                 if rerun_from <= 3 or not state.visual_plan:
                     state.status = PlaywrightStatus.DESIGNING_VISUALS
@@ -862,6 +890,7 @@ class PlaywrightManager:
     def _preserve_canonical_disclosures(
         citation_result: CitationEditingResult,
         context: ProductionContext,
+        script: ScriptDraft,
     ) -> tuple[CitationValidatedScript, CitationManifest]:
         """Keep canonical disclosure metadata under Manager ownership.
 
@@ -876,6 +905,7 @@ class PlaywrightManager:
         )
         manifest = citation_result.citation_manifest.model_copy(
             update={
+                "supported_claim_ids": canonical_script_claim_ids(script),
                 "disclosure_checks": [
                     DisclosureCheck(limitation=item, preserved=True)
                     for item in limitations
@@ -883,6 +913,15 @@ class PlaywrightManager:
             }
         )
         return validated_script, manifest
+
+    @staticmethod
+    def _bind_canonical_manifest_claims(
+        manifest: CitationManifest,
+        script: ScriptDraft,
+    ) -> CitationManifest:
+        return manifest.model_copy(
+            update={"supported_claim_ids": canonical_script_claim_ids(script)}
+        )
 
     async def _execute_agent(
         self,

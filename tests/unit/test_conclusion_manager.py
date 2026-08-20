@@ -9,7 +9,10 @@ from uuid import uuid4
 from common.models.errors import ProviderResponseContractError
 from common.models.pmp import PMPMessage
 from common.structured_outputs import strict_output_schema, strict_schema_violations
-from conclusion.manager import ConclusionManager
+from conclusion.manager import (
+    CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX,
+    ConclusionManager,
+)
 from conclusion.schemas import (
     ConclusionPackage,
     ConclusionQualityReviewOutput,
@@ -97,6 +100,28 @@ class _RepeatedEvaluationProvider(MockModelProvider):
         if kwargs["output_schema"] is DecisionEvaluationResult:
             evaluations = deepcopy(payload["candidate_evaluations"])
             payload["candidate_evaluations"] = evaluations * 4
+        return payload
+
+
+class _IncompleteCandidateCoverageProvider(MockModelProvider):
+    """Omit two candidates' evaluation rows for a bounded number of calls."""
+
+    def __init__(self, *, reservation_root: Path, failed_attempts: int = 1) -> None:
+        super().__init__(reservation_root=reservation_root)
+        self.failed_attempts = failed_attempts
+        self.evaluation_attempts = 0
+
+    async def generate_structured(self, **kwargs) -> dict:
+        payload = await super().generate_structured(**kwargs)
+        if kwargs["output_schema"] is DecisionEvaluationResult:
+            self.evaluation_attempts += 1
+            if self.evaluation_attempts <= self.failed_attempts:
+                first_id = payload["comparison_matrix"][0]["candidate_id"]
+                payload["candidate_evaluations"] = [
+                    item
+                    for item in payload["candidate_evaluations"]
+                    if item["candidate_id"] == first_id
+                ]
         return payload
 
 
@@ -741,6 +766,96 @@ class ConclusionManagerTests(unittest.TestCase):
                 3 * 14,
             )
             self.assertEqual(provider.calls.count("DecisionEvaluationResult"), 1)
+
+    def test_candidate_coverage_contract_recovery_reruns_only_evaluator(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            provider = _IncompleteCandidateCoverageProvider(
+                reservation_root=data_dir / "provider_call_reservations"
+            )
+            manager = make_conclusion_manager(
+                data_dir,
+                provider,
+                demo_safe_mode=True,
+            )
+
+            failed = asyncio.run(
+                manager.start_from_message(make_conclusion_handoff(data_dir, provider))
+            )
+
+            self.assertEqual(failed.status, "FAILED")
+            self.assertTrue(failed.candidate_coverage_checked)
+            self.assertFalse(failed.candidate_coverage_passed)
+            self.assertEqual(
+                failed.candidate_coverage_audit.candidate_count_position_generator,
+                3,
+            )
+            self.assertEqual(
+                failed.candidate_coverage_audit.candidate_count_evaluation,
+                1,
+            )
+            self.assertEqual(
+                failed.candidate_coverage_audit.candidate_count_matrix,
+                3,
+            )
+            saved_position = deepcopy(failed.position_generation)
+
+            recovered = asyncio.run(manager.recover(failed.workflow_id))
+            reloaded = manager.repository.load(failed.workflow_id)
+
+            self.assertEqual(recovered.status, "WAITING_HUMAN_SELECTION")
+            self.assertEqual(recovered.position_generation, saved_position)
+            self.assertTrue(reloaded.candidate_coverage_checked)
+            self.assertTrue(reloaded.candidate_coverage_passed)
+            self.assertEqual(
+                reloaded.candidate_coverage_audit.candidate_evaluation_row_count,
+                42,
+            )
+            self.assertTrue(
+                reloaded.candidate_coverage_audit.recovery_task_id.endswith(
+                    CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX
+                )
+            )
+            self.assertEqual(provider.calls.count("PositionGenerationResult"), 1)
+            self.assertEqual(provider.calls.count("DecisionEvaluationResult"), 2)
+            self.assertEqual(provider.calls.count("DecisionIntegrationResult"), 1)
+            self.assertEqual(provider.calls.count("ConclusionQualityReviewOutput"), 1)
+            evaluator_task_ids = [
+                message.payload["task_id"]
+                for message in recovered.message_history
+                if message.sender_agent_id == "conclusion.manager"
+                and message.receiver_agent_id == DECISION_EVALUATOR_ID
+            ]
+            self.assertEqual(len(evaluator_task_ids), 2)
+            self.assertEqual(len(set(evaluator_task_ids)), 2)
+            self.assertTrue(
+                evaluator_task_ids[-1].endswith(
+                    CANDIDATE_COVERAGE_CONTRACT_REPAIR_SUFFIX
+                )
+            )
+
+    def test_candidate_coverage_contract_repair_is_one_shot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            provider = _IncompleteCandidateCoverageProvider(
+                reservation_root=data_dir / "provider_call_reservations",
+                failed_attempts=2,
+            )
+            manager = make_conclusion_manager(
+                data_dir,
+                provider,
+                demo_safe_mode=True,
+            )
+            failed = asyncio.run(
+                manager.start_from_message(make_conclusion_handoff(data_dir, provider))
+            )
+            repair_failed = asyncio.run(manager.recover(failed.workflow_id))
+
+            self.assertEqual(repair_failed.status, "FAILED")
+            self.assertEqual(provider.calls.count("DecisionEvaluationResult"), 2)
+            with self.assertRaisesRegex(ValueError, "coverage contract repair is exhausted"):
+                asyncio.run(manager.recover(failed.workflow_id))
+            self.assertEqual(provider.calls.count("DecisionEvaluationResult"), 2)
 
     def test_invalid_evaluation_reference_fault_retries_only_failed_stage(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1510,6 +1625,22 @@ class ConclusionManagerTests(unittest.TestCase):
                 evaluation_schema["$defs"]["ConditionalAdvantage"]["properties"]
                 ["advantaged_candidate_ids"]["items"]["enum"],
                 candidate_ids,
+            )
+            self.assertEqual(
+                evaluation_schema["properties"]["candidate_evaluations"]["minItems"],
+                3 * 14,
+            )
+            self.assertEqual(
+                evaluation_schema["properties"]["candidate_evaluations"]["maxItems"],
+                3 * 14,
+            )
+            self.assertEqual(
+                evaluation_schema["properties"]["comparison_matrix"]["minItems"],
+                3,
+            )
+            self.assertEqual(
+                evaluation_schema["properties"]["comparison_matrix"]["maxItems"],
+                3,
             )
             integration_input = {
                 "task_id": "integration_task_dynamic_schema",

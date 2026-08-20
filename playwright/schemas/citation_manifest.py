@@ -80,6 +80,12 @@ class CitationManifest(BaseModel):
 
     citation_manifest_id: str = Field(min_length=1)
     script_draft_id: str = Field(min_length=1)
+    # Script Draft is the canonical owner of the claim set.  This field is
+    # persisted explicitly so downstream validation and Delivery never have
+    # to infer claim coverage from issue lists or a subset of mappings.
+    # The default keeps pre-Cycle-047 artifacts readable; the Manager binds
+    # the canonical value before a newly generated Manifest is persisted.
+    supported_claim_ids: list[str] = Field(default_factory=list)
     mappings: list[CitationMapping] = Field(default_factory=list)
     unsupported_claims: list[CitationIssue] = Field(default_factory=list)
     partially_supported_claims: list[CitationIssue] = Field(default_factory=list)
@@ -93,6 +99,8 @@ class CitationManifest(BaseModel):
         ids = [item.citation_mapping_id for item in self.mappings]
         if len(ids) != len(set(ids)):
             raise ValueError("citation_mapping_id values must be unique")
+        if len(self.supported_claim_ids) != len(set(self.supported_claim_ids)):
+            raise ValueError("supported_claim_ids values must be unique")
         return self
 
 
@@ -189,6 +197,7 @@ class CitationEditingResult(BaseModel):
             schema,
             list_fields={
                 "claim_ids": claim_ids,
+                "supported_claim_ids": claim_ids,
                 "evidence_ids": evidence_ids,
                 "source_ids": source_ids,
             },
@@ -201,6 +210,32 @@ class CitationEditingResult(BaseModel):
                 "source_id": source_ids,
             },
         )
+        # The enum prevents unknown IDs; exact bounds plus Pydantic's
+        # uniqueness validator prevent a partial known-ID claim set from being
+        # accepted as a complete Citation Manifest.
+        supported_targets: list[dict[str, Any]] = []
+
+        def find_supported_claims(node: Any) -> None:
+            if isinstance(node, dict):
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    target = properties.get("supported_claim_ids")
+                    if isinstance(target, dict):
+                        supported_targets.append(target)
+                for child in node.values():
+                    find_supported_claims(child)
+            elif isinstance(node, list):
+                for child in node:
+                    find_supported_claims(child)
+
+        find_supported_claims(schema)
+        if len(supported_targets) != 1:
+            raise ValueError(
+                "strict schema expected one supported_claim_ids field, found "
+                f"{len(supported_targets)}"
+            )
+        supported_targets[0]["minItems"] = len(claim_ids)
+        supported_targets[0]["maxItems"] = len(claim_ids)
         mapping_variants = []
         for _section, paragraph in paragraphs:
             paragraph_id = str(paragraph.get("paragraph_id") or "")

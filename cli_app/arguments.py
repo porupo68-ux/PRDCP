@@ -51,6 +51,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     operation.add_argument(
+        "--researcher-integrity-repair",
+        metavar="WORKFLOW_ID",
+        help=(
+            "保存済みResearch Reportのallowlist対象Hard Integrity Findingを、"
+            "Provider/Retrieval呼び出し0件で一回だけ決定論的に修復する"
+        ),
+    )
+    operation.add_argument(
         "--researcher-evidence",
         metavar="WORKFLOW_ID",
         help="Human Evidence GateのIntegrity Finding・Evidence Gap・次の選択肢を表示する",

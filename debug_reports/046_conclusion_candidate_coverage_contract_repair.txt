@@ -1,0 +1,295 @@
+Cycle 046 — Conclusion Candidate Coverage Contract Repair
+==========================================================
+
+対象
+----
+
+Workflow:
+0dac620d-4a97-42d2-822c-71b3570f85ab
+
+停止位置:
+Conclusion Decision Evaluator
+
+目的:
+DecisionEvaluationResultのcandidate_evaluationsとcomparison_matrixが、
+保存済みPosition Generatorの3候補を同一集合として完全に覆うことを、
+Provider送信schemaと受信後validationの両方で保証する。
+
+
+何が起きたか
+------------
+
+保存済みPosition Generator Resultには3候補が存在した。
+
+- pc_01_conditional_integration
+- pc_02_foundational_protection
+- pc_03_literacy_and_authentic_assessment
+
+OpenRouterから返ったDecision Evaluator payloadでは、comparison_matrixは3候補を
+含んでいたが、candidate_evaluationsはpc_01の14基準分だけだった。pc_02とpc_03の
+28評価行が欠けていたため、既存Pydantic validatorが次の不一致を検出して停止した。
+
+candidate_evaluations and comparison_matrix must cover the same candidates
+
+これは通信切断、HTTP障害、Provider capability不足ではない。課金済み応答内容が
+意味契約を満たさなかったPayloadValidationErrorである。
+
+
+なぜ起きたか
+------------
+
+既存のrequest-specific strict schemaはcandidate_idを入力3候補のenumへ拘束していた。
+しかしcandidate_evaluationsはminItems=2/maxItems=70、comparison_matrixは
+minItems=2/maxItems=5という静的な範囲だけだった。このため、未知candidate IDは
+生成できなくても、既知candidateの一部だけを返すpayloadはProvider側schemaを通過
+できた。
+
+既存Pydantic validatorは正しくFail Closedしたが、検出位置が有料Provider応答後だった。
+Mock fixtureは常に3候補×14基準を返すため通常Mock E2Eでは再現せず、Doctorはmodel/
+endpoint capabilityとroot schemaのstrict適合性を検査するもので、request依存の候補数を
+検査していなかった。22 root schema監査もinput_dataなしの汎用上限schemaだけを見ていた。
+
+
+どう直したか
+------------
+
+1. Request-specific strict schema
+   - candidate_evaluationsを入力候補数×入力criteria数のexact cardinalityへ固定。
+   - comparison_matrixを入力候補数のexact cardinalityへ固定。
+   - 本workflowでは42行と3行になる。
+   - 既存candidate_id enum拘束を維持する。
+
+2. 二段階のCanonical Contract
+   - request境界では保存済みPosition Generatorの候補IDをallowlistの正本とする。
+   - DecisionEvaluationResult内部ではcandidate_evaluationsとcomparison_matrixの
+     candidate集合を順序非依存で完全一致させる。
+   - 同一candidate/criterionの重複、14基準の欠落、rating不一致は既存validatorで
+     引き続き拒否する。
+
+3. Manager側Coverage Check
+   - Provider成功PMPの後、Decision Integratorを呼ぶ前にPosition候補、評価候補、
+     比較候補、評価行数を再照合する。
+   - 不足・余分・ID違いはDecision Integratorへ渡さずFail Closedする。
+   - 欠けた評価を推測して埋めるdeterministic repairは実装していない。
+
+4. Persisted Audit
+   - candidate_coverage_checked
+   - candidate_coverage_passed
+   - candidate_count_position_generator
+   - candidate_count_evaluation
+   - candidate_count_matrix
+   - candidate_evaluation_row_count
+   - expected_candidate_evaluation_row_count
+   - missing_candidate_ids / extra_candidate_ids
+   - source_task_id / recovery_task_id
+
+5. Legacy checkpoint recovery
+   - 保存済みERROR PMPがDecision EvaluatorのPayloadValidationErrorであること。
+   - invalid_payloadが保存され、実際にCandidate Coverage不一致であること。
+   - Position checkpointが有効であること。
+   - 上記を満たす旧失敗だけ、--conclusion-recoverからDecision Evaluatorを再実行する。
+   - task identityは次の一回限りidentityを使用する。
+
+     conclusion_decision_evaluation_upstream_0_revision_0_candidate_coverage_contract_repair_1
+
+   - 同identityの二回目実行はreservationまたは明示的exhaustion判定で拒否する。
+   - 一般の通信障害、reference不整合、他schema errorは従来のProvider retry/
+     contract repair契約を使い、この専用経路へ入れない。
+
+
+設計上の意味
+------------
+
+strict schemaを「型とID候補の制限」だけでなく「入力集合に依存する完全被覆契約」へ
+拡張した。これにより、ProviderにはAPI送信前に42/3という必要件数を提示し、返却後は
+PydanticとManagerが内容・集合・上流checkpointを再検証する。
+
+計画書の「不一致ならProvider送信前に停止」は、未生成の出力を送信前に検査することは
+できないため、送信前にexact schemaを構築・検証し、返却後は次のProvider工程である
+Decision Integratorの送信前に停止する、という実行可能な境界として実装した。
+
+また、このFailureは同じ通信taskの再送ではなく、旧request contractの欠陥を直した後の
+checkpoint recoveryである。元reservationを削除せず、新しい監査可能identityを一度だけ
+使用することで、二重課金防止と局所復旧を両立する。
+
+
+同系統Failure Mode監査
+----------------------
+
+Decision Evaluation内の全candidate参照を再監査した。
+
+- CandidateCriterionEvaluation.candidate_id
+- CandidateComparison.candidate_id
+- ConditionalAdvantage.advantaged_candidate_ids
+- DisqualificationFinding.candidate_id
+- SensitivityResult.preferred_candidate_ids
+- EvaluationInformationGap.candidate_id
+- EvaluationRevisionRecommendation.candidate_id
+
+全scalar/list参照は既存のrequest-specific enum bindingを共有している。
+Decision IntegrationとConclusion Quality Reviewにも候補allowlistが伝播しており、今回の
+変更でSchema root数、PMP保存形式、Position Generator、Integrator、Reviewer、他4層の
+責務は変更していない。
+
+通常Provider retry、distinct-model contract repair、Revision、Result PMP checkpoint復元、
+Safe Mode、Reservation、Outbox、Human Selectionを全回帰で確認した。
+
+
+Regression / Fault Injection結果
+---------------------------------
+
+Targeted:
+
+- 3候補 / 3候補: PASS
+- 評価候補不足: Fail Closed
+- 評価候補余分: Fail Closed
+- candidate ID違い: Fail Closed
+- candidate順不同: PASS
+- 3候補×14基準=42行、matrix=3行のdynamic schema: PASS
+- persist -> reload -> coverage audit: PASS
+- Decision Evaluatorだけのcheckpoint recovery: PASS
+- 同じcoverage repairの二回目: Provider call前に拒否
+- 既存Position checkpoint再利用: PASS
+- Decision Integrator/Quality Reviewerへの正常遷移: PASS
+
+全Regression:
+
+- compileall: PASS
+- 598 tests: PASS（595.244秒）
+- Conclusion targeted 40 tests（最終小変更後）: PASS
+- 31 Role Definitions STRICT: PASS
+- 22 OpenRouter Structured Output root Schema recursive audit: PASS
+- Doctor: READY（fail=0、optional warning=3）
+- 5層Mock E2E: PASS
+- Delivery 6 files: PASS
+
+Doctor warningは検証用Mock環境でDiscord dependency/tokenとOpenRouter API keyを設定して
+いないことによる。今回のSchema/Recovery検証の失敗ではない。
+
+
+Production Clone
+----------------
+
+実storageを一切変更せず、一時data rootへworkflow全境界を複製して確認した。
+
+- initial status: FAILED
+- Position candidates: 3
+- invalid candidate_evaluations candidates: 1
+- invalid comparison_matrix candidates: 3
+- recovery calls:
+  - DecisionEvaluationResult
+  - DecisionIntegrationResult
+  - ConclusionQualityReviewOutput
+- Position Generator再実行: 0
+- recovered evaluation rows: 42
+- coverage passed: true
+- recovered gate: WAITING_HUMAN_SELECTION
+- Retrieval calls: 0
+- Real Provider calls: 0
+- production source storage mutated: false
+
+
+Production適用
+--------------
+
+ユーザーから対象workflowについて、Retrieval 0件、Decision Evaluator・Decision Integrator・
+Quality Review各最大1件、および必要なstate/messages/reservation/outbox更新の明示承認を
+受けた後、次を一度実行した。
+
+--conclusion-recover 0dac620d-4a97-42d2-822c-71b3570f85ab --provider openrouter --safe-mode
+
+実行前:
+
+- Conclusion state: FAILED
+- completed: conclusion.position_generator
+- failed: conclusion.decision_evaluator
+- Position candidates: 3
+- Decision Evaluation: 未保存
+- Conclusion state SHA-256:
+  2EDBE776AF2ADED9FF15033EF6A9D590F39A645BC31EB1159343D3510CCD8782
+- Conclusion messages SHA-256:
+  503469E51E2747AC77FB5F84D7568969141E27CD6F15ED3E7DBD115DDB4B85D3
+- workflow Provider reservations: 25
+- workflow Retrieval reservations: 10
+- original Decision Evaluation reservation: 保持
+- coverage repair reservation: 未作成
+
+実行後:
+
+- Conclusion state: WAITING_HUMAN_SELECTION
+- completed Agents: 4
+- failed/current Agents: 0
+- Position candidates: 3（保存済みcheckpointを再利用）
+- Decision Evaluation rows: 42
+- comparison matrix rows: 3
+- candidate_coverage_checked: true
+- candidate_coverage_passed: true
+- missing/extra candidates: 0/0
+- deterministic validation: passed
+- Quality Review: approved_with_conditions
+- limitations_to_disclose: 4
+- active error: なし
+- Human Selection: 未記録
+- Playwright outbox: 未作成
+- Conclusion state SHA-256:
+  409C49A855C20EEA421A6C29B09CEFAC554ADF0303FE499F08D0FE404CA42368
+- Conclusion messages SHA-256:
+  CDBC2C34F6F9601DE3A1FB40A14B28FB47444F7E5F6879426B43799C08E04785
+- workflow Provider reservations: 28（+3）
+- workflow Retrieval reservations: 10（不変）
+
+追加されたProvider identities:
+
+- conclusion_decision_evaluation_upstream_0_revision_0_candidate_coverage_contract_repair_1
+- conclusion_decision_integration_upstream_0_revision_0
+- conclusion_quality_review_upstream_0_revision_0
+
+最初の実行要求は承認文言が曖昧として安全審査によりProcess起動前に拒否された。
+その試行ではProvider call、reservation、state更新は0件だった。明示承認後の一回だけが
+実際に起動し、3 taskすべて成功した。自動再送、Retrieval、Position再実行はない。
+
+
+Provider Cost
+-------------
+
+Cycle 046 Real Provider calls: 3
+Cycle 046 Retrieval calls: 0
+Provider別内訳:
+
+- Decision Evaluator: 1
+- Decision Integrator: 1
+- Quality Review: 1
+
+実測API costは現在のProvider response/persisted reservation契約に保存されないため取得不能。
+
+
+今後の防止
+----------
+
+- request依存の集合完全性はenumだけでなくexact minItems/maxItemsも生成する。
+- Mock fixtureの正常系だけでなく、partial coverageとextra coverageをFault Injectionする。
+- output model内部整合、上流canonical集合整合、次工程前のManager gateを分離して検査する。
+- 課金済み不正payloadはredacted ERROR PMPへ保持し、原因を推測せず再現する。
+- schema contract修復後の再実行は元taskを再利用せず、一回限りの別identityとreservationを使う。
+- 22 root schemaの汎用監査に加えて、input_dataを使うdynamic specializationを回帰に保つ。
+
+
+Self Audit
+----------
+
+- 根本原因まで特定: YES
+- 症状だけの局所patch回避: YES
+- 同系統Failure Mode監査: YES
+- 他Layerへの影響確認: YES
+- State/PMP/Schema/Checkpoint/Reservation/Outbox影響確認: YES
+- Regression Test追加: YES
+- Recovery/Fault条件確認: YES
+- Debug Report生成: YES
+- 設計上の意味を説明: YES
+- 不要なProvider呼び出しなし: YES
+- 既存workflow削除/初期化なし: YES
+- 明示承認範囲外のworkflow更新なし: YES
+- Human Selectionの無断記録なし: YES
+
+Cycle 046のコード修正、Mock/Production Clone検証、本番Recoveryは完了した。対象workflowは
+Quality Gateを条件付き承認で通過し、Human Selectionを待つ状態で停止している。

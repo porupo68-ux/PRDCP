@@ -7,6 +7,7 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from common.models.pmp import PMPMessage
+from researcher.schemas.trace_ids import EvidenceId, SourceId
 
 
 def utc_now() -> datetime:
@@ -115,8 +116,56 @@ class ResearchReportIntegrityRepair(BaseModel):
         return self
 
 
+class ResearchSourceDuplicateTrackingRepair(_HumanEvidenceIntegrityRepairBase):
+    """Audited relation-only repair for one same-document source family."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    repair_kind: Literal["research_source_duplicate_tracking"]
+    repair_type: Literal["RESEARCH_SOURCE_DUPLICATE_TRACKING_REPAIR"] = (
+        "RESEARCH_SOURCE_DUPLICATE_TRACKING_REPAIR"
+    )
+    document_family_id: str = Field(pattern=r"^docfam_[a-f0-9]{24}$")
+    canonical_source_id: SourceId
+    canonical_evidence_id: EvidenceId
+    related_source_ids: list[SourceId] = Field(min_length=1)
+    merged_evidence_ids: list[EvidenceId] = Field(min_length=1)
+    report_sha256_before: str = Field(pattern=r"^[0-9a-f]{64}$")
+    report_sha256_after: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relation_metadata_sha256_before: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relation_metadata_sha256_after: str = Field(pattern=r"^[0-9a-f]{64}$")
+    immutable_content_sha256_before: str = Field(pattern=r"^[0-9a-f]{64}$")
+    immutable_content_sha256_after: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_calls: Literal[0] = 0
+    retrieval_calls: Literal[0] = 0
+
+    @model_validator(mode="after")
+    def validate_duplicate_tracking_shape(self) -> "ResearchSourceDuplicateTrackingRepair":
+        if len(self.related_source_ids) != len(set(self.related_source_ids)):
+            raise ValueError("related_source_ids must be unique")
+        if len(self.merged_evidence_ids) != len(set(self.merged_evidence_ids)):
+            raise ValueError("merged_evidence_ids must be unique")
+        if self.canonical_source_id in self.related_source_ids:
+            raise ValueError("canonical_source_id cannot also be related")
+        if self.canonical_evidence_id in self.merged_evidence_ids:
+            raise ValueError("canonical_evidence_id cannot merge itself")
+        if len(self.related_source_ids) != len(self.merged_evidence_ids):
+            raise ValueError("each related source must contribute one merged evidence ID")
+        if (
+            self.relation_metadata_sha256_before
+            == self.relation_metadata_sha256_after
+            and self.report_sha256_before != self.report_sha256_after
+        ):
+            raise ValueError("no-op relation repair cannot change the Report")
+        if self.immutable_content_sha256_before != self.immutable_content_sha256_after:
+            raise ValueError("duplicate tracking repair cannot change protected content")
+        return self
+
+
 HumanEvidenceIntegrityRepair: TypeAlias = Annotated[
-    HumanEvidenceSourceReclassificationRepair | ResearchReportIntegrityRepair,
+    HumanEvidenceSourceReclassificationRepair
+    | ResearchReportIntegrityRepair
+    | ResearchSourceDuplicateTrackingRepair,
     Field(discriminator="repair_kind"),
 ]
 
@@ -139,6 +188,7 @@ def validate_human_evidence_integrity_repair(
         "official_industry_source_reclassification",
         "report_limitation_exact_deduplication",
         "recognized_media_source_reclassification",
+        "research_source_duplicate_tracking",
     }
     if repair_kind not in supported_kinds:
         raise ValueError(

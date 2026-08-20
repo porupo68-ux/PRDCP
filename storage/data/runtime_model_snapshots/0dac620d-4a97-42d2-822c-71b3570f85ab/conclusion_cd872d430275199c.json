@@ -1,0 +1,51 @@
+{
+  "provider_id": "openrouter",
+  "checked_at": "2026-08-20T06:56:03.350837+00:00",
+  "entries": [
+    {
+      "agent_id": "conclusion.decision_evaluator",
+      "configured_model": "qwen/qwen3.6-35b-a3b",
+      "runtime_model": "qwen/qwen3.6-35b-a3b",
+      "compatibility_binding_models": [],
+      "resolved_model": "qwen/qwen3.6-35b-a3b",
+      "drifted": false
+    },
+    {
+      "agent_id": "conclusion.decision_integrator",
+      "configured_model": "qwen/qwen3.6-35b-a3b",
+      "runtime_model": "qwen/qwen3.6-35b-a3b",
+      "compatibility_binding_models": [],
+      "resolved_model": "qwen/qwen3.6-35b-a3b",
+      "drifted": false
+    },
+    {
+      "agent_id": "conclusion.manager",
+      "configured_model": "qwen/qwen3.5-flash-02-23",
+      "runtime_model": "qwen/qwen3.5-flash-02-23",
+      "compatibility_binding_models": [],
+      "resolved_model": "qwen/qwen3.5-flash-02-23",
+      "drifted": false
+    },
+    {
+      "agent_id": "conclusion.position_generator",
+      "configured_model": "qwen/qwen3.5-flash-02-23",
+      "runtime_model": "qwen/qwen3.5-flash-02-23",
+      "compatibility_binding_models": [
+        "openai/gpt-5-mini"
+      ],
+      "resolved_model": "openai/gpt-5-mini",
+      "drifted": false
+    },
+    {
+      "agent_id": "conclusion.quality_reviewer",
+      "configured_model": "qwen/qwen3.6-35b-a3b",
+      "runtime_model": "qwen/qwen3.6-35b-a3b",
+      "compatibility_binding_models": [],
+      "resolved_model": "qwen/qwen3.6-35b-a3b",
+      "drifted": false
+    }
+  ],
+  "drift_count": 0,
+  "workflow_id": "0dac620d-4a97-42d2-822c-71b3570f85ab",
+  "operation": "conclusion"
+}

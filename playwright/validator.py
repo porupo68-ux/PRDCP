@@ -24,7 +24,35 @@ def canonical_hash(value: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def canonical_script_claim_ids(script_draft: ScriptDraft) -> list[str]:
+    """Return the Script-owned claim set in stable first-use order."""
+
+    return list(
+        dict.fromkeys(
+            claim_id
+            for section in script_draft.sections
+            for paragraph in section.paragraphs
+            for claim_id in paragraph.claim_ids
+        )
+    )
+
+
 class PlaywrightValidator:
+    @staticmethod
+    def assert_manifest_claim_contract(
+        *,
+        script_draft: ScriptDraft,
+        citation_manifest: CitationManifest,
+    ) -> None:
+        script_claims = set(canonical_script_claim_ids(script_draft))
+        manifest_claims = set(citation_manifest.supported_claim_ids)
+        if script_claims != manifest_claims:
+            raise ValueError(
+                "Citation Manifest claim contract mismatch: "
+                f"missing={sorted(script_claims - manifest_claims)}, "
+                f"unexpected={sorted(manifest_claims - script_claims)}"
+            )
+
     def validate(
         self,
         *,
@@ -146,6 +174,46 @@ class PlaywrightValidator:
         validated_paragraphs = {p.paragraph_id: p for section in validated_script.sections for p in section.paragraphs}
         if set(validated_paragraphs) - set(draft_paragraphs):
             add("VALIDATED_SCRIPT_NEW_PARAGRAPH", "Citation editing introduced a new paragraph", target="playwright.evidence_citation_editor")
+        if set(draft_paragraphs) - set(validated_paragraphs):
+            add(
+                "VALIDATED_SCRIPT_PARAGRAPH_MISSING",
+                "Citation editing removed a canonical Script Draft paragraph",
+                target="playwright.evidence_citation_editor",
+                details={
+                    "paragraph_ids": sorted(
+                        set(draft_paragraphs) - set(validated_paragraphs)
+                    )
+                },
+            )
+        for paragraph_id in sorted(set(draft_paragraphs) & set(validated_paragraphs)):
+            draft_paragraph = draft_paragraphs[paragraph_id]
+            validated_paragraph = validated_paragraphs[paragraph_id]
+            if (
+                draft_paragraph.claim_ids != validated_paragraph.claim_ids
+                or draft_paragraph.evidence_ids != validated_paragraph.evidence_ids
+                or draft_paragraph.citation_required
+                != validated_paragraph.citation_required
+            ):
+                add(
+                    "VALIDATED_SCRIPT_TRACEABILITY_CHANGED",
+                    "Citation editing changed Script-owned paragraph traceability",
+                    target="playwright.evidence_citation_editor",
+                    details={"paragraph_id": paragraph_id},
+                )
+        script_claim_ids = set(canonical_script_claim_ids(script_draft))
+        manifest_claim_ids = set(citation_manifest.supported_claim_ids)
+        if script_claim_ids != manifest_claim_ids:
+            add(
+                "CITATION_MANIFEST_CLAIM_SET_MISMATCH",
+                "Citation Manifest supported claims do not match the canonical Script Draft",
+                target="playwright.evidence_citation_editor",
+                details={
+                    "missing_claim_ids": sorted(script_claim_ids - manifest_claim_ids),
+                    "unexpected_claim_ids": sorted(
+                        manifest_claim_ids - script_claim_ids
+                    ),
+                },
+            )
         actual_count = sum(len(p.speaker_text) for p in draft_paragraphs.values())
         if abs(actual_count - script_draft.estimated_character_count) > max(50, int(actual_count * 0.2)):
             add(
@@ -158,7 +226,7 @@ class PlaywrightValidator:
         mappings_by_paragraph: dict[str, list] = {}
         for mapping in citation_manifest.mappings:
             mappings_by_paragraph.setdefault(mapping.paragraph_id, []).append(mapping)
-            if mapping.paragraph_id not in validated_paragraphs:
+            if mapping.paragraph_id not in draft_paragraphs:
                 add("CITATION_UNKNOWN_PARAGRAPH", f"Citation references unknown paragraph {mapping.paragraph_id}", target="playwright.evidence_citation_editor")
             unknown_claims = set(mapping.claim_ids) - claim_ids
             unknown_evidence = set(mapping.evidence_ids) - evidence_ids
@@ -170,8 +238,18 @@ class PlaywrightValidator:
             if unknown_sources:
                 add("CITATION_UNKNOWN_SOURCE", "Citation references unknown source IDs", target="playwright.evidence_citation_editor", details={"ids": sorted(unknown_sources)})
             if mapping.claim_type == ScriptClaimType.UNSUPPORTED.value:
-                add("UNSUPPORTED_CLAIM_REMAINS", "Unsupported claim remains in the citation artifact", target="playwright.scriptwriter", details={"paragraph_id": mapping.paragraph_id})
-        for paragraph in validated_paragraphs.values():
+                add(
+                    "UNSUPPORTED_CLAIM_REMAINS",
+                    "Unsupported claim remains in the citation artifact",
+                    target="playwright.scriptwriter",
+                    details={
+                        "citation_mapping_id": mapping.citation_mapping_id,
+                        "paragraph_id": mapping.paragraph_id,
+                        "claim_ids": mapping.claim_ids,
+                        "evidence_ids": mapping.evidence_ids,
+                    },
+                )
+        for paragraph in draft_paragraphs.values():
             if paragraph.citation_required and paragraph.paragraph_id not in mappings_by_paragraph:
                 add(
                     "CITATION_MAPPING_MISSING",
@@ -183,12 +261,59 @@ class PlaywrightValidator:
                         "evidence_ids": paragraph.evidence_ids,
                     },
                 )
+            elif paragraph.citation_required:
+                paragraph_mappings = mappings_by_paragraph[paragraph.paragraph_id]
+                mapped_claim_ids = {
+                    value
+                    for mapping in paragraph_mappings
+                    for value in mapping.claim_ids
+                }
+                mapped_evidence_ids = {
+                    value
+                    for mapping in paragraph_mappings
+                    for value in mapping.evidence_ids
+                }
+                if (
+                    mapped_claim_ids != set(paragraph.claim_ids)
+                    or mapped_evidence_ids != set(paragraph.evidence_ids)
+                ):
+                    add(
+                        "CITATION_MAPPING_TRACEABILITY_MISMATCH",
+                        "Citation mapping does not reproduce Script-owned claim/evidence traceability",
+                        target="playwright.evidence_citation_editor",
+                        details={
+                            "paragraph_id": paragraph.paragraph_id,
+                            "script_claim_ids": paragraph.claim_ids,
+                            "mapped_claim_ids": sorted(mapped_claim_ids),
+                            "script_evidence_ids": paragraph.evidence_ids,
+                            "mapped_evidence_ids": sorted(mapped_evidence_ids),
+                        },
+                    )
             if set(paragraph.claim_ids) - claim_ids:
                 add("SCRIPT_UNKNOWN_CLAIM", "Script paragraph references an unknown claim", target="playwright.scriptwriter", details={"paragraph_id": paragraph.paragraph_id})
             if set(paragraph.evidence_ids) - evidence_ids:
                 add("SCRIPT_UNKNOWN_EVIDENCE", "Script paragraph references unknown evidence", target="playwright.scriptwriter", details={"paragraph_id": paragraph.paragraph_id})
         if citation_manifest.unsupported_claims:
-            add("UNSUPPORTED_CLAIM_LIST_NOT_EMPTY", "Citation Manifest contains unsupported claims", target="playwright.scriptwriter")
+            add(
+                "UNSUPPORTED_CLAIM_LIST_NOT_EMPTY",
+                "Citation Manifest contains unsupported claims",
+                target="playwright.scriptwriter",
+                details={
+                    "paragraph_ids": list(
+                        dict.fromkeys(
+                            item.paragraph_id
+                            for item in citation_manifest.unsupported_claims
+                        )
+                    ),
+                    "unsupported_claim_ids": list(
+                        dict.fromkeys(
+                            claim_id
+                            for item in citation_manifest.unsupported_claims
+                            for claim_id in item.claim_ids
+                        )
+                    ),
+                },
+            )
         if citation_manifest.missing_locators:
             add(
                 "CITATION_LOCATOR_MISSING",
@@ -267,6 +392,12 @@ class PlaywrightValidator:
                 "script_sections": len(script_draft.sections),
                 "paragraphs": len(validated_paragraphs),
                 "citation_mappings": len(citation_manifest.mappings),
+                "script_claim_count": len(script_claim_ids),
+                "manifest_claim_count": len(manifest_claim_ids),
+                "unsupported_claim_count": len(
+                    citation_manifest.unsupported_claims
+                ),
+                "citation_mapping_count": len(citation_manifest.mappings),
                 "visual_cues": len(visual_plan.visual_cues),
                 "chart_requests": len(visual_plan.chart_requests),
                 "errors": error_count,

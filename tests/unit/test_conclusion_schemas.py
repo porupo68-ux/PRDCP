@@ -337,6 +337,42 @@ class ConclusionSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "ratings must agree"):
             DecisionEvaluationResult.model_validate(payload)
 
+    def test_candidate_evaluations_missing_candidate_is_rejected(self):
+        payload = evaluation_payload()
+        payload["candidate_evaluations"] = [
+            item
+            for item in payload["candidate_evaluations"]
+            if item["candidate_id"] != "position_c"
+        ]
+
+        with self.assertRaisesRegex(ValidationError, "cover the same candidates"):
+            DecisionEvaluationResult.model_validate(payload)
+
+    def test_candidate_evaluations_extra_candidate_is_rejected(self):
+        payload = evaluation_payload()
+        extra = deepcopy(payload["candidate_evaluations"][0])
+        extra["candidate_id"] = "position_extra"
+        payload["candidate_evaluations"].append(extra)
+
+        with self.assertRaisesRegex(ValidationError, "cover the same candidates"):
+            DecisionEvaluationResult.model_validate(payload)
+
+    def test_candidate_id_mismatch_between_collections_is_rejected(self):
+        payload = evaluation_payload()
+        payload["comparison_matrix"][2]["candidate_id"] = "position_other"
+
+        with self.assertRaisesRegex(ValidationError, "cover the same candidates"):
+            DecisionEvaluationResult.model_validate(payload)
+
+    def test_candidate_collection_order_does_not_affect_coverage(self):
+        payload = evaluation_payload()
+        payload["candidate_evaluations"].reverse()
+        payload["comparison_matrix"].reverse()
+
+        result = DecisionEvaluationResult.model_validate(payload)
+
+        self.assertEqual(len(result.comparison_matrix), 3)
+
     def test_profile_candidate_references_must_be_known_and_separate(self):
         payload = evaluation_payload()
         payload["conditional_advantages"][0]["advantaged_candidate_ids"] = [

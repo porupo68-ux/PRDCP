@@ -31,6 +31,7 @@ class OperatorCliIntegrationTests(unittest.TestCase):
         self.assertIn("--researcher-evidence", result.stdout)
         self.assertIn("--researcher-accept-limitations", result.stdout)
         self.assertIn("--researcher-revise", result.stdout)
+        self.assertIn("--researcher-integrity-repair", result.stdout)
 
     def test_default_e2e_output_is_concise_and_status_is_inspectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

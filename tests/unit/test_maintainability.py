@@ -171,6 +171,22 @@ class MaintainabilityTests(unittest.TestCase):
         self.assertEqual(args.researcher_provider_retry, "workflow-1")
         self.assertIsNone(args.researcher_resume)
 
+    def test_cli_accepts_zero_call_researcher_integrity_repair(self) -> None:
+        args = parse_args(["--researcher-integrity-repair", "workflow-1"])
+        self.assertEqual(args.researcher_integrity_repair, "workflow-1")
+        self.assertIsNone(args.researcher_recover)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "--researcher-integrity-repair",
+                        "workflow-1",
+                        "--researcher-recover",
+                        "workflow-1",
+                    ]
+                )
+
     def test_cli_accepts_one_time_researcher_retrieval_reconstruction(self) -> None:
         args = parse_args(["--researcher-retrieval-reconstruct", "workflow-1"])
         self.assertEqual(args.researcher_retrieval_reconstruct, "workflow-1")

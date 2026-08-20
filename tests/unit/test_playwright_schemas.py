@@ -13,6 +13,7 @@ from playwright.schemas import (
     UpstreamConclusionRevisionRequest,
     VisualPlan,
 )
+from playwright.validator import PlaywrightValidator
 from providers.mock import playwright_fixtures
 
 
@@ -146,6 +147,33 @@ class PlaywrightSchemaTests(unittest.TestCase):
                 }
             )
 
+    def test_citation_manifest_rejects_duplicate_supported_claim_ids(self):
+        raw = playwright_fixtures.citation_editing(
+            {
+                "production_context": production_context_data(),
+                "script_draft": script_data(),
+            }
+        )["citation_manifest"]
+        raw["supported_claim_ids"] = ["claim_1", "claim_1"]
+        with self.assertRaisesRegex(ValidationError, "supported_claim_ids"):
+            CitationManifest.model_validate(raw)
+
+    def test_manifest_claim_contract_rejects_partial_known_id_set(self):
+        script = ScriptDraft.model_validate(script_data())
+        raw = playwright_fixtures.citation_editing(
+            {
+                "production_context": production_context_data(),
+                "script_draft": script_data(),
+            }
+        )["citation_manifest"]
+        raw["supported_claim_ids"] = []
+        manifest = CitationManifest.model_validate(raw)
+        with self.assertRaisesRegex(ValueError, "claim contract mismatch"):
+            PlaywrightValidator.assert_manifest_claim_contract(
+                script_draft=script,
+                citation_manifest=manifest,
+            )
+
     def test_visual_plan_rejects_duplicate_cue_ids(self):
         cue = {
             "visual_cue_id": "cue_1",
@@ -218,6 +246,10 @@ class PlaywrightSchemaTests(unittest.TestCase):
             ["source_1"],
             properties["source_ids"]["items"]["enum"],
         )
+        supported = self._property_node(schema, "supported_claim_ids")
+        self.assertEqual(1, supported["minItems"])
+        self.assertEqual(1, supported["maxItems"])
+        self.assertEqual(["claim_1"], supported["items"]["enum"])
 
     def test_visual_strict_schema_binds_cues_to_paragraph_local_references(self):
         citation = playwright_fixtures.citation_editing(

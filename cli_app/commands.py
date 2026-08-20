@@ -200,6 +200,18 @@ def recover_saved_researcher_human_gate(
     } else 1
 
 
+def repair_saved_researcher_integrity(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    json_output: bool,
+) -> int:
+    researcher = build_researcher_manager(settings)
+    state = researcher.repair_human_evidence_integrity(workflow_id)
+    print_state("researcher", state, json_output=json_output)
+    return 0 if state.status == "WAITING_HUMAN_EVIDENCE_REVIEW" else 1
+
+
 async def retry_saved_producer_provider(
     settings: Settings,
     workflow_id: str,
@@ -864,6 +876,12 @@ def dispatch(args: Any, settings: Settings) -> int:
         return recover_saved_researcher_human_gate(
             settings,
             args.researcher_recover,
+            json_output=args.json_output,
+        )
+    if args.researcher_integrity_repair:
+        return repair_saved_researcher_integrity(
+            settings,
+            args.researcher_integrity_repair,
             json_output=args.json_output,
         )
     if args.researcher_evidence:

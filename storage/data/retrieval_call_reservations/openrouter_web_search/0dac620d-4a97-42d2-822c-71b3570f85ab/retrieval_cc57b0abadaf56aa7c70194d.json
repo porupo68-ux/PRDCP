@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_cc57b0abadaf56aa7c70194d",
+  "workflow_id": "0dac620d-4a97-42d2-822c-71b3570f85ab",
+  "task_id": "task_ed2b9072d9114244bd5ba115d7400bb4",
+  "agent_id": "researcher.expert_researcher",
+  "strategy": "EXPERT",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-20T05:30:18.238256+00:00"
+}

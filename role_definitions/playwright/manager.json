@@ -208,6 +208,10 @@
           "condition": "allowlist対象であり、既存Paragraph、Evidence、Source locator、保存済み意味分類が一意に一致し、Provider呼び出し、新Evidence、内容変更を必要としない場合"
         },
         {
+          "decision": "Script Draftを正本としてCitation Manifestのclaim集合とstale unsupported issueを決定論的に同期する",
+          "condition": "対象claimが保存済みの非unsupported mappingで既に支持され、citation-required paragraphのclaim、evidence、sourceを一意に復元でき、Provider呼び出しやScript本文変更を必要としない場合"
+        },
+        {
           "decision": "非阻害的問題を残したまま完成させる",
           "condition": "Quality Reviewerがapproved_with_conditionsと判定し、問題が正確性、結論整合性、証拠追跡性に影響しない場合"
         },
@@ -1676,7 +1680,9 @@
         "resume_boundary": "new_conclusion_handoff_only",
         "recover_boundary": "failed_checkpoint_or_allowlisted_blocked_local_artifact",
         "deterministic_repair_allowlist": [
-          "CITATION_MAPPING_MISSING"
+          "CITATION_MAPPING_MISSING",
+          "UNSUPPORTED_CLAIM_LIST_NOT_EMPTY",
+          "UNSUPPORTED_CLAIM_REMAINS"
         ],
         "deterministic_repair_limit": 1,
         "deterministic_repair_consumes_revision_limit": false,

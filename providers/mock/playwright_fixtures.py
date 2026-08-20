@@ -124,6 +124,14 @@ def citation_editing(input_data: dict, *, missing_mapping: bool = False) -> dict
     mappings = []
     unsupported = []
     revision_map = []
+    supported_claim_ids = list(
+        dict.fromkeys(
+            claim_id
+            for section in draft["sections"]
+            for paragraph in section["paragraphs"]
+            for claim_id in paragraph["claim_ids"]
+        )
+    )
     citation_paragraphs = [p for section in draft["sections"] for p in section["paragraphs"] if p["citation_required"]]
     for index, paragraph in enumerate(citation_paragraphs):
         if paragraph["rhetorical_function"] == "unsupported_test_fixture":
@@ -176,6 +184,7 @@ def citation_editing(input_data: dict, *, missing_mapping: bool = False) -> dict
         "citation_manifest": {
             "citation_manifest_id": manifest_id,
             "script_draft_id": draft["script_draft_id"],
+            "supported_claim_ids": supported_claim_ids,
             "mappings": mappings,
             "unsupported_claims": unsupported,
             "partially_supported_claims": [],

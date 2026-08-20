@@ -1,0 +1,9 @@
+{
+  "retrieval_id": "retrieval_dab2d0f5c8a3c67cf18337b2",
+  "workflow_id": "2cba35c8-aac6-41fa-bbf2-d2c60a77a524",
+  "task_id": "task_92a78849027e4b6b91bbb114cc8ac971",
+  "agent_id": "researcher.public_opinion_researcher",
+  "strategy": "PUBLIC_OPINION",
+  "provider_id": "openrouter_web_search",
+  "reserved_at": "2026-08-20T10:30:29.001547+00:00"
+}

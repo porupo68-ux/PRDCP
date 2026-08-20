@@ -55,6 +55,30 @@ class HumanEvidenceControlPlaneTests(unittest.TestCase):
         self.assertIn("--researcher-recover workflow_test", action)
         self.assertIn("0-call", action)
 
+    def test_duplicate_tracking_hard_finding_points_to_integrity_repair(self):
+        action = next_action_for(
+            "researcher",
+            {
+                "workflow_id": "workflow_test",
+                "status": "BLOCKED",
+                "review_result": {
+                    "status": "revision_required",
+                    "findings": [
+                        {
+                            "finding_type": "HARD_INTEGRITY_FAILURE",
+                            "issue": "same-document duplicate tracking is missing",
+                            "required_action": "populate merged_evidence_ids",
+                        }
+                    ],
+                },
+                "human_evidence_decision": None,
+            },
+        )
+        self.assertEqual(
+            action,
+            "py main.py --researcher-integrity-repair workflow_test",
+        )
+
     def test_all_discord_human_gate_commands_are_routed_to_researcher(self):
         for command in (
             "researcher_evidence",

@@ -6,7 +6,11 @@ from pathlib import Path
 
 from common.models.pmp import PMPMessage
 from researcher.schemas.research_report import ResearchReport
-from researcher.schemas.human_evidence import HumanEvidenceDecisionArtifact
+from researcher.schemas.human_evidence import (
+    HumanEvidenceDecisionArtifact,
+    HumanEvidenceIntegrityRepair,
+    validate_human_evidence_integrity_repair,
+)
 from researcher.state import ResearcherWorkflowState
 from storage.json_repository import JsonRepository
 
@@ -22,6 +26,9 @@ class ResearcherWorkflowRepository(JsonRepository):
         self.human_evidence_decisions_dir = (
             data_dir / "artifacts" / "human_evidence_decisions"
         )
+        self.human_evidence_integrity_repairs_dir = (
+            data_dir / "artifacts" / "human_evidence_integrity_repairs"
+        )
         for directory in (
             self.workflows_dir,
             self.producer_outbox_dir,
@@ -29,6 +36,7 @@ class ResearcherWorkflowRepository(JsonRepository):
             self.researcher_revision_inbox_dir,
             self.reports_dir,
             self.human_evidence_decisions_dir,
+            self.human_evidence_integrity_repairs_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -145,5 +153,54 @@ class ResearcherWorkflowRepository(JsonRepository):
             return []
         return [
             HumanEvidenceDecisionArtifact.model_validate(self.read_json(path))
+            for path in sorted(directory.glob("*.json"))
+        ]
+
+    def create_human_evidence_integrity_repair_once(
+        self,
+        repair: HumanEvidenceIntegrityRepair,
+    ) -> Path:
+        """Persist one immutable repair audit artifact, accepting exact replay."""
+
+        path = (
+            self.human_evidence_integrity_repairs_dir
+            / repair.workflow_id
+            / f"{repair.repair_id}.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = repair.model_dump(mode="json")
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing = validate_human_evidence_integrity_repair(self.read_json(path))
+            if existing.model_dump(mode="json") != payload:
+                raise ValueError(
+                    "Human Evidence Integrity Repair artifact identity conflict"
+                )
+            return path
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                if os.name != "nt":
+                    os.fsync(handle.fileno())
+        except Exception:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        return path
+
+    def list_human_evidence_integrity_repairs(
+        self,
+        workflow_id: str,
+    ) -> list[HumanEvidenceIntegrityRepair]:
+        directory = self.human_evidence_integrity_repairs_dir / workflow_id
+        if not directory.exists():
+            return []
+        return [
+            validate_human_evidence_integrity_repair(self.read_json(path))
             for path in sorted(directory.glob("*.json"))
         ]

@@ -48,6 +48,27 @@ class ConclusionManagerRepairRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class CandidateCoverageAudit(BaseModel):
+    """Persisted Decision Evaluator coverage check for recovery and audit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_task_id: str = Field(min_length=1)
+    recovery_task_id: str | None = None
+    position_candidate_ids: list[str]
+    evaluation_candidate_ids: list[str]
+    matrix_candidate_ids: list[str]
+    candidate_count_position_generator: int = Field(ge=0)
+    candidate_count_evaluation: int = Field(ge=0)
+    candidate_count_matrix: int = Field(ge=0)
+    candidate_evaluation_row_count: int = Field(ge=0)
+    expected_candidate_evaluation_row_count: int = Field(ge=0)
+    missing_candidate_ids: list[str]
+    extra_candidate_ids: list[str]
+    passed: bool
+    checked_at: datetime = Field(default_factory=utc_now)
+
+
 class ConclusionWorkflowState(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
 
@@ -60,6 +81,9 @@ class ConclusionWorkflowState(BaseModel):
     position_candidates: list[dict[str, Any]] = Field(default_factory=list)
     evaluation_framework: dict[str, Any] | None = None
     decision_evaluation: dict[str, Any] | None = None
+    candidate_coverage_checked: bool = False
+    candidate_coverage_passed: bool = False
+    candidate_coverage_audit: CandidateCoverageAudit | None = None
     decision_integration: dict[str, Any] | None = None
     conclusion_package: dict[str, Any] | None = None
     deterministic_validation: dict[str, Any] | None = None

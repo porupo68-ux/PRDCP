@@ -206,7 +206,7 @@ class DecisionEvaluationResult(BaseModel):
                 if isinstance(item, dict)
             ]
         )
-        return bind_strict_reference_fields(
+        specialized = bind_strict_reference_fields(
             schema,
             list_fields={
                 "advantaged_candidate_ids": candidate_ids,
@@ -222,6 +222,35 @@ class DecisionEvaluationResult(BaseModel):
                 "decision_context_id": unique_strings([context_id]),
             },
         )
+        # Candidate IDs are already bound to the Position Generator input above.
+        # Also bind the collection sizes so the Provider cannot satisfy the
+        # strict schema with only one candidate's criterion rows while emitting
+        # every candidate in the comparison matrix. Compound-key uniqueness is
+        # still enforced by the Pydantic validator after generation.
+        criteria = framework.get("criteria") if isinstance(framework, dict) else []
+        if candidate_ids and isinstance(criteria, list) and criteria:
+            properties = specialized.get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("DecisionEvaluationResult strict schema has no properties")
+            evaluations = properties.get("candidate_evaluations")
+            matrix = properties.get("comparison_matrix")
+            if not isinstance(evaluations, dict) or not isinstance(matrix, dict):
+                raise ValueError(
+                    "DecisionEvaluationResult strict schema has no candidate collections"
+                )
+            expected_evaluation_count = len(candidate_ids) * len(criteria)
+            evaluations["minItems"] = expected_evaluation_count
+            evaluations["maxItems"] = expected_evaluation_count
+            matrix["minItems"] = len(candidate_ids)
+            matrix["maxItems"] = len(candidate_ids)
+            evaluations["description"] = (
+                "Return exactly one row for every input candidate_id and every "
+                "evaluation_framework criterion; do not omit or duplicate a pair."
+            )
+            matrix["description"] = (
+                "Return exactly one comparison row for every input candidate_id."
+            )
+        return specialized
 
     @model_validator(mode="before")
     @classmethod

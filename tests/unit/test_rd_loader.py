@@ -318,7 +318,11 @@ class RoleDefinitionLoaderTests(unittest.TestCase):
         )
         self.assertEqual(
             recovery["deterministic_repair_allowlist"],
-            ["CITATION_MAPPING_MISSING"],
+            [
+                "CITATION_MAPPING_MISSING",
+                "UNSUPPORTED_CLAIM_LIST_NOT_EMPTY",
+                "UNSUPPORTED_CLAIM_REMAINS",
+            ],
         )
         self.assertEqual(recovery["deterministic_repair_limit"], 1)
         self.assertFalse(recovery["deterministic_repair_consumes_revision_limit"])

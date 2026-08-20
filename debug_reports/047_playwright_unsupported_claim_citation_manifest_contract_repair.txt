@@ -1,0 +1,226 @@
+Cycle 047 Debug Report
+Playwright Unsupported Claim & Citation Manifest Contract Repair
+
+対象Workflow
+0dac620d-4a97-42d2-822c-71b3570f85ab
+
+実施日
+2026-08-20 (Asia/Tokyo)
+
+1. 何が起きたか
+
+PlaywrightはNarrative、Script、Citation、Visualまで完了していましたが、内部Revisionを2/2まで消費した後のFinal Gateで次の2件が残り、BLOCKEDになっていました。
+
+- CITATION_MAPPING_MISSING: para_sec07_01
+- UNSUPPORTED_CLAIM_LIST_NOT_EMPTY
+
+Deliveryは未作成でした。保存済みProvider reservationは39件、Retrieval reservationは10件で、新しい外部呼び出しを行う必要はありませんでした。
+
+2. なぜ起きたか
+
+Script Draftには3件のcanonical claimがあり、Citation Manifestの既存mappingにも3件すべてを支持する非unsupported mappingが存在していました。しかし、ManifestにはScript全体の支持済みclaim集合を明示するフィールドがありませんでした。そのため、一般意見を紹介する非citation段落で同じclaim IDを用いた2件が、別段落で既に支持済みであることをManifest契約として表せず、paragraph-localなunsupported issueとして残りました。
+
+同時に、para_sec07_01はcitation_required=trueで、claim_03_phased_guideline_adaptation、evidence_mext_guideline_k12_2024、source_494069a566daff953439ee54が保存済みであるにもかかわらずmappingだけが欠けていました。既存のCycle 044 repairはCITATION_MAPPING_MISSINGだけを許可し、全ERRORを同じmissing-mapping形式として処理していたため、unsupported findingとの同時発生を修復できませんでした。
+
+3. 根本原因
+
+根本原因はCitation Manifestのcanonical ownership不足です。
+
+- Script Draftが実質的なclaim正本だったが、その契約がSchema・Manager・Final Gate・Deliveryへ明示伝播していなかった。
+- Final Gateはmappingの存在を検査したが、Script段落とmappingのclaim/evidence集合の完全一致を検査していなかった。
+- unsupported_claimsとCitationValidatedScript.unresolved_citation_issuesが、claim全体の支持状態とは独立したstale metadataとして残り得た。
+- local repair allowlistがCITATION_MAPPING_MISSING単独に限定され、同じ契約不整合から派生する3 findingを一体として扱えなかった。
+
+4. なぜ従来のMock/Doctorで検出できなかったか
+
+Doctorは31 RD、Agent/Message Registry、Provider設定、Structured Output能力を検査しますが、個別のProvider生成物におけるScript claim集合とManifestの意味的完全一致までは検査対象ではありませんでした。
+
+従来のMock Citation fixtureはcitation_required段落を一貫してmapping化し、同じclaimを非citationの一般意見段落でも使用する実データ形状を生成していませんでした。またCitation Manifestにsupported_claim_idsが存在しなかったため、22 root Structured Output監査はobject closureを検証できても「既知IDの部分集合が完全なclaim集合か」を表現できませんでした。
+
+5. どう直したか
+
+5.1 Canonical claim contract
+
+- Script Draftをclaim集合の唯一の正本とした。
+- CitationManifestへsupported_claim_idsを追加した。
+- ManagerがScript Draftからfirst-use順のclaim集合を決定論的に作り、Citation結果と旧checkpointの双方へ束縛する。
+- 下流ProviderへCitation Manifestを渡す前にset(script.claim_ids) == set(manifest.supported_claim_ids)を検証する。
+- request別strict schemaではsupported_claim_idsをScript claim enumへ束縛し、minItems/maxItemsをclaim数へ固定する。
+- 旧保存Manifestはdefault emptyで読めるため、既存JSONの破壊的migrationは不要。
+
+5.2 Citation mapping contract
+
+- Script Draftのcitation_required paragraphを正本として検査する。
+- 全required paragraphでmappingの存在を要求する。
+- 同一paragraphのmapping集合がScriptのclaim_idsとevidence_idsを完全に再現することを要求する。
+- Citation Editorがparagraphを削除したり、claim/evidence/citation_requiredを変更した場合はFail Closedにする。
+
+5.3 Unsupported claim contract
+
+- unsupported_claimsが非空ならFinal Gateを通さない。
+- UNSUPPORTED mappingのfindingへmapping ID、paragraph ID、claim/evidence IDを保存する。
+- stale unsupported issueは、そのclaimが保存済みの非unsupported mapping、Evidence、Source、locatorで既に支持されている場合だけlocal cleanupできる。
+- claim IDが空、未知、Scriptと不一致、支持mappingなし、分類が曖昧な場合は修復しない。
+- Manifest側のstale issueを除去するとき、対応するCitationValidatedScript.unresolved_citation_issuesも同じidentityで同期し、Deliveryへ矛盾したissueを残さない。
+
+5.4 Deterministic repair
+
+- allowlistをCITATION_MAPPING_MISSING、UNSUPPORTED_CLAIM_LIST_NOT_EMPTY、UNSUPPORTED_CLAIM_REMAINSへ拡張した。
+- Revision Budgetとは独立した1回限りのrepair countを維持した。
+- Script、Conclusion、Evidence、Narrative、Visualは変更しない。
+- Provider/Retrievalを呼ばない。
+- missing_mapping_ids、unsupported_claim_ids、repaired_mapping_ids、cleaned paragraph IDs、claim/unsupported/mapping前後件数、Manifest前後hash、CitationValidatedScript前後hashを監査artifactへ保存する。
+- repair checkpoint保存後のprocess stopからは同じrepairを再実行せずFinal Gate/Deliveryだけを再開する。
+
+6. 設計上の意味
+
+Citation Manifestはissue listや一部mappingからclaim coverageを推測する成果物ではなく、Script Draftから派生する完全な契約になりました。これにより、Claim ContractとCitation Mapping Contractを同じcanonical sourceから検証できます。
+
+LLM Revisionは文章や意味の改善、Deterministic Repairは保存済みtraceabilityの機械的な同期という責務分離を維持しています。修復不能な意味判断、Evidence追加、Source推測、accepted evidence gapのEvidence化は引き続きFail Closedです。
+
+7. 同系統Failure Mode監査
+
+canonical owner -> producer -> persistence -> direct consumer -> transitive downstream -> Deliveryの順で変更前後を監査しました。
+
+- Canonical owner: ScriptDraft.sections[].paragraphs[].claim_ids
+- Producer: Evidence & Citation Editor prompt、Role Definition、request別strict schema
+- Manager: provider resultと旧checkpointのcanonical binding、downstream送信前assertion
+- Persistence: CitationManifest.supported_claim_ids、Playwright state、citation artifact、repair artifact
+- Direct consumer: Visual Directorへ渡すCitation Manifest
+- Final Gate: Script/Validated Script traceability、claim集合、required mapping、unsupported list/mapping
+- Transitive downstream: FinalScriptPackage.traceabilityとunresolved production items
+- Delivery: citation_manifest.json、final_script_package.json、script.md、source_list.md、visual_plan.md、production_notes.md
+
+旧contract前提の残存検索を実施し、Playwright READMEとroot READMEの「CITATION_MAPPING_MISSINGだけ」という説明、Manager RDの単一allowlist、Citation Editor RD/promptを現行契約へ更新しました。Cycle 044のmapping-only repairも既存回帰で維持しています。
+
+8. Regression / Fault / Recovery結果
+
+- Python compile: PASS
+- Targeted Unit/Integration/RD/Schema: 103 tests PASS
+- Full Unit/Integration: 603 tests PASS (643.689 sec)
+- Role Definitions: 31/31 STRICT PASS
+- OpenRouter Structured Output root schema: 22/22 recursive audit PASS
+- Doctor: READY, fail=0, optional warning=3
+- 5-layer Mock E2E: Producer -> Researcher -> Deliberation -> Conclusion -> Playwright PASS
+- Mock Delivery: 6/6 files PASS
+- Missing mapping + stale unsupported combined repair: PASS
+- Unknown/unbacked unsupported claim: Fail Closed PASS
+- Mapping conflict/source/locator/accepted-gap/nonrepairable mixed finding: Fail Closed PASS
+- Fault after repair checkpoint: resume without second repair PASS
+- Repeated recover after completion: state hash unchanged, Delivery exactly once PASS
+
+9. Production clone
+
+元のproduction boundaryを一時storageへcloneし、Mock managerで保存済みstateからrecoverしました。
+
+- 初期: BLOCKED, revision_count=2, deterministic_repair_count=0
+- 初期blocking codes: CITATION_MAPPING_MISSING / UNSUPPORTED_CLAIM_LIST_NOT_EMPTY
+- Provider calls: 0
+- Retrieval calls: 0
+- protected upstream/content hashes: unchanged
+- Script claims: 3
+- Manifest claims: 3
+- unsupported claims: 2 -> 0
+- citation mappings: 11 -> 12
+- Final Gate: APPROVED_WITH_LIMITATIONS
+- blocking findings: 0
+- Playwright: COMPLETED
+- Delivery: 6 files
+- repeated recover: no-op
+- production source boundary: unchanged
+
+10. Production適用結果
+
+実行:
+main.py --playwright-recover 0dac620d-4a97-42d2-822c-71b3570f85ab --provider openrouter --safe-mode
+
+実行前:
+- state SHA-256: 9950AB2B4AE91877302007F065398299F3AAF6388770A80ADEA8D6D2707E5121
+- status: BLOCKED
+- revision_count: 2
+- deterministic_repair_count: 0
+- message count: 23
+- Provider reservations: 39
+- Retrieval reservations: 10
+- repair artifacts: 0
+- Delivery files: 0
+
+実行後:
+- state SHA-256: 6AA577FE8DD98A1B3C146816D4B06695663A79190B166602BCF50082C25DEF67
+- status: COMPLETED
+- delivered: true
+- revision_count: 2 (不変)
+- upstream_revision_count: 0 (不変)
+- deterministic_repair_count: 1
+- message count: 24
+- final_script_delivery message: 1
+- Final Gate: APPROVED_WITH_LIMITATIONS
+- blocking findings: 0
+- limitations: 34 (保持)
+- Script claims / Manifest claims: 3 / 3
+- citation-required paragraphs / mappings: 12 / 12
+- unsupported claims: 0
+- unresolved citation issues: 0
+- Provider reservations: 39 (不変)
+- Retrieval reservations: 10 (不変)
+- repair artifacts: 1
+- Delivery files: 6
+
+Repair Artifact:
+- repair_id: playwright_repair_df2a01e5394c3527efcb1d9f
+- repair_type: CITATION_MANIFEST_CONTRACT_RECONSTRUCTION
+- missing mapping: para_sec07_01
+- unsupported claims cleaned: claim_01_efficiency_and_debugging / claim_02_skill_degradation_risk
+- manifest claim count: 0 -> 3
+- unsupported claim count: 2 -> 0
+- citation mapping count: 11 -> 12
+- Provider calls: 0
+- Retrieval calls: 0
+
+Protected artifact hashes remained unchanged:
+- Conclusion Package: 42A1D823B0994C83F00E6E2A0EB54F3FA91A6B64A2A4F32770D0440C07AC6AE1
+- Final Conclusion: 41F940AF4F6EF838F77303BF675A2ED11A1E392903569E018CABDA2C3564DE6E
+- Narrative Blueprint: E9158841A3F96CB59FAE9BAD61DF56E4C65A32ADDD1039E306F300EAD20BBBB9
+- Script Draft: 765B781958CBB0B310D13DD071C6D595D6350E42B6E213E39A60D81CD1B31343
+- Visual Plan: BB5FF64B17ACCD48A08359F9B13CBA06DF4E0119B000A6541CF3D7B8F02AAF60
+
+Productionで二度目のrecoverもstate hash 6AA577FE...のまま不変で、reservation 39/10、repair artifact 1、Delivery 6を維持しました。
+
+11. Provider Call / Cost
+
+- Cycle 047 Real OpenRouter calls: 0
+- Cycle 047 Retrieval calls: 0
+- 新規Provider reservation: 0
+- 新規Retrieval reservation: 0
+- API cost: USD 0.00
+
+12. Debug Cycle自己監査
+
+- 根本原因まで特定したか: YES
+- 局所的な症状だけを修正していないか: YES。Script/Manifest/Final Gate/Recovery/Deliveryの契約を同期した。
+- 同系統Failure Modeを調査したか: YES。unknown/partial/mismatched mapping、unsupported mapping/list、legacy persistence、downstream/Deliveryを監査した。
+- 他Layerへの影響を確認したか: YES。全603 testと5層Mock E2Eで確認した。Producer/Researcher/Deliberation/Conclusionの実装変更は行っていない。
+- Stateへの影響: repair history、Final Gate、Delivery状態のみ正規更新。
+- PMPへの影響: final_script_deliveryを1件追加。既存historyは保持。
+- Schemaへの影響: Citation Manifestへ明示claim contractを追加し22 root監査PASS。
+- Checkpointへの影響: 完了済み4 Agent checkpointを再利用し、Provider再実行なし。
+- Reservationへの影響: 39/10で不変。
+- Outboxへの影響: 既存Conclusion handoff/outboxを再生成していない。
+- Regression Testを追加したか: YES。
+- Recovery/Fault条件を確認したか: YES。
+- Debug Reportを生成したか: YES。
+- 修正の設計上の意味を説明したか: YES。
+- 不必要なProvider呼び出しを行っていないか: YES。0件。
+
+13. 最終状態
+
+Producer: COMPLETED
+Researcher: COMPLETED
+Deliberation: COMPLETED
+Conclusion: COMPLETED
+Playwright: COMPLETED
+Final Gate: APPROVED_WITH_LIMITATIONS
+Delivery: 生成済み6成果物
+残存blocking finding: 0
+残存limitations: 34（上流のHuman Evidence Decisionおよび品質開示を保持）
+

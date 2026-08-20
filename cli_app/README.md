@@ -18,11 +18,14 @@ CLI固有の表示・引数処理だけを置き、Agentロジックは各Layer�
 - `--*-recover`: 保存済みcheckpoint/state/outboxを照合する障害復旧
 - `--*-provider-retry`: 課金済みの可能性がある一時障害の一回限り明示再送
 - `--*-revise`: 保存済みQuality Findingに対する明示的一サイクル
+- `--researcher-integrity-repair`: duplicate tracking系Hard Findingの明示的な外部call 0件relation修復
 - `--conclusion-contract-repair` / `--playwright-capability-repair`: 異なる明示modelを使う一回限り契約修復
 
 Researcherの`runtime-*-repair`群は、旧失敗のauthorization、reservation、Error PMP、Retrieval Context hashが一致するときだけ保存済み検索を再利用します。`--researcher-retrieval-reconstruct`だけは新規検索を行う別操作です。最新の完全な引数一覧は常に`py main.py --help`を正本とします。
 
-Researcher Quality Review後は`--researcher-evidence WORKFLOW_ID`で分類と対象を確認し、`--researcher-accept`、`--researcher-accept-limitations`、`--researcher-revise`のいずれかを`--reason`付きで明示します。`--researcher-revise`はRevision Planを保存するだけでProviderを呼びません。障害復旧の`--researcher-recover`と人間判断は別操作です。
+利用可能な全CLIコマンド、用途、外部API呼び出しの目安はルート`README.md`の「コマンド早見表（CLI / Discord）」へ一括掲載します。引数追加・削除時は`cli_app/arguments.py`と同時に同表を更新し、回帰テストで登録コマンドの掲載漏れを検出します。
+
+Researcher Quality Review後は`--researcher-evidence WORKFLOW_ID`で分類と対象を確認し、`--researcher-accept`、`--researcher-accept-limitations`、`--researcher-revise`のいずれかを`--reason`付きで明示します。duplicate tracking系Hard FindingでGateが閉じている場合は先に`--researcher-integrity-repair`を明示実行します。これはProvider/RetrievalもRevision budgetも消費せず、Evidence不足の判断は行いません。障害復旧の`--researcher-recover`、relation修復、人間判断は別操作です。
 
 Playwrightの修復可能なFinal Gate停止は`--playwright-revise WORKFLOW_ID`で一サイクルだけ再開します。
 これはProvider通信障害用の`--playwright-provider-retry`、checkpoint障害用の

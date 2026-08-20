@@ -1,0 +1,81 @@
+{
+  "provider_id": "openrouter",
+  "checked_at": "2026-08-20T05:30:16.451602+00:00",
+  "entries": [
+    {
+      "agent_id": "researcher.academic_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.expert_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.government_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.industry_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.manager",
+      "configured_model": "moonshotai/kimi-k3",
+      "runtime_model": "moonshotai/kimi-k3",
+      "compatibility_binding_models": [],
+      "resolved_model": "moonshotai/kimi-k3",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.news_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.politician_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.public_opinion_researcher",
+      "configured_model": "google/gemini-3.7-flash",
+      "runtime_model": "google/gemini-3.7-flash",
+      "compatibility_binding_models": [],
+      "resolved_model": "google/gemini-3.7-flash",
+      "drifted": false
+    },
+    {
+      "agent_id": "researcher.quality_reviewer",
+      "configured_model": "moonshotai/kimi-k3",
+      "runtime_model": "moonshotai/kimi-k3",
+      "compatibility_binding_models": [],
+      "resolved_model": "moonshotai/kimi-k3",
+      "drifted": false
+    }
+  ],
+  "drift_count": 0,
+  "workflow_id": "0dac620d-4a97-42d2-822c-71b3570f85ab",
+  "operation": "researcher"
+}

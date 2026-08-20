@@ -8,6 +8,23 @@
 
 ## Unreleased
 
+- Make Script Draft the canonical owner of Playwright claim coverage, persist
+  the exact claim set in Citation Manifest, and validate every citation-required
+  Paragraph through Claim, Evidence, and Source. Extend the one-pass local repair
+  to stale unsupported-claim metadata only when saved non-unsupported mappings
+  prove the claims, preserving zero Provider/Retrieval calls and fail-closed
+  Delivery behavior.
+- Bind Conclusion Decision Evaluation strict output to exactly one row per
+  input candidate/criterion pair and one comparison row per candidate. Persist
+  Candidate Coverage counts/differences, fail closed before Integration, and
+  recover the legacy partial-coverage failure once from the saved Position
+  checkpoint under a distinct audited task identity.
+- Add `--researcher-integrity-repair` for an explicit, Provider/Retrieval-free,
+  one-pass reconstruction of same-document-family tracking. The repair preserves
+  every Source, Evidence, URL, content field and Research Question assignment,
+  records hash-audited `RESEARCH_SOURCE_DUPLICATE_TRACKING_REPAIR` provenance,
+  does not consume the LLM revision budget, and fails closed on version,
+  publisher, canonical-source or existing-relation ambiguity.
 - Separate Playwright's LLM revision budget from an allowlisted, one-pass,
   zero-Provider deterministic citation repair. `--playwright-recover` can now
   reconstruct a missing paragraph-to-evidence mapping only from saved canonical

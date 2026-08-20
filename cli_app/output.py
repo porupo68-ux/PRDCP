@@ -86,6 +86,9 @@ def format_state_summary(
                 "  human evidence decision: " + str(decision.get("decision", "-"))
             )
             lines.append(f"  accepted evidence gaps: {len(accepted)}")
+        integrity_repairs = data.get("human_evidence_integrity_repairs") or []
+        if integrity_repairs:
+            lines.append(f"  deterministic integrity repairs: {len(integrity_repairs)}")
 
     if layer == "conclusion" and status == "WAITING_HUMAN_SELECTION":
         candidates = data.get("position_candidates") or []
@@ -119,6 +122,20 @@ def next_action_for(layer: str, data: dict[str, Any]) -> str | None:
         error = data.get("error") or {}
         if error.get("code") == "EVIDENCE_REVISION_PROVIDER_AUTHORIZATION_REQUIRED":
             return "Evidence Revision Planを確認し、Provider実行は別途明示承認"
+        review = data.get("review_result") or {}
+        duplicate_tracking = any(
+            item.get("finding_type") == "HARD_INTEGRITY_FAILURE"
+            and (
+                "merged_evidence_ids"
+                in f"{item.get('issue', '')}\n{item.get('required_action', '')}"
+                or "duplicate tracking"
+                in f"{item.get('issue', '')}\n{item.get('required_action', '')}".casefold()
+            )
+            for item in review.get("findings") or []
+            if isinstance(item, dict)
+        )
+        if duplicate_tracking and not data.get("human_evidence_decision"):
+            return f"py main.py --researcher-integrity-repair {workflow_id}"
         if data.get("review_result") and not data.get("human_evidence_decision"):
             return (
                 f"py main.py --researcher-recover {workflow_id}（旧Quality Reviewを"
