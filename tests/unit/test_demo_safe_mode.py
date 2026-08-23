@@ -133,17 +133,42 @@ class DemoSafeModeTests(unittest.TestCase):
 
             state = asyncio.run(manager.start(user_topic="demo safe mode"))
 
-            self.assertEqual(state.status, "FAILED")
+            self.assertEqual(state.status, "BLOCKED")
             self.assertEqual(state.revision_count, 0)
             self.assertIn("Demo Safe Mode", state.error["message"])
             self.assertEqual(provider.calls.count("ResearchPlanOutput"), 1)
             self.assertEqual(provider.calls.count("QualityReviewOutput"), 1)
-            self.assertFalse(
+            self.assertTrue(
                 any(
                     message.message_type == MessageType.REVISION_REQUEST.value
                     for message in state.message_history
                 )
             )
+
+            revised = asyncio.run(
+                manager.revise(
+                    state.workflow_id,
+                    actor_id="test.operator",
+                    actor_source="CLI",
+                    reason="Regression test approval",
+                )
+            )
+            self.assertEqual(revised.status, "COMPLETED")
+            self.assertEqual(revised.revision_count, 1)
+            self.assertEqual(revised.revision_control.phase, "completed")
+            self.assertEqual(provider.calls.count("ResearchPlanOutput"), 2)
+            self.assertEqual(provider.calls.count("QualityReviewOutput"), 2)
+            calls = list(provider.calls)
+            replay = asyncio.run(
+                manager.revise(
+                    state.workflow_id,
+                    actor_id="test.operator",
+                    actor_source="CLI",
+                    reason="Regression test approval",
+                )
+            )
+            self.assertEqual(replay.status, "COMPLETED")
+            self.assertEqual(provider.calls, calls)
 
     def test_same_task_cannot_call_provider_twice(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

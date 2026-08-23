@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from common.models.revision import RevisionControlState
 from common.models.workflow import WorkflowStatus
 
 
@@ -20,6 +21,10 @@ class RevisionRecord(BaseModel):
     target_agent: str
     reason: str
     required_action: str
+    revision_request_id: str | None = None
+    source_finding_ids: list[str] = Field(default_factory=list)
+    provider_task_ids: list[str] = Field(default_factory=list)
+    retrieval_reservation_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -37,6 +42,7 @@ class ProducerWorkflowState(BaseModel):
     review_result: dict[str, Any] | None = None
     revision_count: int = Field(default=0, ge=0)
     revision_history: list[RevisionRecord] = Field(default_factory=list)
+    revision_control: RevisionControlState = Field(default_factory=RevisionControlState)
     completed_agents: list[str] = Field(default_factory=list)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)

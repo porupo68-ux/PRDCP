@@ -35,6 +35,23 @@ def load_producer_status(manager: ProducerManager, workflow_id: str) -> Producer
     return manager.repository.load(workflow_id)
 
 
+async def revise_producer(
+    manager: ProducerManager,
+    *,
+    workflow_id: str,
+    actor_id: str,
+    reason: str,
+    progress_callback=None,
+) -> ProducerWorkflowState:
+    return await manager.revise(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        reason=reason,
+        progress_callback=progress_callback,
+    )
+
+
 async def run_researcher(
     manager: ResearcherManager,
     *,
@@ -87,6 +104,23 @@ def recover_researcher_evidence(
     return manager.recover_human_evidence_gate(workflow_id)
 
 
+async def execute_researcher_revision(
+    manager: ResearcherManager,
+    *,
+    workflow_id: str,
+    actor_id: str,
+    reason: str,
+    progress_callback=None,
+) -> ResearcherWorkflowState:
+    return await manager.execute_authorized_revision(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        authorization_reason=reason,
+        progress_callback=progress_callback,
+    )
+
+
 async def run_deliberation(
     manager: DeliberationManager,
     *,
@@ -112,6 +146,23 @@ async def recover_deliberation(
     progress_callback=None,
 ) -> DeliberationWorkflowState:
     return await manager.recover(workflow_id, progress_callback=progress_callback)
+
+
+async def revise_deliberation(
+    manager: DeliberationManager,
+    *,
+    workflow_id: str,
+    actor_id: str,
+    reason: str,
+    progress_callback=None,
+) -> DeliberationWorkflowState:
+    return await manager.revise(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        reason=reason,
+        progress_callback=progress_callback,
+    )
 
 
 def load_deliberation_status(
@@ -144,6 +195,23 @@ async def resume_conclusion(
     progress_callback=None,
 ) -> ConclusionWorkflowState:
     return await manager.resume(workflow_id, progress_callback=progress_callback)
+
+
+async def revise_conclusion(
+    manager: ConclusionManager,
+    *,
+    workflow_id: str,
+    actor_id: str,
+    reason: str,
+    progress_callback=None,
+) -> ConclusionWorkflowState:
+    return await manager.revise(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        reason=reason,
+        progress_callback=progress_callback,
+    )
 
 
 async def integrate_conclusion_candidates(
@@ -205,9 +273,34 @@ async def resume_playwright(
     manager: PlaywrightManager,
     *,
     workflow_id: str,
+    actor_id: str = "discord.operator",
+    reason: str = "Discord operator authorized Playwright resume",
     progress_callback=None,
 ) -> PlaywrightWorkflowState:
-    return await manager.resume(workflow_id, progress_callback=progress_callback)
+    return await manager.resume(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        reason=reason,
+        progress_callback=progress_callback,
+    )
+
+
+async def revise_playwright(
+    manager: PlaywrightManager,
+    *,
+    workflow_id: str,
+    actor_id: str,
+    reason: str,
+    progress_callback=None,
+) -> PlaywrightWorkflowState:
+    return await manager.revise(
+        workflow_id,
+        actor_id=actor_id,
+        actor_source="DISCORD",
+        reason=reason,
+        progress_callback=progress_callback,
+    )
 
 
 def load_playwright_status(

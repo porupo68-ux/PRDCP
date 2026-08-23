@@ -1,6 +1,6 @@
 {
   "registry_name": "PRDCP Cross-layer Handoff Contracts",
-  "registry_version": "2.0.0",
+  "registry_version": "2.1.0",
   "contracts": {
     "producer_to_researcher": {
       "message_type": "research_plan",
@@ -124,6 +124,159 @@
       "human_gates": [
         "human_evidence_decision",
         "user_final_selection"
+      ]
+    },
+    "researcher_to_producer_revision_request": {
+      "message_type": "revision_request",
+      "sender": "researcher.manager",
+      "receiver": "producer.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_request_id",
+        "workflow_id",
+        "route",
+        "source_layer",
+        "target_layer",
+        "revision_epoch",
+        "source_review_id",
+        "source_finding_ids",
+        "base_artifacts",
+        "required_actions",
+        "acceptance_conditions",
+        "idempotency_key"
+      ]
+    },
+    "producer_to_researcher_revision_result": {
+      "message_type": "revision_result",
+      "sender": "producer.manager",
+      "receiver": "researcher.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_result_id",
+        "revision_request_id",
+        "request_message_id",
+        "workflow_id",
+        "revision_epoch",
+        "status",
+        "base_artifacts",
+        "result_artifacts",
+        "finding_dispositions",
+        "idempotency_key"
+      ]
+    },
+    "deliberation_to_researcher_revision_request": {
+      "message_type": "revision_request",
+      "sender": "deliberation.manager",
+      "receiver": "researcher.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_request_id",
+        "workflow_id",
+        "route",
+        "source_layer",
+        "target_layer",
+        "revision_epoch",
+        "source_review_id",
+        "source_finding_ids",
+        "base_artifacts",
+        "required_actions",
+        "acceptance_conditions",
+        "idempotency_key"
+      ]
+    },
+    "researcher_to_deliberation_revision_result": {
+      "message_type": "revision_result",
+      "sender": "researcher.manager",
+      "receiver": "deliberation.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_result_id",
+        "revision_request_id",
+        "request_message_id",
+        "workflow_id",
+        "revision_epoch",
+        "status",
+        "base_artifacts",
+        "result_artifacts",
+        "finding_dispositions",
+        "idempotency_key"
+      ]
+    },
+    "conclusion_to_deliberation_revision_request": {
+      "message_type": "revision_request",
+      "sender": "conclusion.manager",
+      "receiver": "deliberation.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_request_id",
+        "workflow_id",
+        "route",
+        "source_layer",
+        "target_layer",
+        "revision_epoch",
+        "source_review_id",
+        "source_finding_ids",
+        "base_artifacts",
+        "required_actions",
+        "acceptance_conditions",
+        "idempotency_key"
+      ]
+    },
+    "deliberation_to_conclusion_revision_result": {
+      "message_type": "revision_result",
+      "sender": "deliberation.manager",
+      "receiver": "conclusion.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_result_id",
+        "revision_request_id",
+        "request_message_id",
+        "workflow_id",
+        "revision_epoch",
+        "status",
+        "base_artifacts",
+        "result_artifacts",
+        "finding_dispositions",
+        "idempotency_key"
+      ]
+    },
+    "playwright_to_conclusion_revision_request": {
+      "message_type": "revision_request",
+      "sender": "playwright.manager",
+      "receiver": "conclusion.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_request_id",
+        "workflow_id",
+        "route",
+        "source_layer",
+        "target_layer",
+        "revision_epoch",
+        "source_review_id",
+        "source_finding_ids",
+        "base_artifacts",
+        "required_actions",
+        "acceptance_conditions",
+        "idempotency_key"
+      ]
+    },
+    "conclusion_to_playwright_revision_result": {
+      "message_type": "revision_result",
+      "sender": "conclusion.manager",
+      "receiver": "playwright.manager",
+      "required_payload": [
+        "schema_version",
+        "revision_result_id",
+        "revision_request_id",
+        "request_message_id",
+        "workflow_id",
+        "revision_epoch",
+        "status",
+        "base_artifacts",
+        "result_artifacts",
+        "finding_dispositions",
+        "human_selection_impact",
+        "idempotency_key"
       ]
     }
   }

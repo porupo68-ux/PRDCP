@@ -24,6 +24,7 @@ class FindingSeverity(str, Enum):
 
 
 class ResearchFindingTarget(str, Enum):
+    PRODUCER_RESEARCH_PLANNER = "producer.research_planner"
     MANAGER = "researcher.manager"
     EXPERT = "researcher.expert_researcher"
     ACADEMIC = "researcher.academic_researcher"
@@ -58,6 +59,7 @@ class ResearchReviewFinding(BaseModel):
     @model_validator(mode="after")
     def validate_target(self) -> "ResearchReviewFinding":
         if self.target_agent_id is not None and self.target_agent_id not in {
+            "producer.research_planner",
             "researcher.manager",
             *RESEARCHER_AGENT_IDS,
         }:
@@ -99,10 +101,16 @@ class ResearchQualityReviewOutput(BaseModel):
             if self.revision_targets:
                 raise ValueError("approved review cannot route revision targets")
             if any(
-                item.finding_type == ResearchFindingType.HARD_INTEGRITY_FAILURE.value
+                item.finding_type
+                in {
+                    ResearchFindingType.HARD_INTEGRITY_FAILURE.value,
+                    ResearchFindingType.UPSTREAM_PLAN_DEFECT.value,
+                }
                 for item in self.findings
             ):
-                raise ValueError("approved review cannot contain a hard integrity failure")
+                raise ValueError(
+                    "approved review cannot contain a hard integrity failure or upstream plan defect"
+                )
         elif self.status == ResearchQualityGateDecision.REVISION_REQUIRED:
             if not self.findings:
                 raise ValueError("revision_required must include findings")
@@ -116,6 +124,23 @@ class ResearchQualityReviewOutput(BaseModel):
             if executable_targets - set(self.revision_targets):
                 raise ValueError(
                     "revision_targets must cover every executable evidence finding"
+                )
+            upstream_findings = [
+                item
+                for item in self.findings
+                if item.finding_type
+                == ResearchFindingType.UPSTREAM_PLAN_DEFECT.value
+            ]
+            if any(
+                item.target_agent_id != "producer.research_planner"
+                for item in upstream_findings
+            ):
+                raise ValueError(
+                    "upstream plan defects must target producer.research_planner"
+                )
+            if "producer.research_planner" in self.revision_targets:
+                raise ValueError(
+                    "upstream plan defects must use the cross-layer Revision route"
                 )
             if self.approved_research_report is not None:
                 raise ValueError("revision_required cannot approve a report")

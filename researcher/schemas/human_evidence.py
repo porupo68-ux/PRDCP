@@ -18,6 +18,7 @@ class ResearchFindingType(str, Enum):
     """Manager-enforced disposition of one Research Quality Review finding."""
 
     EVIDENCE_SUFFICIENCY = "EVIDENCE_SUFFICIENCY_FINDING"
+    UPSTREAM_PLAN_DEFECT = "UPSTREAM_PLAN_DEFECT"
     HARD_INTEGRITY_FAILURE = "HARD_INTEGRITY_FAILURE"
     UNCLASSIFIED = "UNCLASSIFIED"
 

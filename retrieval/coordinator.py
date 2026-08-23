@@ -153,6 +153,30 @@ class RetrievalCoordinator:
             ) from exc
         return context
 
+    def retrieval_identity(
+        self,
+        *,
+        workflow_id: str,
+        task_id: str,
+        agent_id: str,
+        strategy: RetrievalStrategy | str,
+    ) -> str:
+        """Return the durable identity that ``prepare`` will reserve.
+
+        Revision authorization uses this before any external call so the exact
+        retrieval reservation is auditable and cannot drift at execution time.
+        """
+
+        strategy_value = (
+            strategy.value if isinstance(strategy, RetrievalStrategy) else str(strategy)
+        )
+        return self._retrieval_id(
+            workflow_id,
+            self._canonical_task_id(task_id),
+            agent_id,
+            strategy_value,
+        )
+
     def _context_path(self, workflow_id: str, retrieval_id: str) -> Path:
         return self.data_dir / "retrieval_contexts" / self._component(workflow_id) / f"{retrieval_id}.json"
 

@@ -582,6 +582,42 @@ class HumanEvidenceGateTests(unittest.TestCase):
         self.assertTrue(revised.evidence_revision_plan.provider_authorization_required)
         self.assertFalse(revised.human_evidence_decision.provider_calls_authorized)
         self.assertFalse(revised.deliberation_sent)
+        self.assertEqual(revised.revision_control.phase, "authorization_required")
+
+    def test_separate_execute_command_consumes_revision_authorization_once(self):
+        state = self.start_waiting()
+        self.install_review(state, self.evidence_gap_review())
+        blocked = asyncio.run(
+            self.manager.revise(
+                state.workflow_id,
+                reason="Human requests more evidence",
+                actor_source=HumanActorSource.MOCK_FIXTURE,
+            )
+        )
+        calls_before = len(self.provider.calls)
+
+        executed = asyncio.run(
+            self.manager.execute_authorized_revision(
+                blocked.workflow_id,
+                actor_id="test.operator",
+                actor_source="CLI",
+                authorization_reason="Explicit unit-test execution approval",
+            )
+        )
+
+        self.assertEqual(executed.status, "WAITING_HUMAN_EVIDENCE_REVIEW")
+        self.assertEqual(executed.revision_count, 1)
+        self.assertEqual(executed.revision_control.phase, "completed")
+        self.assertEqual(len(self.provider.calls) - calls_before, 2)
+        request_id = executed.revision_control.consumed_request_ids[0]
+        authorization = self.manager.revision_exchange.load_authorization(
+            executing_layer="researcher",
+            workflow_id=executed.workflow_id,
+            revision_request_id=request_id,
+        )
+        self.assertEqual(authorization.status, "consumed")
+        self.assertEqual(len(authorization.provider_reservation_ids), 2)
+        self.assertEqual(len(authorization.retrieval_reservation_ids), 1)
 
     def test_duplicate_and_concurrent_decisions_have_one_winner(self):
         state = self.start_waiting()

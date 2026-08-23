@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel
 
@@ -15,6 +16,25 @@ from common.models.pmp import (
     PMPMessage,
     PMPMetadata,
     PMPRouting,
+)
+from common.models.revision import (
+    HumanSelectionImpact,
+    LayerId,
+    RevisionArtifactRef,
+    RevisionAuditEvent,
+    RevisionAuditEventType,
+    RevisionBudgetPolicy,
+    RevisionControlPhase,
+    RevisionControlState,
+    RevisionExecutionAuthorization,
+    RevisionExecutionStatus,
+    RevisionFindingDisposition,
+    RevisionFindingOutcome,
+    RevisionRequestV1,
+    RevisionResultV1,
+    RevisionRoute,
+    canonical_sha256,
+    deterministic_revision_request_id,
 )
 from common.provider_capability_repair import (
     PROVIDER_CAPABILITY_REPAIR_SUFFIX,
@@ -73,6 +93,10 @@ from playwright.workflow import (
     VISUAL_DIRECTOR_ID,
 )
 from storage.playwright_workflow_repository import PlaywrightWorkflowRepository
+from storage.revision_exchange_repository import (
+    RevisionBudgetExhausted,
+    RevisionExchangeRepository,
+)
 
 
 ProgressCallback = Callable[[str], Awaitable[None]]
@@ -123,6 +147,7 @@ class PlaywrightManager:
         self.provider_model_compatibility_store = ProviderModelCompatibilityStore(
             repository.data_dir
         )
+        self.revision_exchange = RevisionExchangeRepository(repository.data_dir)
 
     def authorize_provider_retry(
         self,
@@ -252,6 +277,9 @@ class PlaywrightManager:
         self,
         workflow_id: str,
         *,
+        actor_id: str = "cli.operator",
+        actor_source: str = "CLI",
+        reason: str = "Operator authorized Playwright revision",
         progress_callback: ProgressCallback | None = None,
     ) -> PlaywrightWorkflowState:
         """Run one operator-authorized internal Playwright revision in Safe Mode."""
@@ -266,6 +294,17 @@ class PlaywrightManager:
             raise ValueError(
                 "Playwright must be BLOCKED at a saved deterministic gate before "
                 "an explicit revision"
+            )
+        if (
+            state.revision_control.phase
+            == RevisionControlPhase.AUTHORIZATION_REQUIRED.value
+        ):
+            return await self._execute_active_revision(
+                state,
+                actor_id=actor_id,
+                actor_source=actor_source,
+                reason=reason,
+                progress_callback=progress_callback,
             )
         if (
             state.deterministic_validation is None
@@ -290,40 +329,545 @@ class PlaywrightManager:
             raise ValueError(
                 "Playwright revision findings do not resolve to internal Agent targets"
             )
+        self._plan_internal_revision(state, gate)
+        self.repository.save(state)
+        return await self._execute_active_revision(
+            state,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+            progress_callback=progress_callback,
+        )
+
+    def _plan_internal_revision(
+        self,
+        state: PlaywrightWorkflowState,
+        gate: PlaywrightFinalGateResult,
+    ) -> PMPMessage:
+        targets = list(dict.fromkeys(gate.revision_targets))
+        if not targets or any(item not in AGENT_ORDER for item in targets):
+            raise ValueError("Playwright Revision has no executable target")
+        finding_ids = list(
+            dict.fromkeys(
+                str(item.get("finding_id") or "") for item in gate.findings
+            )
+        )
+        finding_ids = [item for item in finding_ids if item]
+        if not finding_ids:
+            raise ValueError("Playwright Revision requires correlated findings")
+        epoch = max(state.revision_control.revision_epoch, state.revision_count) + 1
+        parent_request_id = (
+            state.revision_control.active_request_id
+            if state.revision_control.phase
+            in {
+                RevisionControlPhase.COMPLETED.value,
+                RevisionControlPhase.BLOCKED.value,
+            }
+            else None
+        )
+        request_id = deterministic_revision_request_id(
+            workflow_id=state.workflow_id,
+            source_layer=LayerId.PLAYWRIGHT,
+            target_layer=LayerId.PLAYWRIGHT,
+            revision_epoch=epoch,
+            source_review_id=gate.final_gate_result_id,
+            source_finding_ids=finding_ids,
+        )
+        request = RevisionRequestV1.create(
+            revision_request_id=request_id,
+            workflow_id=state.workflow_id,
+            route=RevisionRoute.INTERNAL,
+            source_layer=LayerId.PLAYWRIGHT,
+            target_layer=LayerId.PLAYWRIGHT,
+            revision_epoch=epoch,
+            root_revision_request_id=(
+                state.revision_control.root_revision_request_id or request_id
+                if parent_request_id
+                else request_id
+            ),
+            parent_revision_request_id=parent_request_id,
+            source_review_id=gate.final_gate_result_id,
+            source_finding_ids=finding_ids,
+            target_agent_ids=targets,
+            base_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="conclusion.final_conclusion",
+                    artifact_id=str(state.final_conclusion["final_conclusion_id"]),
+                    sha256=canonical_sha256(state.final_conclusion),
+                ),
+                RevisionArtifactRef(
+                    artifact_type="playwright.deterministic_validation",
+                    artifact_id=str(
+                        state.deterministic_validation["validation_id"]
+                    ),
+                    sha256=canonical_sha256(state.deterministic_validation),
+                ),
+            ],
+            required_actions=list(
+                dict.fromkeys(
+                    str(item.get("message") or item.get("code") or "repair")
+                    for item in gate.findings
+                )
+            ),
+            acceptance_conditions=[
+                f"Resolve or explicitly retain finding {finding_id}"
+                for finding_id in finding_ids
+            ],
+            evidence_expansion_allowed=False,
+            retrieval_allowed=False,
+            expected_human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+        )
+        first_agent = min(targets, key=AGENT_ORDER.index)
+        message_id = str(uuid5(NAMESPACE_URL, f"{request_id}:request-message"))
+        message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=state.message_history[-1].message_id,
+                    sender_agent_id=self.agent_id,
+                    receiver_agent_id=NARRATIVE_ARCHITECT_ID,
+                    message_type=MessageType.REVISION_REQUEST,
+                    objective="Run the minimum Playwright dependency closure required by Final Gate",
+                    payload=request.model_dump(mode="json"),
+                    context=PMPContext(
+                        current_stage="playwright.revision_planned",
+                        previous_stage="playwright.final_gate",
+                        next_stage=first_agent,
+                    ),
+                    routing=PMPRouting(
+                        revision_target=NARRATIVE_ARCHITECT_ID,
+                        reply_required=True,
+                    ),
+                    metadata=PMPMetadata(status=MessageStatus.REVISION_REQUIRED),
+                ).model_dump(mode="json"),
+                "message_id": message_id,
+            }
+        )
+        self.revision_exchange.create_internal_request_once(message)
+        if not any(item.message_id == message.message_id for item in state.message_history):
+            state.message_history.append(message)
+        state.revision_control = RevisionControlState(
+            phase=RevisionControlPhase.AUTHORIZATION_REQUIRED,
+            revision_epoch=epoch,
+            active_request_id=request_id,
+            active_request_message_id=message.message_id,
+            root_revision_request_id=request.root_revision_request_id,
+            parent_revision_request_id=request.parent_revision_request_id,
+            pending_request_ids=[request_id],
+            consumed_request_ids=list(state.revision_control.consumed_request_ids),
+            consumed_result_ids=list(state.revision_control.consumed_result_ids),
+            audit_event_ids=list(state.revision_control.audit_event_ids),
+        )
+        state.status = PlaywrightStatus.BLOCKED
+        state.error = {
+            "code": "REVISION_AUTHORIZATION_REQUIRED",
+            "message": "Playwright Revision plan is saved and requires authorization",
+        }
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"request_written_{epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.REQUEST_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=message.message_id,
+                artifact_ids=[item.artifact_id for item in request.base_artifacts],
+                reason=gate.delivery_readiness,
+            ),
+        )
+        return message
+
+    async def _execute_active_revision(
+        self,
+        state: PlaywrightWorkflowState,
+        *,
+        actor_id: str,
+        actor_source: str,
+        reason: str,
+        progress_callback: ProgressCallback | None,
+    ) -> PlaywrightWorkflowState:
         if state.revision_count >= self.max_revisions:
             raise ValueError(
                 f"Playwright revision limit {self.max_revisions} is exhausted"
             )
-
-        state.revision_count += 1
-        rerun_from = min(AGENT_ORDER.index(item) for item in targets)
-        stages = REVISION_DEPENDENCIES[AGENT_ORDER[rerun_from]]
-        state.revision_history.append(
-            PlaywrightRevisionRecord(
-                iteration=state.revision_count,
-                target_agent_ids=targets,
-                findings=gate.findings,
-                rerun_stages=stages,
-            )
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        if request.route != RevisionRoute.INTERNAL.value:
+            raise ValueError("Playwright execution accepts only internal Revision")
+        self.revision_exchange.validator.validate_current_base_artifacts(
+            request,
+            {
+                (
+                    "conclusion.final_conclusion",
+                    str(state.final_conclusion.get("final_conclusion_id") or ""),
+                ): canonical_sha256(state.final_conclusion),
+                (
+                    "playwright.deterministic_validation",
+                    str(
+                        (state.deterministic_validation or {}).get("validation_id")
+                        or ""
+                    ),
+                ): canonical_sha256(state.deterministic_validation),
+            },
         )
-        # Persist the consumed plan and invalidate only its dependency closure
-        # before the first Provider call.  Historical PMP remains append-only.
+        provider_tasks = self._revision_execution_identities(state, request)
+        authorization = RevisionExecutionAuthorization(
+            authorization_id=(
+                "revision_authorization_"
+                + uuid5(NAMESPACE_URL, request.revision_request_id).hex
+            ),
+            workflow_id=state.workflow_id,
+            revision_request_id=request.revision_request_id,
+            executing_layer=LayerId.PLAYWRIGHT,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+            max_provider_calls=len(provider_tasks),
+            max_retrieval_calls=0,
+        )
+        try:
+            current_authorization = self.revision_exchange.load_authorization(
+                executing_layer=LayerId.PLAYWRIGHT,
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+            )
+            if (
+                current_authorization.actor_id != actor_id
+                or current_authorization.actor_source != actor_source
+                or current_authorization.reason != reason
+            ):
+                raise ValueError(
+                    "Playwright Revision is already authorized by a different actor"
+                )
+            authorization = current_authorization
+        except FileNotFoundError:
+            self.revision_exchange.create_authorization_once(authorization)
+            self._record_revision_audit(
+                state,
+                RevisionAuditEvent(
+                    audit_event_id=f"authorization_created_{request.revision_epoch}",
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request.revision_request_id,
+                    layer=LayerId.PLAYWRIGHT,
+                    event_type=RevisionAuditEventType.AUTHORIZATION_CREATED,
+                    actor_id=actor_id,
+                    reason=reason,
+                ),
+            )
+        try:
+            budget = self.revision_exchange.budget_store.consume(
+                policy=RevisionBudgetPolicy(
+                    internal_limit=self.max_revisions,
+                    upstream_limit=self.max_revisions,
+                ),
+                workflow_id=state.workflow_id,
+                layer=LayerId.PLAYWRIGHT,
+                route=RevisionRoute.INTERNAL,
+                revision_request_id=request.revision_request_id,
+            )
+        except RevisionBudgetExhausted as exc:
+            state.revision_control.phase = RevisionControlPhase.BLOCKED
+            state.status = PlaywrightStatus.BLOCKED
+            state.error = {"code": "REVISION_BUDGET_EXHAUSTED", "message": str(exc)}
+            self._record_revision_audit(
+                state,
+                RevisionAuditEvent(
+                    audit_event_id=f"budget_blocked_{request.revision_epoch}",
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request.revision_request_id,
+                    layer=LayerId.PLAYWRIGHT,
+                    event_type=RevisionAuditEventType.BLOCKED,
+                    actor_id=actor_id,
+                    reason=str(exc),
+                ),
+            )
+            self.repository.save(state)
+            return state
+        consumed = self.revision_exchange.consume_authorization(
+            authorization,
+            provider_reservation_ids=list(provider_tasks.values()),
+            retrieval_reservation_ids=[],
+        )
+        for event in (
+            RevisionAuditEvent(
+                audit_event_id=f"authorization_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CONSUMED,
+                actor_id=actor_id,
+                reservation_ids=list(provider_tasks.values()),
+                reason=reason,
+                created_at=consumed.consumed_at,
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"budget_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.BUDGET_CONSUMED,
+                actor_id=self.agent_id,
+                reason=f"Playwright internal revision slot {budget.iteration}",
+                created_at=budget.consumed_at,
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"request_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.REQUEST_CONSUMED,
+                actor_id=self.agent_id,
+                message_id=request_message.message_id,
+                reason="Playwright Manager began the saved revision plan",
+                created_at=budget.consumed_at,
+            ),
+        ):
+            self._record_revision_audit(state, event)
+        state.revision_count = max(state.revision_count, budget.iteration)
+        rerun_from = min(
+            AGENT_ORDER.index(item) for item in request.target_agent_ids
+        )
+        if not any(
+            record.iteration == budget.iteration for record in state.revision_history
+        ):
+            state.revision_history.append(
+                PlaywrightRevisionRecord(
+                    iteration=budget.iteration,
+                    target_agent_ids=request.target_agent_ids,
+                    findings=[
+                        {"finding_id": item, "source": request.source_review_id}
+                        for item in request.source_finding_ids
+                    ],
+                    rerun_stages=REVISION_DEPENDENCIES[AGENT_ORDER[rerun_from]],
+                )
+            )
         self._clear_from(state, rerun_from)
+        state.revision_control.phase = RevisionControlPhase.EXECUTING
         state.status = PlaywrightStatus.REVISING
         state.error = None
         state.current_agent_ids = []
         self.repository.save(state)
         await self._emit(
             progress_callback,
-            "Operator-authorized Playwright revision → "
-            + ", ".join(targets)
-            + f"（{state.revision_count}/{self.max_revisions}）",
+            "Authorized Playwright Revision → "
+            + ", ".join(request.target_agent_ids)
+            + f"（{budget.iteration}/{self.max_revisions}）",
         )
         return await self._run(
             state,
             rerun_from=rerun_from,
+            task_id_overrides=provider_tasks,
             progress_callback=progress_callback,
         )
+
+    def _active_revision_request_message(
+        self,
+        state: PlaywrightWorkflowState,
+    ) -> PMPMessage:
+        request_id = state.revision_control.active_request_id
+        message_id = state.revision_control.active_request_message_id
+        if not request_id or not message_id:
+            raise ValueError("Playwright has no active Revision Request")
+        message = next(
+            (item for item in state.message_history if item.message_id == message_id),
+            None,
+        )
+        if message is None:
+            message = self.revision_exchange.load_internal_request(
+                layer=LayerId.PLAYWRIGHT,
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+            )
+        request = self.revision_exchange.validator.validate_request_message(message)
+        if request.revision_request_id != request_id:
+            raise ValueError("Playwright active Revision Request identity is inconsistent")
+        return message
+
+    def _revision_execution_identities(
+        self,
+        state: PlaywrightWorkflowState,
+        request: RevisionRequestV1,
+    ) -> dict[str, str]:
+        rerun_from = min(
+            AGENT_ORDER.index(item) for item in request.target_agent_ids
+        )
+        stage_names = {
+            NARRATIVE_ARCHITECT_ID: "narrative",
+            SCRIPTWRITER_ID: "script",
+            EVIDENCE_CITATION_EDITOR_ID: "citation",
+            VISUAL_DIRECTOR_ID: "visual",
+        }
+        return {
+            agent_id: (
+                f"playwright_{stage_names[agent_id]}_upstream_"
+                f"{state.upstream_revision_count}_revision_{request.revision_epoch}"
+            )
+            for agent_id in AGENT_ORDER[rerun_from:]
+        }
+
+    def _finalize_active_revision(
+        self,
+        state: PlaywrightWorkflowState,
+        *,
+        completed: bool,
+        reason: str,
+    ) -> None:
+        if state.revision_control.phase != RevisionControlPhase.EXECUTING.value:
+            return
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        result_artifacts: list[RevisionArtifactRef] = []
+        if completed and state.final_script_package is not None:
+            package_id = str(
+                state.final_script_package.get("final_script_package_id") or ""
+            )
+            if package_id:
+                result_artifacts.append(
+                    RevisionArtifactRef(
+                        artifact_type="playwright.final_script_package",
+                        artifact_id=package_id,
+                        sha256=canonical_sha256(state.final_script_package),
+                    )
+                )
+        elif state.deterministic_validation is not None:
+            validation_id = str(
+                state.deterministic_validation.get("validation_id") or ""
+            )
+            if validation_id:
+                result_artifacts.append(
+                    RevisionArtifactRef(
+                        artifact_type="playwright.deterministic_validation",
+                        artifact_id=validation_id,
+                        sha256=canonical_sha256(state.deterministic_validation),
+                    )
+                )
+        provider_tasks = self._revision_execution_identities(state, request)
+        result_id = "revision_result_" + uuid5(
+            NAMESPACE_URL, f"{request.revision_request_id}:result"
+        ).hex
+        result = RevisionResultV1.create(
+            revision_result_id=result_id,
+            revision_request_id=request.revision_request_id,
+            request_message_id=request_message.message_id,
+            workflow_id=state.workflow_id,
+            requester_layer=LayerId.PLAYWRIGHT,
+            producer_layer=LayerId.PLAYWRIGHT,
+            revision_epoch=request.revision_epoch,
+            status=(
+                RevisionExecutionStatus.COMPLETED
+                if completed
+                else RevisionExecutionStatus.PARTIAL
+            ),
+            base_artifacts=request.base_artifacts,
+            result_artifacts=result_artifacts,
+            finding_dispositions=[
+                RevisionFindingDisposition(
+                    finding_id=finding_id,
+                    outcome=(
+                        RevisionFindingOutcome.RESOLVED
+                        if completed
+                        else RevisionFindingOutcome.UNRESOLVED
+                    ),
+                    reason=reason,
+                    result_artifact_ids=[item.artifact_id for item in result_artifacts],
+                )
+                for finding_id in request.source_finding_ids
+            ],
+            human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+            provider_reservation_ids=list(provider_tasks.values()),
+            retrieval_reservation_ids=[],
+            provider_call_count=len(provider_tasks),
+            retrieval_call_count=0,
+        )
+        result_message_id = str(
+            uuid5(NAMESPACE_URL, f"{request.revision_request_id}:result-message")
+        )
+        result_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=request_message.message_id,
+                    sender_agent_id=request_message.receiver_agent_id,
+                    receiver_agent_id=request_message.sender_agent_id,
+                    message_type=MessageType.REVISION_RESULT,
+                    objective="Return the audited Playwright internal Revision result",
+                    payload=result.model_dump(mode="json"),
+                    routing=PMPRouting(revision_target=None, reply_required=False),
+                    metadata=PMPMetadata(
+                        status=(
+                            MessageStatus.COMPLETED
+                            if completed
+                            else MessageStatus.REVISION_REQUIRED
+                        )
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": result_message_id,
+            }
+        )
+        self.revision_exchange.create_internal_result_once(
+            request_message,
+            result_message,
+        )
+        if not any(
+            item.message_id == result_message.message_id
+            for item in state.message_history
+        ):
+            state.message_history.append(result_message)
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"result_written_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.RESULT_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=result_message.message_id,
+                artifact_ids=[item.artifact_id for item in result_artifacts],
+                reservation_ids=list(provider_tasks.values()),
+                reason=reason,
+            ),
+        )
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": (
+                    RevisionControlPhase.COMPLETED.value
+                    if completed
+                    else RevisionControlPhase.BLOCKED.value
+                ),
+                "active_result_id": result_id,
+                "pending_request_ids": [
+                    item
+                    for item in state.revision_control.pending_request_ids
+                    if item != request.revision_request_id
+                ],
+                "consumed_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.consumed_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+                "consumed_result_ids": list(
+                    dict.fromkeys(
+                        [*state.revision_control.consumed_result_ids, result_id]
+                    )
+                ),
+            }
+        )
+
+    def _record_revision_audit(
+        self,
+        state: PlaywrightWorkflowState,
+        event: RevisionAuditEvent,
+    ) -> None:
+        self.revision_exchange.create_audit_event_once(event)
+        if event.audit_event_id not in state.revision_control.audit_event_ids:
+            state.revision_control.audit_event_ids.append(event.audit_event_id)
 
     async def start(
         self,
@@ -390,11 +934,50 @@ class PlaywrightManager:
         self,
         workflow_id: str,
         *,
+        actor_id: str = "cli.operator",
+        actor_source: str = "CLI",
+        reason: str = "Operator authorized Playwright resume after Conclusion Revision",
         progress_callback: ProgressCallback | None = None,
     ) -> PlaywrightWorkflowState:
         state = self.repository.load(workflow_id)
         if state.status != PlaywrightStatus.WAITING_UPSTREAM_REVISION.value:
             raise ValueError("Playwright workflow is not waiting for an upstream revision")
+        canonical_request_message: PMPMessage | None = None
+        canonical_result_message: PMPMessage | None = None
+        if (
+            state.revision_control.phase
+            == RevisionControlPhase.WAITING_UPSTREAM_RESULT.value
+        ):
+            canonical_request_message = self._active_upstream_request_message(state)
+            request = RevisionRequestV1.model_validate(
+                canonical_request_message.payload
+            )
+            self.revision_exchange.validator.validate_current_base_artifacts(
+                request,
+                {
+                    (
+                        "conclusion.final_conclusion",
+                        str(state.final_conclusion.get("final_conclusion_id") or ""),
+                    ): canonical_sha256(state.final_conclusion),
+                    (
+                        "conclusion.conclusion_package",
+                        str(state.conclusion_package.get("conclusion_package_id") or ""),
+                    ): canonical_sha256(state.conclusion_package),
+                    (
+                        "conclusion.human_selection",
+                        str(state.human_selection.get("selection_id") or ""),
+                    ): canonical_sha256(state.human_selection),
+                },
+            )
+            try:
+                canonical_result_message = self.revision_exchange.load_result(
+                    requester_layer=LayerId.PLAYWRIGHT,
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request.revision_request_id,
+                    request_message=canonical_request_message,
+                )
+            except FileNotFoundError:
+                canonical_result_message = None
         handoff = self.repository.load_conclusion_handoff(workflow_id)
         if handoff.message_id == state.conclusion_handoff.get("message_id"):
             raise ValueError("Conclusionから新しいrevision resultがまだ届いていません")
@@ -402,6 +985,22 @@ class PlaywrightManager:
         payload = handoff.payload
         if not payload.get("final_conclusion") or not payload.get("human_selection"):
             raise ValueError("Revised Conclusion handoff is incomplete")
+        if canonical_request_message is not None:
+            if canonical_result_message is None:
+                canonical_result_message = self._adapt_legacy_conclusion_revision_result(
+                    state,
+                    request_message=canonical_request_message,
+                    handoff=handoff,
+                )
+            self._consume_conclusion_revision_result(
+                state,
+                request_message=canonical_request_message,
+                result_message=canonical_result_message,
+                handoff=handoff,
+                actor_id=actor_id,
+                actor_source=actor_source,
+                reason=reason,
+            )
         state.conclusion_handoff = handoff.model_dump(mode="json")
         state.final_conclusion = dict(payload["final_conclusion"])
         state.conclusion_package = dict(payload["conclusion_package"])
@@ -415,13 +1014,13 @@ class PlaywrightManager:
         state.citation_manifest = None
         state.visual_plan = None
         state.final_script_package = None
+        state.delivery_paths = {}
+        state.delivered = False
         state.deterministic_validation = None
         state.final_gate_result = None
         state.completed_agents = []
         state.failed_agents = []
         state.current_agent_ids = []
-        state.revision_count = 0
-        state.revision_history = []
         state.message_history.append(handoff)
         state.limitations = list(payload.get("limitations_to_disclose") or state.final_conclusion.get("limitations") or [])
         state.error = None
@@ -433,6 +1032,251 @@ class PlaywrightManager:
         self.repository.save(state)
         await self._emit(progress_callback, "Conclusion修正結果を受領し、Playwrightを再開します")
         return await self._run(state, rerun_from=0, progress_callback=progress_callback)
+
+    def _active_upstream_request_message(
+        self,
+        state: PlaywrightWorkflowState,
+    ) -> PMPMessage:
+        request_id = state.revision_control.active_request_id
+        message_id = state.revision_control.active_request_message_id
+        if not request_id or not message_id:
+            raise ValueError("Playwright has no active upstream Revision Request")
+        message = next(
+            (item for item in state.message_history if item.message_id == message_id),
+            None,
+        )
+        if message is None:
+            message = self.revision_exchange.load_request(
+                target_layer=LayerId.CONCLUSION,
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+            )
+        request = self.revision_exchange.validator.validate_request_message(message)
+        if (
+            request.revision_request_id != request_id
+            or request.source_layer != LayerId.PLAYWRIGHT.value
+            or request.target_layer != LayerId.CONCLUSION.value
+        ):
+            raise ValueError("Playwright upstream Revision identity is inconsistent")
+        return message
+
+    def _adapt_legacy_conclusion_revision_result(
+        self,
+        state: PlaywrightWorkflowState,
+        *,
+        request_message: PMPMessage,
+        handoff: PMPMessage,
+    ) -> PMPMessage:
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        final = dict(handoff.payload["final_conclusion"])
+        final_id = str(final.get("final_conclusion_id") or "")
+        if not final_id:
+            raise ValueError("Legacy Conclusion handoff has no final identity")
+        result = RevisionResultV1.create(
+            revision_result_id=(
+                "revision_result_"
+                + uuid5(
+                    NAMESPACE_URL,
+                    f"{request.revision_request_id}:legacy-result",
+                ).hex
+            ),
+            revision_request_id=request.revision_request_id,
+            request_message_id=request_message.message_id,
+            workflow_id=state.workflow_id,
+            requester_layer=LayerId.PLAYWRIGHT,
+            producer_layer=LayerId.CONCLUSION,
+            revision_epoch=request.revision_epoch,
+            status=RevisionExecutionStatus.COMPLETED,
+            base_artifacts=request.base_artifacts,
+            result_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="conclusion.final_conclusion",
+                    artifact_id=final_id,
+                    sha256=canonical_sha256(final),
+                )
+            ],
+            finding_dispositions=[
+                RevisionFindingDisposition(
+                    finding_id=finding_id,
+                    outcome=RevisionFindingOutcome.RESOLVED,
+                    reason="Validated legacy Conclusion handoff adapted without Provider calls",
+                    result_artifact_ids=[final_id],
+                )
+                for finding_id in request.source_finding_ids
+            ],
+            human_selection_impact=request.expected_human_selection_impact,
+            provider_reservation_ids=[],
+            retrieval_reservation_ids=[],
+            provider_call_count=0,
+            retrieval_call_count=0,
+            completed_at=handoff.metadata.updated_at,
+        )
+        message_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{request.revision_request_id}:legacy-result-message",
+            )
+        )
+        message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=request_message.message_id,
+                    sender_agent_id=request_message.receiver_agent_id,
+                    receiver_agent_id=request_message.sender_agent_id,
+                    message_type=MessageType.REVISION_RESULT,
+                    objective="Adapt the validated legacy Conclusion revision handoff",
+                    payload=result.model_dump(mode="json"),
+                    routing=PMPRouting(revision_target=None, reply_required=False),
+                    metadata=PMPMetadata(
+                        created_at=handoff.metadata.updated_at,
+                        updated_at=handoff.metadata.updated_at,
+                        status=MessageStatus.COMPLETED,
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": message_id,
+            }
+        )
+        self.revision_exchange.create_result_once(request_message, message)
+        return message
+
+    def _consume_conclusion_revision_result(
+        self,
+        state: PlaywrightWorkflowState,
+        *,
+        request_message: PMPMessage,
+        result_message: PMPMessage,
+        handoff: PMPMessage,
+        actor_id: str,
+        actor_source: str,
+        reason: str,
+    ) -> None:
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        result = RevisionResultV1.model_validate(result_message.payload)
+        final = dict(handoff.payload["final_conclusion"])
+        artifact = next(
+            (
+                item
+                for item in result.result_artifacts
+                if item.artifact_type == "conclusion.final_conclusion"
+            ),
+            None,
+        )
+        if (
+            result.status != RevisionExecutionStatus.COMPLETED.value
+            or artifact is None
+            or artifact.artifact_id != str(final.get("final_conclusion_id") or "")
+            or artifact.sha256 != canonical_sha256(final)
+        ):
+            raise ValueError("Conclusion Revision Result does not match its handoff")
+        old_selection_id = str(state.human_selection.get("selection_id") or "")
+        new_selection = dict(handoff.payload["human_selection"])
+        new_selection_id = str(new_selection.get("selection_id") or "")
+        if (
+            result.human_selection_impact
+            == HumanSelectionImpact.UNCHANGED.value
+            and new_selection != state.human_selection
+        ):
+            raise ValueError("UNCHANGED Conclusion Revision altered Human Selection")
+        if (
+            result.human_selection_impact
+            == HumanSelectionImpact.RESELECTION_REQUIRED.value
+            and new_selection_id == old_selection_id
+        ):
+            raise ValueError("Conclusion Revision required a new Human Selection")
+        provider_tasks = {
+            agent_id: self._logical_task_id(state, agent_id)
+            for agent_id in AGENT_ORDER
+        }
+        authorization = RevisionExecutionAuthorization(
+            authorization_id=(
+                "revision_authorization_"
+                + uuid5(
+                    NAMESPACE_URL,
+                    f"{request.revision_request_id}:playwright-resume",
+                ).hex
+            ),
+            workflow_id=state.workflow_id,
+            revision_request_id=request.revision_request_id,
+            executing_layer=LayerId.PLAYWRIGHT,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+            max_provider_calls=len(provider_tasks),
+            max_retrieval_calls=0,
+        )
+        try:
+            current = self.revision_exchange.load_authorization(
+                executing_layer=LayerId.PLAYWRIGHT,
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+            )
+            if (
+                current.actor_id != actor_id
+                or current.actor_source != actor_source
+                or current.reason != reason
+            ):
+                raise ValueError("Playwright resume was authorized differently")
+            authorization = current
+        except FileNotFoundError:
+            self.revision_exchange.create_authorization_once(authorization)
+        consumed = self.revision_exchange.consume_authorization(
+            authorization,
+            provider_reservation_ids=list(provider_tasks.values()),
+            retrieval_reservation_ids=[],
+        )
+        for message in (result_message,):
+            if not any(item.message_id == message.message_id for item in state.message_history):
+                state.message_history.append(message)
+        for event in (
+            RevisionAuditEvent(
+                audit_event_id=f"result_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.RESULT_CONSUMED,
+                actor_id=self.agent_id,
+                message_id=result_message.message_id,
+                artifact_ids=[artifact.artifact_id],
+                reason="Validated correlated Conclusion Revision Result",
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"resume_authorization_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CONSUMED,
+                actor_id=actor_id,
+                reservation_ids=list(provider_tasks.values()),
+                reason=reason,
+                created_at=consumed.consumed_at,
+            ),
+        ):
+            self._record_revision_audit(state, event)
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.COMPLETED.value,
+                "active_result_id": result.revision_result_id,
+                "pending_request_ids": [],
+                "consumed_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.consumed_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+                "consumed_result_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.consumed_result_ids,
+                            result.revision_result_id,
+                        ]
+                    )
+                ),
+            }
+        )
 
     async def recover(
         self,
@@ -801,20 +1645,41 @@ class PlaywrightManager:
             except Exception as exc:
                 return await self._fail(state, f"Playwright生成に失敗しました: {exc}", progress_callback)
 
+            active_revision_finished = (
+                state.revision_control.phase
+                == RevisionControlPhase.EXECUTING.value
+            )
             if gate.status == PlaywrightGateStatus.UPSTREAM_REVISION_REQUIRED.value:
+                self._finalize_active_revision(
+                    state,
+                    completed=False,
+                    reason=gate.delivery_readiness,
+                )
                 return await self._request_upstream_revision(
                     state,
                     gate.upstream_revision_requests,
                     progress_callback,
                 )
             if gate.status == PlaywrightGateStatus.BLOCKED.value:
+                self._finalize_active_revision(
+                    state,
+                    completed=False,
+                    reason=gate.delivery_readiness,
+                )
                 state.status = PlaywrightStatus.BLOCKED
                 state.current_agent_ids = []
                 state.error = {"stage": "final_gate", "message": gate.delivery_readiness}
                 self.repository.save(state)
                 return state
             if gate.status == PlaywrightGateStatus.REVISION_REQUIRED.value:
+                self._finalize_active_revision(
+                    state,
+                    completed=False,
+                    reason=gate.delivery_readiness,
+                )
                 if self.demo_safe_mode:
+                    if not active_revision_finished:
+                        self._plan_internal_revision(state, gate)
                     state.status = PlaywrightStatus.BLOCKED
                     state.current_agent_ids = []
                     state.error = {
@@ -826,23 +1691,15 @@ class PlaywrightManager:
                     }
                     self.repository.save(state)
                     return state
-                state.revision_count += 1
-                rerun_from = min(AGENT_ORDER.index(item) for item in gate.revision_targets)
-                stages = REVISION_DEPENDENCIES[AGENT_ORDER[rerun_from]]
-                state.revision_history.append(
-                    PlaywrightRevisionRecord(
-                        iteration=state.revision_count,
-                        target_agent_ids=gate.revision_targets,
-                        findings=gate.findings,
-                        rerun_stages=stages,
-                    )
-                )
-                state.status = PlaywrightStatus.REVISING
-                self._clear_from(state, rerun_from)
-                task_id_overrides = {}
+                self._plan_internal_revision(state, gate)
                 self.repository.save(state)
-                await self._emit(progress_callback, f"Playwright Revision {state.revision_count}: {', '.join(gate.revision_targets)}")
-                continue
+                return await self._execute_active_revision(
+                    state,
+                    actor_id=self.agent_id,
+                    actor_source="SYSTEM",
+                    reason="Safe Mode is disabled; execute saved Playwright revision",
+                    progress_callback=progress_callback,
+                )
 
             package = self._build_final_package(
                 state,
@@ -854,6 +1711,11 @@ class PlaywrightManager:
                 gate,
             )
             state.final_script_package = package.model_dump(mode="json")
+            self._finalize_active_revision(
+                state,
+                completed=True,
+                reason=gate.delivery_readiness,
+            )
             self.repository.save_final_package(package)
             state.delivery_paths = self.repository.save_deliveries(package)
             delivery = PMPMessage.create(
@@ -876,7 +1738,13 @@ class PlaywrightManager:
                 ),
             )
             self.pmp_validator.validate(delivery)
-            state.message_history.append(delivery)
+            if not any(
+                item.message_type == MessageType.FINAL_SCRIPT_DELIVERY.value
+                and item.payload.get("final_script_package_id")
+                == package.final_script_package_id
+                for item in state.message_history
+            ):
+                state.message_history.append(delivery)
             state.delivered = True
             state.status = PlaywrightStatus.COMPLETED
             state.current_agent_ids = []
@@ -1220,12 +2088,6 @@ class PlaywrightManager:
         )
 
     async def _request_upstream_revision(self, state, problems, progress_callback):
-        if self.demo_safe_mode:
-            return await self._fail(
-                state,
-                "Demo Safe Mode stopped automatic upstream revision routing",
-                progress_callback,
-            )
         requests = []
         if problems and isinstance(problems[0], dict) and "revision_request_id" in problems[0]:
             requests = problems
@@ -1245,6 +2107,123 @@ class PlaywrightManager:
                         source_finding_ids=[finding_id],
                     ).model_dump(mode="json")
                 )
+        source_finding_ids = list(
+            dict.fromkeys(
+                finding_id
+                for item in requests
+                for finding_id in item.get("source_finding_ids", [])
+            )
+        )
+        if not source_finding_ids:
+            raise ValueError("Playwright upstream revision has no correlated finding IDs")
+        revision_epoch = max(
+            state.upstream_revision_count,
+            state.revision_control.revision_epoch,
+        ) + 1
+        request_id = deterministic_revision_request_id(
+            workflow_id=state.workflow_id,
+            source_layer=LayerId.PLAYWRIGHT,
+            target_layer=LayerId.CONCLUSION,
+            revision_epoch=revision_epoch,
+            source_review_id=state.message_history[-1].message_id,
+            source_finding_ids=source_finding_ids,
+        )
+        impact = self._upstream_human_selection_impact(requests)
+        request = RevisionRequestV1.create(
+            revision_request_id=request_id,
+            workflow_id=state.workflow_id,
+            route=RevisionRoute.UPSTREAM,
+            source_layer=LayerId.PLAYWRIGHT,
+            target_layer=LayerId.CONCLUSION,
+            revision_epoch=revision_epoch,
+            root_revision_request_id=request_id,
+            source_review_id=state.message_history[-1].message_id,
+            source_finding_ids=source_finding_ids,
+            target_agent_ids=(
+                ["conclusion.manager"]
+                if impact == HumanSelectionImpact.UNCHANGED
+                else [
+                    "conclusion.position_generator",
+                    "conclusion.decision_evaluator",
+                    "conclusion.decision_integrator",
+                ]
+            ),
+            base_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="conclusion.final_conclusion",
+                    artifact_id=str(
+                        state.final_conclusion.get("final_conclusion_id") or ""
+                    ),
+                    sha256=canonical_sha256(state.final_conclusion),
+                ),
+                RevisionArtifactRef(
+                    artifact_type="conclusion.conclusion_package",
+                    artifact_id=str(
+                        state.conclusion_package.get("conclusion_package_id") or ""
+                    ),
+                    sha256=canonical_sha256(state.conclusion_package),
+                ),
+                RevisionArtifactRef(
+                    artifact_type="conclusion.human_selection",
+                    artifact_id=str(state.human_selection.get("selection_id") or ""),
+                    sha256=canonical_sha256(state.human_selection),
+                ),
+            ],
+            required_actions=list(
+                dict.fromkeys(str(item["required_resolution"]) for item in requests)
+            ),
+            acceptance_conditions=list(
+                dict.fromkeys(
+                    str(condition)
+                    for item in requests
+                    for condition in item["acceptance_conditions"]
+                )
+            ),
+            evidence_expansion_allowed=False,
+            retrieval_allowed=False,
+            expected_human_selection_impact=impact,
+        )
+        canonical_message_id = str(
+            uuid5(NAMESPACE_URL, f"{request_id}:request-message")
+        )
+        canonical_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=state.message_history[-1].message_id,
+                    sender_agent_id=self.agent_id,
+                    receiver_agent_id="conclusion.manager",
+                    message_type=MessageType.REVISION_REQUEST,
+                    objective="Revise Conclusion artifacts required for valid script production",
+                    payload=request.model_dump(mode="json"),
+                    constraints={
+                        "human_selection_impact": impact,
+                        "new_evidence_collection_allowed": False,
+                    },
+                    context=PMPContext(
+                        current_stage="playwright.upstream_revision",
+                        previous_stage=state.status,
+                        next_stage="conclusion.manager",
+                    ),
+                    routing=PMPRouting(
+                        revision_target="conclusion.manager",
+                        reply_required=True,
+                    ),
+                    metadata=PMPMetadata(
+                        status=MessageStatus.REVISION_REQUIRED,
+                        extensions={"role_definition": state.role_definition_usage[0]},
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": canonical_message_id,
+            }
+        )
+        self.revision_exchange.create_request_once(
+            canonical_message,
+            budget_policy=RevisionBudgetPolicy(
+                internal_limit=self.max_revisions,
+                upstream_limit=self.max_revisions,
+            ),
+        )
         message = PMPMessage.create(
             workflow_id=state.workflow_id,
             parent_message_id=state.message_history[-1].message_id,
@@ -1263,7 +2242,12 @@ class PlaywrightManager:
         )
         self.pmp_validator.validate(message)
         self.repository.save_conclusion_revision_outbox(message)
-        state.message_history.append(message)
+        for saved_message in (canonical_message, message):
+            if not any(
+                item.message_id == saved_message.message_id
+                for item in state.message_history
+            ):
+                state.message_history.append(saved_message)
         state.upstream_revision_count += 1
         state.upstream_revision_history.append(
             PlaywrightUpstreamRevisionRecord(
@@ -1273,11 +2257,54 @@ class PlaywrightManager:
             )
         )
         state.status = PlaywrightStatus.WAITING_UPSTREAM_REVISION
+        state.revision_control = RevisionControlState(
+            phase=RevisionControlPhase.WAITING_UPSTREAM_RESULT,
+            revision_epoch=revision_epoch,
+            active_request_id=request_id,
+            active_request_message_id=canonical_message.message_id,
+            root_revision_request_id=request_id,
+            pending_request_ids=[request_id],
+            consumed_request_ids=list(state.revision_control.consumed_request_ids),
+            consumed_result_ids=list(state.revision_control.consumed_result_ids),
+            audit_event_ids=list(state.revision_control.audit_event_ids),
+        )
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"upstream_request_written_{revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+                layer=LayerId.PLAYWRIGHT,
+                event_type=RevisionAuditEventType.REQUEST_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=canonical_message.message_id,
+                artifact_ids=[item.artifact_id for item in request.base_artifacts],
+                reason="Playwright Final Gate or handoff validation requires Conclusion repair",
+            ),
+        )
         state.current_agent_ids = []
         state.error = None
         self.repository.save(state)
         await self._emit(progress_callback, "Conclusionへ修正を要求し、Playwrightを待機状態にしました")
         return state
+
+    @staticmethod
+    def _upstream_human_selection_impact(
+        requests: list[dict[str, Any]],
+    ) -> HumanSelectionImpact:
+        structural_codes = {
+            "TRACE_CLAIM_IDS_MISSING",
+            "TRACE_ANALYSIS_IDS_MISSING",
+            "TRACE_EVIDENCE_IDS_MISSING",
+            "TRACE_SOURCE_IDS_MISSING",
+            "SOURCE_MANIFEST_MISSING",
+            "SOURCE_MANIFEST_INVALID",
+            "CONCLUSION_QUALITY_REVIEW_MISMATCH",
+        }
+        issue_types = {str(item.get("issue_type") or "") for item in requests}
+        if issue_types and issue_types <= structural_codes:
+            return HumanSelectionImpact.UNCHANGED
+        return HumanSelectionImpact.RESELECTION_REQUIRED
 
     def _handoff_problems(self, payload: dict[str, Any]) -> list[dict[str, str]]:
         final = payload.get("final_conclusion") or {}

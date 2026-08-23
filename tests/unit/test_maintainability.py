@@ -89,6 +89,13 @@ class MaintainabilityTests(unittest.TestCase):
         self.assertEqual(args.producer_recover, "workflow-1")
         self.assertIsNone(args.producer_provider_retry)
 
+    def test_cli_accepts_producer_internal_revision(self) -> None:
+        args = parse_args(
+            ["--producer-revise", "workflow-1", "--reason", "approved scope repair"]
+        )
+        self.assertEqual(args.producer_revise, "workflow-1")
+        self.assertEqual(args.reason, "approved scope repair")
+
     def test_cli_accepts_one_time_producer_provider_retry(self) -> None:
         args = parse_args(["--producer-provider-retry", "workflow-1"])
         self.assertEqual(args.producer_provider_retry, "workflow-1")
@@ -215,6 +222,18 @@ class MaintainabilityTests(unittest.TestCase):
     def test_cli_accepts_one_explicit_researcher_revision_cycle(self) -> None:
         args = parse_args(["--researcher-revise", "workflow-1"])
         self.assertEqual(args.researcher_revise, "workflow-1")
+
+    def test_cli_separates_researcher_decision_from_revision_execution(self) -> None:
+        args = parse_args(
+            [
+                "--researcher-revision-execute",
+                "workflow-1",
+                "--reason",
+                "paid calls approved",
+            ]
+        )
+        self.assertEqual(args.researcher_revision_execute, "workflow-1")
+        self.assertEqual(args.reason, "paid calls approved")
         self.assertIsNone(args.researcher_resume)
 
     def test_default_summary_hides_large_internal_payloads(self) -> None:

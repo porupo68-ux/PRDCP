@@ -22,6 +22,7 @@ COMMAND_CHANNEL_RULES = {
     "producer": "producer",
     "producer_topic": "producer",
     "producer_status": "producer",
+    "producer_revise": "producer",
     "researcher": "researcher",
     "researcher_status": "researcher",
     "researcher_result": "researcher",
@@ -29,6 +30,8 @@ COMMAND_CHANNEL_RULES = {
     "researcher_accept": "researcher",
     "researcher_accept_limitations": "researcher",
     "researcher_revise": "researcher",
+    "researcher_revision_execute": "researcher",
+    "deliberation_revise": "deliberation",
     "researcher_recover": "researcher",
     "deliberation": "deliberation",
     "deliberation_status": "deliberation",
@@ -41,6 +44,7 @@ COMMAND_CHANNEL_RULES = {
     "conclusion_integrate": "conclusion",
     "conclusion_result": "conclusion",
     "conclusion_resume": "conclusion",
+    "conclusion_revise": "conclusion",
     "playwright": "playwright",
     "playwright_status": "playwright",
     "playwright_script": "playwright",
@@ -48,6 +52,7 @@ COMMAND_CHANNEL_RULES = {
     "playwright_visuals": "playwright",
     "playwright_result": "playwright",
     "playwright_resume": "playwright",
+    "playwright_revise": "playwright",
 }
 
 

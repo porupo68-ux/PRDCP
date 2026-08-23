@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from common.models.revision import RevisionControlState
 from playwright.schemas.deterministic_repair import (
     PlaywrightDeterministicRepairRecord,
 )
@@ -81,6 +82,7 @@ class PlaywrightWorkflowState(BaseModel):
     )
     upstream_revision_count: int = Field(default=0, ge=0)
     upstream_revision_history: list[PlaywrightUpstreamRevisionRecord] = Field(default_factory=list)
+    revision_control: RevisionControlState = Field(default_factory=RevisionControlState)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

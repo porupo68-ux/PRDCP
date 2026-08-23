@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from common.models.revision import RevisionControlState
 from common.models.workflow import WorkflowStatus
 
 
@@ -100,6 +101,7 @@ class ConclusionWorkflowState(BaseModel):
     )
     upstream_revision_count: int = Field(default=0, ge=0)
     upstream_revision_history: list[ConclusionUpstreamRevisionRecord] = Field(default_factory=list)
+    revision_control: RevisionControlState = Field(default_factory=RevisionControlState)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
     provider_payload_recoveries: list[dict[str, Any]] = Field(default_factory=list)

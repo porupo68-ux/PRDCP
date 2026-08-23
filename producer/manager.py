@@ -6,6 +6,7 @@ import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from common.ids import new_workflow_id
 from common.models.pmp import (
@@ -17,6 +18,25 @@ from common.models.pmp import (
     PMPRouting,
 )
 from common.models.workflow import WorkflowStatus
+from common.models.revision import (
+    HumanSelectionImpact,
+    LayerId,
+    RevisionArtifactRef,
+    RevisionAuditEvent,
+    RevisionAuditEventType,
+    RevisionBudgetPolicy,
+    RevisionControlState,
+    RevisionControlPhase,
+    RevisionExecutionAuthorization,
+    RevisionExecutionStatus,
+    RevisionFindingDisposition,
+    RevisionFindingOutcome,
+    RevisionRequestV1,
+    RevisionResultV1,
+    RevisionRoute,
+    canonical_sha256,
+    deterministic_revision_request_id,
+)
 from common.provider_retry import (
     ProviderRetryAuthorization,
     ProviderRetryAuthorizationStore,
@@ -32,8 +52,12 @@ from producer.registry import ProducerRegistry
 from producer.schemas.review import QualityReviewOutput
 from producer.state import ProducerWorkflowState, RevisionRecord, utc_now
 from producer.workflow import AGENT_ORDER, DISPLAY_NAMES
-from retrieval.models import RetrievedContext
+from retrieval.models import RetrievedContext, RetrievalStrategy
 from storage.workflow_repository import WorkflowRepository
+from storage.revision_exchange_repository import (
+    RevisionBudgetExhausted,
+    RevisionExchangeRepository,
+)
 
 
 ProgressCallback = Callable[[str], Awaitable[None] | None]
@@ -62,13 +86,14 @@ class ProducerManager:
             )
         self.registry.bind_retrieval_data_dir(repository.data_dir)
         self.demo_safe_mode = demo_safe_mode
-        self.max_revisions = 0 if demo_safe_mode else max_revisions
+        self.max_revisions = max_revisions
         self.pmp_validator = PMPValidator()
         self.rd_loader = rd_loader or registry.rd_loader
         self.provider_retry_store = ProviderRetryAuthorizationStore(repository.data_dir)
         self.provider_output_repair_store = ProviderOutputRepairAuthorizationStore(
             repository.data_dir
         )
+        self.revision_exchange = RevisionExchangeRepository(repository.data_dir)
 
     def authorize_provider_retry(
         self,
@@ -344,18 +369,22 @@ class ProducerManager:
             return state
         start_index = self._recovery_start_index(state)
         agent_id = AGENT_ORDER[start_index]
+        revision_task_overrides, retrieval_task_overrides = (
+            self._active_revision_task_overrides(state)
+        )
+        original_task_id = revision_task_overrides.get(agent_id, agent_id)
         provider_id = getattr(self.registry.get(agent_id).provider, "provider_id", None)
-        task_overrides: dict[str, str] = {}
+        task_overrides: dict[str, str] = dict(revision_task_overrides)
         if isinstance(provider_id, str):
             authorization = self.provider_retry_store.for_original_task(
                 workflow_id=workflow_id,
                 provider_id=provider_id,
-                original_task_id=agent_id,
+                original_task_id=original_task_id,
             )
             original_reservation = self.provider_retry_store.reservation_path(
                 provider_id=provider_id,
                 workflow_id=workflow_id,
-                task_id=agent_id,
+                task_id=original_task_id,
             )
             if (
                 authorization is not None
@@ -375,6 +404,7 @@ class ProducerManager:
             start_index,
             progress_callback,
             provider_task_id_overrides=task_overrides,
+            retrieval_task_id_overrides=retrieval_task_overrides,
             stop_after_index=start_index if stop_after_checkpoint else None,
         )
 
@@ -407,6 +437,171 @@ class ProducerManager:
         await self._emit(progress_callback, f"Workflow開始: {workflow_id}")
         return await self._run_from(state, 0, progress_callback)
 
+    def _activate_pending_upstream_revision(
+        self,
+        state: ProducerWorkflowState,
+    ) -> ProducerWorkflowState:
+        """Adopt one canonical Researcher request without invoking a Provider."""
+
+        pending: list[tuple[PMPMessage, RevisionRequestV1]] = []
+        for message in self.revision_exchange.list_requests(
+            target_layer=LayerId.PRODUCER,
+            workflow_id=state.workflow_id,
+        ):
+            request = self.revision_exchange.validator.validate_request_message(message)
+            if (
+                request.route == RevisionRoute.UPSTREAM.value
+                and request.source_layer == LayerId.RESEARCHER.value
+                and request.target_layer == LayerId.PRODUCER.value
+                and request.revision_request_id
+                not in state.revision_control.consumed_request_ids
+            ):
+                pending.append((message, request))
+        if not pending:
+            raise FileNotFoundError(
+                f"No pending Researcher Revision Request exists for {state.workflow_id}"
+            )
+        if len(pending) > 1:
+            raise ValueError("Multiple pending Producer Revision Requests require operator review")
+        message, request = pending[0]
+        if request.target_agent_ids != ["producer.research_planner"]:
+            raise ValueError(
+                "Researcher may request only producer.research_planner Revision"
+            )
+        if request.evidence_expansion_allowed or request.retrieval_allowed:
+            raise ValueError(
+                "Researcher plan-defect Revision cannot authorize Producer Retrieval"
+            )
+        if state.research_plan is None:
+            raise ValueError("Producer has no current Research Plan for upstream Revision")
+        plan_id = str(state.research_plan.get("research_plan_id") or "")
+        expected_plan = next(
+            (
+                item
+                for item in request.base_artifacts
+                if item.artifact_type == "producer.research_plan"
+            ),
+            None,
+        )
+        if expected_plan is None or expected_plan.artifact_id != plan_id:
+            raise ValueError("Researcher Revision Request has no matching Research Plan base")
+        if expected_plan.sha256 != canonical_sha256(state.research_plan):
+            raise ValueError("Researcher Revision Request is stale for the Research Plan")
+        if not any(
+            item.artifact_type == "researcher.research_report"
+            for item in request.base_artifacts
+        ):
+            raise ValueError("Researcher Revision Request has no Research Report provenance")
+
+        self._append_message_once(state, message)
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.AUTHORIZATION_REQUIRED.value,
+                "revision_epoch": request.revision_epoch,
+                "active_request_id": request.revision_request_id,
+                "active_request_message_id": message.message_id,
+                "active_result_id": None,
+                "root_revision_request_id": request.root_revision_request_id,
+                "parent_revision_request_id": request.parent_revision_request_id,
+                "pending_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.pending_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+            }
+        )
+        state.status = WorkflowStatus.BLOCKED
+        state.current_agent_id = None
+        state.completed_at = None
+        state.error = {
+            "code": "UPSTREAM_REVISION_AUTHORIZATION_REQUIRED",
+            "message": (
+                "Researcher requested one Research Plan Revision; explicit Provider "
+                "authorization is required"
+            ),
+        }
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"upstream_request_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.REQUEST_CONSUMED,
+                actor_id=self.agent_id,
+                message_id=message.message_id,
+                reason="Producer adopted the request and stopped at the authorization boundary",
+            ),
+        )
+        self.repository.save(state)
+        return state
+
+    def authorize_revision(
+        self,
+        workflow_id: str,
+        *,
+        actor_id: str,
+        actor_source: str,
+        reason: str,
+    ) -> RevisionExecutionAuthorization:
+        """Persist one operator authorization without invoking any Provider."""
+
+        state = self.repository.load(workflow_id)
+        if state.revision_control.phase != RevisionControlPhase.AUTHORIZATION_REQUIRED.value:
+            state = self._activate_pending_upstream_revision(state)
+        if state.revision_control.phase != RevisionControlPhase.AUTHORIZATION_REQUIRED.value:
+            raise ValueError("Producer has no revision awaiting operator authorization")
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        authorization = self._create_revision_authorization(
+            state,
+            request,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+        )
+        self.repository.save(state)
+        return authorization
+
+    async def revise(
+        self,
+        workflow_id: str,
+        *,
+        actor_id: str = "cli.operator",
+        actor_source: str = "CLI",
+        reason: str = "Operator authorized one Producer internal revision cycle",
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProducerWorkflowState:
+        """Authorize and execute exactly one saved Producer Revision plan."""
+
+        state = self.repository.load(workflow_id)
+        if state.revision_control.phase != RevisionControlPhase.AUTHORIZATION_REQUIRED.value:
+            try:
+                state = self._activate_pending_upstream_revision(state)
+            except FileNotFoundError:
+                if (
+                    state.status == WorkflowStatus.COMPLETED.value
+                    and state.revision_control.phase == RevisionControlPhase.COMPLETED.value
+                ):
+                    return state
+                raise
+        authorization = self.authorize_revision(
+            workflow_id,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+        )
+        state = self.repository.load(workflow_id)
+        return await self._execute_active_revision(
+            state,
+            authorization=authorization,
+            progress_callback=progress_callback,
+        )
+
     async def _run_from(
         self,
         state: ProducerWorkflowState,
@@ -414,6 +609,7 @@ class ProducerManager:
         progress_callback: ProgressCallback | None,
         *,
         provider_task_id_overrides: dict[str, str] | None = None,
+        retrieval_task_id_overrides: dict[str, str] | None = None,
         stop_after_index: int | None = None,
     ) -> ProducerWorkflowState:
         state.status = WorkflowStatus.RUNNING
@@ -433,6 +629,7 @@ class ProducerManager:
                 agent_id,
                 index,
                 provider_task_id=(provider_task_id_overrides or {}).get(agent_id),
+                retrieval_task_id=(retrieval_task_id_overrides or {}).get(agent_id),
             )
             state.message_history.append(request)
             self.repository.save(state)
@@ -476,6 +673,7 @@ class ProducerManager:
         index: int,
         *,
         provider_task_id: str | None = None,
+        retrieval_task_id: str | None = None,
     ) -> PMPMessage:
         previous_stage = AGENT_ORDER[index - 1] if index > 0 else "producer.manager"
         next_stage = AGENT_ORDER[index + 1] if index + 1 < len(AGENT_ORDER) else "producer.manager"
@@ -499,6 +697,11 @@ class ProducerManager:
                     **(
                         {"provider_task_id": provider_task_id}
                         if provider_task_id is not None
+                        else {}
+                    ),
+                    **(
+                        {"retrieval_task_id": retrieval_task_id}
+                        if retrieval_task_id is not None
                         else {}
                     ),
                 },
@@ -598,6 +801,13 @@ class ProducerManager:
         state.review_result = review.model_dump(mode="json")
         status = review.status
         if status in {"approved", "approved_with_conditions"}:
+            if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+                self._finalize_active_revision(
+                    state,
+                    review_response=response,
+                    completed=True,
+                    reason=review.reason,
+                )
             self._mark_complete(state, "producer.quality_reviewer")
             state.status = WorkflowStatus.APPROVED
             self.repository.save(state)
@@ -617,61 +827,642 @@ class ProducerManager:
             self.repository.save(state)
             return state
         if status == "revision_required":
-            if self.demo_safe_mode:
-                return await self._fail(
+            if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+                self._finalize_active_revision(
                     state,
-                    "Demo Safe Mode stopped automatic reviewer revision and Manager re-dispatch",
-                    progress_callback,
-                )
-            state.revision_count += 1
-            state.revision_history.append(
-                RevisionRecord(
-                    iteration=state.revision_count,
-                    target_agent=review.revision_target or "",
+                    review_response=response,
+                    completed=False,
                     reason=review.reason,
-                    required_action=review.required_action or "",
                 )
-            )
-            if state.revision_count >= self.max_revisions:
-                return await self._fail(
-                    state,
-                    f"Quality Reviewerが{self.max_revisions}回revision_requiredを返したため停止しました",
-                    progress_callback,
-                )
-            target = review.revision_target or ""
+            request = self._plan_internal_revision(state, response, review)
             await self._emit(
                 progress_callback,
-                f"Quality Reviewer: revision_required → {target}（{state.revision_count}/{self.max_revisions}）",
+                "Quality Reviewer: revision_required → "
+                f"{request.target_agent_ids[0]} (epoch {request.revision_epoch})",
             )
-            revision_message = PMPMessage.create(
-                workflow_id=state.workflow_id,
-                parent_message_id=response.message_id,
-                sender_agent_id=self.agent_id,
-                receiver_agent_id=target,
-                message_type=MessageType.REVISION_REQUEST,
-                objective="Revise the rejected Producer artifact",
-                payload={
-                    "target_agent": target,
-                    "reason": review.reason,
-                    "required_action": review.required_action,
-                },
-                context=PMPContext(
-                    current_stage="producer.manager",
-                    previous_stage="producer.quality_reviewer",
-                    next_stage=target,
-                ),
-                routing=PMPRouting(revision_target=target, reply_required=True),
-                metadata=PMPMetadata(
-                    status=MessageStatus.REVISION_REQUIRED,
-                    extensions={"role_definition": state.role_definition_usage[-1]},
-                ),
+            if self.demo_safe_mode:
+                state.revision_control.phase = RevisionControlPhase.AUTHORIZATION_REQUIRED
+                state.status = WorkflowStatus.BLOCKED
+                state.current_agent_id = None
+                state.error = {
+                    "message": (
+                        "Demo Safe Mode stopped automatic Producer Revision; "
+                        "an explicit operator revision command is required"
+                    )
+                }
+                state.completed_at = None
+                self.repository.save(state)
+                return state
+            authorization = self._create_revision_authorization(
+                state,
+                request,
+                actor_id="producer.manager",
+                actor_source="SYSTEM",
+                reason="Safe Mode is disabled; runtime policy permits one automatic revision",
             )
-            state.message_history.append(revision_message)
-            state.status = WorkflowStatus.REVISING
-            self._invalidate_from(state, target)
             self.repository.save(state)
-            return await self._run_from(state, AGENT_ORDER.index(target), progress_callback)
+            return await self._execute_active_revision(
+                state,
+                authorization=authorization,
+                progress_callback=progress_callback,
+            )
+        if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+            self._finalize_active_revision(
+                state,
+                review_response=response,
+                completed=False,
+                reason=review.reason,
+            )
         return await self._fail(state, f"Quality Reviewer blocked workflow: {review.reason}", progress_callback)
+
+    def _plan_internal_revision(
+        self,
+        state: ProducerWorkflowState,
+        review_response: PMPMessage,
+        review: QualityReviewOutput,
+    ) -> RevisionRequestV1:
+        if state.research_plan is None:
+            raise ValueError("Producer Revision requires the reviewed research_plan")
+        target = review.revision_target or ""
+        if target not in AGENT_ORDER[:-1]:
+            raise ValueError("Producer Revision target is not an executable specialist")
+
+        revision_epoch = max(
+            state.revision_count,
+            state.revision_control.revision_epoch,
+        ) + 1
+        finding_id = f"producer_finding_{review_response.message_id.replace('-', '')}"
+        request_id = deterministic_revision_request_id(
+            workflow_id=state.workflow_id,
+            source_layer=LayerId.PRODUCER,
+            target_layer=LayerId.PRODUCER,
+            revision_epoch=revision_epoch,
+            source_review_id=review_response.message_id,
+            source_finding_ids=[finding_id],
+        )
+        plan_id = str(state.research_plan.get("research_plan_id") or "")
+        if not plan_id:
+            raise ValueError("Producer Revision base research_plan has no research_plan_id")
+        retrieval_required = AGENT_ORDER.index(target) <= AGENT_ORDER.index(
+            "producer.general_opinion_analyst"
+        )
+        request = RevisionRequestV1.create(
+            revision_request_id=request_id,
+            workflow_id=state.workflow_id,
+            route=RevisionRoute.INTERNAL,
+            source_layer=LayerId.PRODUCER,
+            target_layer=LayerId.PRODUCER,
+            revision_epoch=revision_epoch,
+            root_revision_request_id=request_id,
+            source_review_id=review_response.message_id,
+            source_finding_ids=[finding_id],
+            target_agent_ids=[target],
+            base_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="producer.research_plan",
+                    artifact_id=plan_id,
+                    sha256=canonical_sha256(state.research_plan),
+                )
+            ],
+            required_actions=[review.required_action or review.reason],
+            acceptance_conditions=[
+                f"{finding_id} is explicitly resolved by a new Quality Review"
+            ],
+            evidence_expansion_allowed=retrieval_required,
+            retrieval_allowed=retrieval_required,
+            expected_human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+            created_at=review_response.metadata.updated_at,
+        )
+        message_id = str(uuid5(NAMESPACE_URL, f"{request_id}:request-message"))
+        revision_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=review_response.message_id,
+                    sender_agent_id=self.agent_id,
+                    receiver_agent_id=target,
+                    message_type=MessageType.REVISION_REQUEST,
+                    objective="Execute an audited Producer internal revision",
+                    payload=request.model_dump(mode="json"),
+                    context=PMPContext(
+                        current_stage="producer.manager",
+                        previous_stage="producer.quality_reviewer",
+                        next_stage=target,
+                    ),
+                    routing=PMPRouting(revision_target=target, reply_required=True),
+                    metadata=PMPMetadata(
+                        created_at=review_response.metadata.updated_at,
+                        updated_at=review_response.metadata.updated_at,
+                        status=MessageStatus.REVISION_REQUIRED,
+                        extensions={"role_definition": state.role_definition_usage[-1]},
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": message_id,
+            }
+        )
+        self.revision_exchange.create_internal_request_once(revision_message)
+        self._append_message_once(state, revision_message)
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.PLANNED.value,
+                "revision_epoch": revision_epoch,
+                "active_request_id": request_id,
+                "active_request_message_id": revision_message.message_id,
+                "active_result_id": None,
+                "root_revision_request_id": request_id,
+                "parent_revision_request_id": None,
+                "pending_request_ids": list(
+                    dict.fromkeys(
+                        [*state.revision_control.pending_request_ids, request_id]
+                    )
+                ),
+            }
+        )
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"request_written_{revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.REQUEST_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=revision_message.message_id,
+                artifact_ids=[plan_id],
+                reason=review.reason,
+                created_at=review_response.metadata.updated_at,
+            ),
+        )
+        self.repository.save(state)
+        return request
+
+    def _create_revision_authorization(
+        self,
+        state: ProducerWorkflowState,
+        request: RevisionRequestV1,
+        *,
+        actor_id: str,
+        actor_source: str,
+        reason: str,
+    ) -> RevisionExecutionAuthorization:
+        provider_tasks, _retrieval_tasks, retrieval_ids = (
+            self._revision_execution_identities(state, request)
+        )
+        try:
+            existing = self.revision_exchange.load_authorization(
+                executing_layer=LayerId.PRODUCER,
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if (
+                existing.actor_id != actor_id
+                or existing.actor_source != actor_source
+                or existing.reason != reason
+            ):
+                raise ValueError("Producer Revision is already authorized by a different actor")
+            return existing
+
+        authorization = RevisionExecutionAuthorization(
+            authorization_id=(
+                "revision_authorization_"
+                + uuid5(NAMESPACE_URL, request.revision_request_id).hex
+            ),
+            workflow_id=state.workflow_id,
+            revision_request_id=request.revision_request_id,
+            executing_layer=LayerId.PRODUCER,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+            max_provider_calls=len(provider_tasks),
+            max_retrieval_calls=len(retrieval_ids),
+        )
+        self.revision_exchange.create_authorization_once(authorization)
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"authorization_created_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CREATED,
+                actor_id=actor_id,
+                reason=reason,
+                created_at=authorization.created_at,
+            ),
+        )
+        return authorization
+
+    async def _execute_active_revision(
+        self,
+        state: ProducerWorkflowState,
+        *,
+        authorization: RevisionExecutionAuthorization,
+        progress_callback: ProgressCallback | None,
+    ) -> ProducerWorkflowState:
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        current_hashes = self._current_revision_artifact_hashes(state)
+        owned_base_artifacts = [
+            item
+            for item in request.base_artifacts
+            if item.artifact_type.startswith("producer.")
+        ]
+        self.revision_exchange.validator.validate_current_base_artifacts(
+            request.model_copy(update={"base_artifacts": owned_base_artifacts}),
+            current_hashes,
+        )
+        try:
+            if request.route == RevisionRoute.INTERNAL.value:
+                budget = self.revision_exchange.budget_store.consume(
+                    policy=RevisionBudgetPolicy(
+                        internal_limit=self.max_revisions,
+                        upstream_limit=0,
+                    ),
+                    workflow_id=state.workflow_id,
+                    layer=LayerId.PRODUCER,
+                    route=RevisionRoute.INTERNAL,
+                    revision_request_id=request.revision_request_id,
+                )
+            else:
+                budget = self.revision_exchange.budget_store.for_request(
+                    workflow_id=state.workflow_id,
+                    layer=LayerId.RESEARCHER,
+                    route=RevisionRoute.UPSTREAM,
+                    revision_request_id=request.revision_request_id,
+                )
+                if budget is None:
+                    raise RevisionBudgetExhausted(
+                        "Researcher upstream Revision Request has no consumed budget slot"
+                    )
+        except RevisionBudgetExhausted as exc:
+            state.revision_control.phase = RevisionControlPhase.BLOCKED
+            state.status = WorkflowStatus.BLOCKED
+            state.current_agent_id = None
+            state.error = {"message": str(exc)}
+            self._record_revision_audit(
+                state,
+                RevisionAuditEvent(
+                    audit_event_id=f"budget_blocked_{request.revision_epoch}",
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request.revision_request_id,
+                    layer=LayerId.PRODUCER,
+                    event_type=RevisionAuditEventType.BLOCKED,
+                    actor_id=self.agent_id,
+                    reason=str(exc),
+                ),
+            )
+            self.repository.save(state)
+            return state
+
+        provider_tasks, retrieval_tasks, retrieval_ids = (
+            self._revision_execution_identities(state, request)
+        )
+        consumed_authorization = self.revision_exchange.consume_authorization(
+            authorization,
+            provider_reservation_ids=list(provider_tasks.values()),
+            retrieval_reservation_ids=retrieval_ids,
+        )
+        for event in (
+            RevisionAuditEvent(
+                audit_event_id=f"authorization_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CONSUMED,
+                actor_id=authorization.actor_id,
+                reservation_ids=[*provider_tasks.values(), *retrieval_ids],
+                reason=authorization.reason,
+                created_at=consumed_authorization.consumed_at,
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"budget_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.BUDGET_CONSUMED,
+                actor_id=self.agent_id,
+                reason=(
+                    f"Producer {request.route} revision slot {budget.iteration}"
+                ),
+                created_at=budget.consumed_at,
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"request_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.REQUEST_CONSUMED,
+                actor_id=self.agent_id,
+                message_id=request_message.message_id,
+                reason=f"Producer Manager began the saved {request.route} revision plan",
+                created_at=budget.consumed_at,
+            ),
+        ):
+            self._record_revision_audit(state, event)
+
+        if not any(
+            item.revision_request_id == request.revision_request_id
+            for item in state.revision_history
+        ):
+            state.revision_history.append(
+                RevisionRecord(
+                    iteration=budget.iteration,
+                    target_agent=request.target_agent_ids[0],
+                    reason=state.review_result.get("reason", "") if state.review_result else "",
+                    required_action=request.required_actions[0],
+                    revision_request_id=request.revision_request_id,
+                    source_finding_ids=request.source_finding_ids,
+                    provider_task_ids=list(provider_tasks.values()),
+                    retrieval_reservation_ids=retrieval_ids,
+                )
+            )
+        if request.route == RevisionRoute.INTERNAL.value:
+            state.revision_count = max(state.revision_count, budget.iteration)
+        state.revision_control.phase = RevisionControlPhase.EXECUTING
+        state.status = WorkflowStatus.REVISING
+        state.error = None
+        state.completed_at = None
+        target = request.target_agent_ids[0]
+        self._invalidate_from(state, target)
+        self.repository.save(state)
+        await self._emit(
+            progress_callback,
+            f"Producer {request.route} Revision {budget.iteration} authorized",
+        )
+        return await self._run_from(
+            state,
+            AGENT_ORDER.index(target),
+            progress_callback,
+            provider_task_id_overrides=provider_tasks,
+            retrieval_task_id_overrides=retrieval_tasks,
+        )
+
+    def _finalize_active_revision(
+        self,
+        state: ProducerWorkflowState,
+        *,
+        review_response: PMPMessage,
+        completed: bool,
+        reason: str,
+    ) -> None:
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        result_artifacts: list[RevisionArtifactRef] = []
+        if state.research_plan is not None:
+            plan_id = str(state.research_plan.get("research_plan_id") or "")
+            if plan_id:
+                result_artifacts.append(
+                    RevisionArtifactRef(
+                        artifact_type="producer.research_plan",
+                        artifact_id=plan_id,
+                        sha256=canonical_sha256(state.research_plan),
+                    )
+                )
+        provider_tasks, _retrieval_tasks, retrieval_ids = (
+            self._revision_execution_identities(state, request)
+        )
+        result_id = "revision_result_" + uuid5(
+            NAMESPACE_URL,
+            f"{request.revision_request_id}:result",
+        ).hex
+        result = RevisionResultV1.create(
+            revision_result_id=result_id,
+            revision_request_id=request.revision_request_id,
+            request_message_id=request_message.message_id,
+            workflow_id=state.workflow_id,
+            requester_layer=request.source_layer,
+            producer_layer=request.target_layer,
+            revision_epoch=request.revision_epoch,
+            status=(
+                RevisionExecutionStatus.COMPLETED
+                if completed
+                else RevisionExecutionStatus.PARTIAL
+            ),
+            base_artifacts=request.base_artifacts,
+            result_artifacts=result_artifacts,
+            finding_dispositions=[
+                RevisionFindingDisposition(
+                    finding_id=finding_id,
+                    outcome=(
+                        RevisionFindingOutcome.RESOLVED
+                        if completed
+                        else RevisionFindingOutcome.UNRESOLVED
+                    ),
+                    reason=reason,
+                    result_artifact_ids=[item.artifact_id for item in result_artifacts],
+                )
+                for finding_id in request.source_finding_ids
+            ],
+            human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+            provider_reservation_ids=list(provider_tasks.values()),
+            retrieval_reservation_ids=retrieval_ids,
+            provider_call_count=len(provider_tasks),
+            retrieval_call_count=len(retrieval_ids),
+            completed_at=review_response.metadata.updated_at,
+        )
+        result_message_id = str(
+            uuid5(NAMESPACE_URL, f"{request.revision_request_id}:result-message")
+        )
+        result_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=request_message.message_id,
+                    sender_agent_id=request_message.receiver_agent_id,
+                    receiver_agent_id=request_message.sender_agent_id,
+                    message_type=MessageType.REVISION_RESULT,
+                    objective=f"Return the audited Producer {request.route} revision result",
+                    payload=result.model_dump(mode="json"),
+                    context=PMPContext(
+                        current_stage="producer.manager",
+                        previous_stage=request_message.receiver_agent_id,
+                        next_stage="producer.quality_reviewer",
+                    ),
+                    routing=PMPRouting(revision_target=None, reply_required=False),
+                    metadata=PMPMetadata(
+                        created_at=review_response.metadata.updated_at,
+                        updated_at=review_response.metadata.updated_at,
+                        status=(
+                            MessageStatus.COMPLETED
+                            if completed
+                            else MessageStatus.REVISION_REQUIRED
+                        ),
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": result_message_id,
+            }
+        )
+        if request.route == RevisionRoute.INTERNAL.value:
+            self.revision_exchange.create_internal_result_once(
+                request_message,
+                result_message,
+            )
+        else:
+            self.revision_exchange.create_result_once(
+                request_message,
+                result_message,
+            )
+        self._append_message_once(state, result_message)
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"result_written_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.PRODUCER,
+                event_type=RevisionAuditEventType.RESULT_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=result_message.message_id,
+                artifact_ids=[item.artifact_id for item in result_artifacts],
+                reservation_ids=[*provider_tasks.values(), *retrieval_ids],
+                reason=reason,
+                created_at=review_response.metadata.updated_at,
+            ),
+        )
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.COMPLETED.value,
+                "active_result_id": result_id,
+                "pending_request_ids": [
+                    item
+                    for item in state.revision_control.pending_request_ids
+                    if item != request.revision_request_id
+                ],
+                "consumed_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.consumed_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+                "consumed_result_ids": list(
+                    dict.fromkeys(
+                        [*state.revision_control.consumed_result_ids, result_id]
+                    )
+                ),
+            }
+        )
+
+    def _revision_execution_identities(
+        self,
+        state: ProducerWorkflowState,
+        request: RevisionRequestV1,
+    ) -> tuple[dict[str, str], dict[str, str], list[str]]:
+        target_index = AGENT_ORDER.index(request.target_agent_ids[0])
+        suffix = request.revision_request_id.rsplit("_", 1)[-1][:12]
+        provider_tasks = {
+            agent_id: f"{agent_id}.revision.{request.revision_epoch}.{suffix}"
+            for agent_id in AGENT_ORDER[target_index:]
+        }
+        general_id = "producer.general_opinion_analyst"
+        retrieval_tasks: dict[str, str] = {}
+        retrieval_ids: list[str] = []
+        if target_index <= AGENT_ORDER.index(general_id):
+            retrieval_task_id = (
+                f"general_opinion_revision_{request.revision_epoch}_{suffix}"
+            )
+            coordinator = self.registry.get(general_id).retrieval_coordinator
+            if coordinator is None:
+                raise ValueError(
+                    "Producer Revision requiring General Opinion has no Retrieval coordinator"
+                )
+            retrieval_tasks[general_id] = retrieval_task_id
+            retrieval_ids.append(
+                coordinator.retrieval_identity(
+                    workflow_id=state.workflow_id,
+                    task_id=retrieval_task_id,
+                    agent_id=general_id,
+                    strategy=RetrievalStrategy.GENERAL_OPINION,
+                )
+            )
+        return provider_tasks, retrieval_tasks, retrieval_ids
+
+    def _active_revision_task_overrides(
+        self,
+        state: ProducerWorkflowState,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        if state.revision_control.phase != RevisionControlPhase.EXECUTING.value:
+            return {}, {}
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        provider_tasks, retrieval_tasks, _retrieval_ids = (
+            self._revision_execution_identities(state, request)
+        )
+        return provider_tasks, retrieval_tasks
+
+    def _active_revision_request_message(
+        self,
+        state: ProducerWorkflowState,
+    ) -> PMPMessage:
+        message_id = state.revision_control.active_request_message_id
+        request_id = state.revision_control.active_request_id
+        if not message_id or not request_id:
+            raise ValueError("Producer Revision control has no active request identity")
+        message = next(
+            (item for item in state.message_history if item.message_id == message_id),
+            None,
+        )
+        if message is None:
+            try:
+                message = self.revision_exchange.load_internal_request(
+                    layer=LayerId.PRODUCER,
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request_id,
+                )
+            except FileNotFoundError:
+                message = self.revision_exchange.load_request(
+                    target_layer=LayerId.PRODUCER,
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request_id,
+                )
+        request = self.revision_exchange.validator.validate_request_message(message)
+        if request.revision_request_id != request_id:
+            raise ValueError("Producer active Revision Request identity is inconsistent")
+        return message
+
+    @staticmethod
+    def _current_revision_artifact_hashes(
+        state: ProducerWorkflowState,
+    ) -> dict[tuple[str, str], str]:
+        if state.research_plan is None:
+            return {}
+        artifact_id = str(state.research_plan.get("research_plan_id") or "")
+        if not artifact_id:
+            return {}
+        return {
+            ("producer.research_plan", artifact_id): canonical_sha256(
+                state.research_plan
+            )
+        }
+
+    def _record_revision_audit(
+        self,
+        state: ProducerWorkflowState,
+        event: RevisionAuditEvent,
+    ) -> None:
+        self.revision_exchange.create_audit_event_once(event)
+        if event.audit_event_id not in state.revision_control.audit_event_ids:
+            state.revision_control.audit_event_ids.append(event.audit_event_id)
+
+    @staticmethod
+    def _append_message_once(
+        state: ProducerWorkflowState,
+        message: PMPMessage,
+    ) -> None:
+        existing = next(
+            (item for item in state.message_history if item.message_id == message.message_id),
+            None,
+        )
+        if existing is None:
+            state.message_history.append(message)
+        elif existing != message:
+            raise ValueError("Producer Revision message identity conflict")
 
     def _invalidate_from(self, state: ProducerWorkflowState, target: str) -> None:
         index = AGENT_ORDER.index(target)

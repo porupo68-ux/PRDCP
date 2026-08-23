@@ -1,6 +1,6 @@
 {
   "registry_name": "PRDCP Message Type Registry",
-  "registry_version": "2.0.0",
+  "registry_version": "2.1.0",
   "values": [
     "task",
     "result",
@@ -8,6 +8,7 @@
     "error",
     "review",
     "revision_request",
+    "revision_result",
     "status_update",
     "cancellation",
     "research_plan",

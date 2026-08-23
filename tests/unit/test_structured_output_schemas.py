@@ -374,6 +374,7 @@ class StructuredOutputSchemaTests(unittest.TestCase):
             schema["$defs"][enum_name]["enum"],
             [
                 "EVIDENCE_SUFFICIENCY_FINDING",
+                "UPSTREAM_PLAN_DEFECT",
                 "HARD_INTEGRITY_FAILURE",
                 "UNCLASSIFIED",
             ],

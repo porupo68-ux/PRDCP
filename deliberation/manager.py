@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel
 
@@ -22,6 +23,25 @@ from common.models.pmp import (
     PMPRouting,
 )
 from common.models.workflow import WorkflowStatus
+from common.models.revision import (
+    HumanSelectionImpact,
+    LayerId,
+    RevisionArtifactRef,
+    RevisionAuditEvent,
+    RevisionAuditEventType,
+    RevisionBudgetPolicy,
+    RevisionControlPhase,
+    RevisionControlState,
+    RevisionExecutionAuthorization,
+    RevisionExecutionStatus,
+    RevisionFindingDisposition,
+    RevisionFindingOutcome,
+    RevisionRequestV1,
+    RevisionResultV1,
+    RevisionRoute,
+    canonical_sha256,
+    deterministic_revision_request_id,
+)
 from common.provider_retry import (
     ProviderRetryAuthorization,
     ProviderRetryAuthorizationStore,
@@ -61,10 +81,13 @@ from deliberation.schemas.integrated_analysis import (
     integration_provenance_errors,
 )
 from deliberation.schemas.review import (
+    ConclusionReadiness,
     DeliberationQualityReviewInput,
     DeliberationQualityReviewOutput,
     DeterministicValidationResult,
+    QualityFinding,
     QualityGateDecision,
+    RevisionScope,
 )
 from deliberation.schemas.research_context import (
     DeliberationResearchContext,
@@ -94,6 +117,10 @@ from researcher.schemas.human_evidence import (
 )
 from researcher.schemas.trace_ids import canonicalize_legacy_trace_ids
 from storage.deliberation_workflow_repository import DeliberationWorkflowRepository
+from storage.revision_exchange_repository import (
+    RevisionBudgetExhausted,
+    RevisionExchangeRepository,
+)
 
 
 ProgressCallback = Callable[[str], Awaitable[None] | None]
@@ -121,7 +148,7 @@ class DeliberationManager:
                 repository.data_dir / "provider_call_reservations"
             )
         self.demo_safe_mode = demo_safe_mode
-        self.max_revisions = 0 if demo_safe_mode else max_revisions
+        self.max_revisions = max_revisions
         self.pmp_validator = PMPValidator()
         self.deterministic_validator = DeliberationValidator()
         self.rd_loader = rd_loader or registry.rd_loader
@@ -129,6 +156,7 @@ class DeliberationManager:
         self.provider_contract_repair_store = (
             ProviderContractRepairAuthorizationStore(repository.data_dir)
         )
+        self.revision_exchange = RevisionExchangeRepository(repository.data_dir)
 
     def authorize_provider_retry(
         self,
@@ -390,6 +418,43 @@ class DeliberationManager:
         state = self.repository.load(workflow_id)
         if state.status != WorkflowStatus.WAITING_UPSTREAM_REVISION.value:
             raise ValueError("Deliberation workflow is not waiting for an upstream revision")
+        canonical_request_message: PMPMessage | None = None
+        canonical_result_message: PMPMessage | None = None
+        canonical_result: RevisionResultV1 | None = None
+        if (
+            state.revision_control.phase
+            == RevisionControlPhase.WAITING_UPSTREAM_RESULT.value
+        ):
+            canonical_request_message = self._active_revision_request_message(state)
+            canonical_request = RevisionRequestV1.model_validate(
+                canonical_request_message.payload
+            )
+            self.revision_exchange.validator.validate_current_base_artifacts(
+                canonical_request,
+                {
+                    (
+                        "researcher.research_report",
+                        str(state.research_report.get("research_report_id") or ""),
+                    ): canonical_sha256(state.research_report),
+                    (
+                        "deliberation.final_integration",
+                        str((state.final_integration or {}).get("integration_id") or ""),
+                    ): canonical_sha256(state.final_integration),
+                },
+            )
+            try:
+                canonical_result_message = self.revision_exchange.load_result(
+                    requester_layer=LayerId.DELIBERATION,
+                    workflow_id=state.workflow_id,
+                    revision_request_id=canonical_request.revision_request_id,
+                    request_message=canonical_request_message,
+                )
+            except FileNotFoundError:
+                canonical_result_message = None
+            if canonical_result_message is not None:
+                canonical_result = RevisionResultV1.model_validate(
+                    canonical_result_message.payload
+                )
         manager_snapshot = self.rd_loader.load(self.agent_id)
         if manager_snapshot.trace() not in state.role_definition_usage:
             state.role_definition_usage.append(manager_snapshot.trace())
@@ -399,6 +464,46 @@ class DeliberationManager:
         if handoff.message_id == previous_message_id:
             raise ValueError("Researcherから新しいrevision resultがまだ届いていません")
         report = self._validate_researcher_handoff(handoff, allow_revision=True)
+        if canonical_request_message is not None and canonical_result is None:
+            canonical_result_message = (
+                self._reconstruct_canonical_researcher_result_from_legacy(
+                    state,
+                    canonical_request_message,
+                    handoff,
+                    report,
+                )
+            )
+            canonical_result = RevisionResultV1.model_validate(
+                canonical_result_message.payload
+            )
+        if canonical_result is not None:
+            report_artifact = next(
+                (
+                    item
+                    for item in canonical_result.result_artifacts
+                    if item.artifact_type == "researcher.research_report"
+                ),
+                None,
+            )
+            report_payload = report.model_dump(mode="json")
+            if (
+                report_artifact is None
+                or report_artifact.artifact_id != report.research_report_id
+                or report_artifact.sha256 != canonical_sha256(report_payload)
+            ):
+                raise ValueError(
+                    "Researcher Revision Result does not match the returned Research Report"
+                )
+            decision = handoff.payload.get("human_evidence_decision") or {}
+            if (
+                canonical_result.status
+                != RevisionExecutionStatus.COMPLETED.value
+                and decision.get("decision")
+                != HumanEvidenceDecisionType.ACCEPT_WITH_LIMITATIONS.value
+            ):
+                raise ValueError(
+                    "Incomplete Researcher Revision requires an explicit Human limitations decision"
+                )
         tasks = self._create_analysis_tasks(report)
         pending_review = self._pending_revision_review(state)
         pending_targets = list(state.pending_revision_targets)
@@ -412,15 +517,13 @@ class DeliberationManager:
         state.error = None
         state.completed_at = None
         state.status = WorkflowStatus.RUNNING
-        state.message_history.append(handoff)
+        for message in (canonical_result_message, handoff):
+            if message is not None and not any(
+                item.message_id == message.message_id
+                for item in state.message_history
+            ):
+                state.message_history.append(message)
         await self._emit(progress_callback, "Researcher追加調査結果を受領し、Deliberationを再開します")
-
-        if self.demo_safe_mode:
-            return await self._block(
-                state,
-                "Demo Safe Mode stopped pending Deliberation revision after Researcher return",
-                progress_callback,
-            )
 
         # Upstream-only revisions still rerun Manager integration so that the
         # updated report reaches downstream checkpoints without rerunning every
@@ -430,13 +533,101 @@ class DeliberationManager:
                 [*(pending_targets or [self.agent_id]), *stale_primary_targets]
             )
         )
-        self._clear_pending_revision(state)
-        outcome, rerun_initial, rerun_counterargument = await self._start_internal_revision(
-            state,
-            pending_review,
-            targets=effective_targets,
-            progress_callback=progress_callback,
-        )
+        if canonical_result is not None and canonical_request_message is not None:
+            canonical_request = RevisionRequestV1.model_validate(
+                canonical_request_message.payload
+            )
+            state.revision_control = RevisionControlState.model_validate(
+                {
+                    **state.revision_control.model_dump(mode="json"),
+                    "phase": RevisionControlPhase.COMPLETED.value,
+                    "active_result_id": canonical_result.revision_result_id,
+                    "pending_request_ids": [
+                        item
+                        for item in state.revision_control.pending_request_ids
+                        if item != canonical_request.revision_request_id
+                    ],
+                    "consumed_request_ids": list(
+                        dict.fromkeys(
+                            [
+                                *state.revision_control.consumed_request_ids,
+                                canonical_request.revision_request_id,
+                            ]
+                        )
+                    ),
+                    "consumed_result_ids": list(
+                        dict.fromkeys(
+                            [
+                                *state.revision_control.consumed_result_ids,
+                                canonical_result.revision_result_id,
+                            ]
+                        )
+                    ),
+                }
+            )
+            self._record_revision_audit(
+                state,
+                RevisionAuditEvent(
+                    audit_event_id=f"result_consumed_{canonical_request.revision_epoch}",
+                    workflow_id=state.workflow_id,
+                    revision_request_id=canonical_request.revision_request_id,
+                    layer=LayerId.DELIBERATION,
+                    event_type=RevisionAuditEventType.RESULT_CONSUMED,
+                    actor_id=self.agent_id,
+                    message_id=canonical_result_message.message_id,
+                    artifact_ids=[report.research_report_id],
+                    reason="Researcher result and returned handoff were correlated",
+                    created_at=canonical_result.completed_at,
+                ),
+            )
+            review_response_id = self._saved_review_response_id(
+                state,
+                pending_review.review_id,
+            )
+            request = self._plan_internal_revision(
+                state,
+                pending_review,
+                review_response_id=review_response_id,
+                targets=effective_targets,
+            )
+            state.awaiting_upstream_revision = False
+            state.pending_upstream_revision_request_ids = []
+            self.repository.save(state)
+            if self.demo_safe_mode:
+                return await self._block(
+                    state,
+                    "Demo Safe Mode stopped pending Deliberation revision after Researcher return",
+                    progress_callback,
+                )
+            authorization = self._create_revision_authorization(
+                state,
+                request,
+                actor_id=self.agent_id,
+                actor_source="SYSTEM",
+                reason="Safe Mode is disabled; continue after correlated Researcher return",
+            )
+            outcome, rerun_initial, rerun_counterargument = (
+                await self._execute_authorized_internal_revision(
+                    state,
+                    request=request,
+                    authorization=authorization,
+                    progress_callback=progress_callback,
+                )
+            )
+        else:
+            if self.demo_safe_mode:
+                return await self._block(
+                    state,
+                    "Demo Safe Mode stopped pending Deliberation revision after Researcher return",
+                    progress_callback,
+                )
+            self._clear_pending_revision(state)
+            outcome, rerun_initial, rerun_counterargument = await self._start_internal_revision(
+                state,
+                pending_review,
+                targets=effective_targets,
+                progress_callback=progress_callback,
+            )
         if outcome is not None:
             return outcome
         return await self._integrate_and_review(
@@ -446,6 +637,87 @@ class DeliberationManager:
             progress_callback=progress_callback,
         )
 
+    def _reconstruct_canonical_researcher_result_from_legacy(
+        self,
+        state: DeliberationWorkflowState,
+        request_message: PMPMessage,
+        handoff: PMPMessage,
+        report: ResearchReport,
+    ) -> PMPMessage:
+        """Read-compatible 0-call adapter for pre-canonical Researcher replies."""
+
+        if handoff.message_type != MessageType.RESEARCH_REVISION_RESULT.value:
+            raise FileNotFoundError(
+                "Canonical Researcher Revision Result is missing and no legacy reply is available"
+            )
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        report_payload = report.model_dump(mode="json")
+        artifact = RevisionArtifactRef(
+            artifact_type="researcher.research_report",
+            artifact_id=report.research_report_id,
+            sha256=canonical_sha256(report_payload),
+        )
+        result_id = "revision_result_" + uuid5(
+            NAMESPACE_URL, f"{request.revision_request_id}:result"
+        ).hex
+        result = RevisionResultV1.create(
+            revision_result_id=result_id,
+            revision_request_id=request.revision_request_id,
+            request_message_id=request_message.message_id,
+            workflow_id=state.workflow_id,
+            requester_layer=LayerId.DELIBERATION,
+            producer_layer=LayerId.RESEARCHER,
+            revision_epoch=request.revision_epoch,
+            status=RevisionExecutionStatus.COMPLETED,
+            base_artifacts=request.base_artifacts,
+            result_artifacts=[artifact],
+            finding_dispositions=[
+                RevisionFindingDisposition(
+                    finding_id=finding_id,
+                    outcome=RevisionFindingOutcome.RESOLVED,
+                    reason=(
+                        "Reconstructed from a PMP-valid legacy Researcher Revision reply"
+                    ),
+                    result_artifact_ids=[report.research_report_id],
+                )
+                for finding_id in request.source_finding_ids
+            ],
+            human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+            provider_reservation_ids=[],
+            retrieval_reservation_ids=[],
+            provider_call_count=0,
+            retrieval_call_count=0,
+            completed_at=handoff.metadata.updated_at,
+        )
+        message_id = str(
+            uuid5(NAMESPACE_URL, f"{request.revision_request_id}:result-message")
+        )
+        message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=request_message.message_id,
+                    sender_agent_id="researcher.manager",
+                    receiver_agent_id=self.agent_id,
+                    message_type=MessageType.REVISION_RESULT,
+                    objective="Adapt the validated legacy Researcher reply to revision.v1",
+                    payload=result.model_dump(mode="json"),
+                    routing=PMPRouting(revision_target=None, reply_required=False),
+                    metadata=PMPMetadata(
+                        created_at=handoff.metadata.updated_at,
+                        updated_at=handoff.metadata.updated_at,
+                        status=MessageStatus.COMPLETED,
+                        extensions={
+                            "compatibility_adapter": "legacy_research_revision_result"
+                        },
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": message_id,
+            }
+        )
+        self.revision_exchange.create_result_once(request_message, message)
+        return message
+
     async def recover(
         self,
         workflow_id: str,
@@ -453,6 +725,18 @@ class DeliberationManager:
         progress_callback: ProgressCallback | None = None,
     ) -> DeliberationWorkflowState:
         state = self.repository.load(workflow_id)
+        if (
+            not self.demo_safe_mode
+            and state.revision_control.phase
+            == RevisionControlPhase.AUTHORIZATION_REQUIRED.value
+        ):
+            return await self.revise(
+                workflow_id,
+                actor_id="cli.operator",
+                actor_source="CLI",
+                reason="Operator recovery authorized the saved Deliberation Revision",
+                progress_callback=progress_callback,
+            )
         self._repair_unexecuted_revision_after_cross_revision_replay(state)
         saved_review: DeliberationQualityReviewOutput | None = None
         if state.review_result is not None:
@@ -2867,6 +3151,13 @@ class DeliberationManager:
                 )
             result = self._build_result(state, report, final, counterargument, review)
             state.deliberation_result = result.model_dump(mode="json")
+            if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+                self._finalize_internal_revision(
+                    state,
+                    review_response_id=review_response_id,
+                    completed=True,
+                    reason=review.reason,
+                )
             state.status = WorkflowStatus.APPROVED
             self.repository.save_result(result)
             self.repository.save(state)
@@ -2892,7 +3183,22 @@ class DeliberationManager:
             return state, False, False
 
         if review.status == QualityGateDecision.BLOCKED.value:
+            if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+                self._finalize_internal_revision(
+                    state,
+                    review_response_id=review_response_id,
+                    completed=False,
+                    reason=review.reason,
+                )
             return await self._block(state, review.reason, progress_callback), False, False
+
+        if state.revision_control.phase == RevisionControlPhase.EXECUTING.value:
+            self._finalize_internal_revision(
+                state,
+                review_response_id=review_response_id,
+                completed=False,
+                reason=review.reason,
+            )
 
         if review.upstream_revision_requests:
             if (
@@ -2912,6 +3218,28 @@ class DeliberationManager:
                 False,
             )
 
+        if (
+            self.demo_safe_mode
+            and state.revision_control.phase
+            == RevisionControlPhase.AUTHORIZATION_REQUIRED.value
+        ):
+            return (
+                await self._block(
+                    state,
+                    "Demo Safe Mode retained the existing authorized-boundary Revision plan; "
+                    "no Deliberation Agent was re-dispatched",
+                    progress_callback,
+                ),
+                False,
+                False,
+            )
+        self._store_pending_revision(state, review)
+        request = self._plan_internal_revision(
+            state,
+            review,
+            review_response_id=review_response_id,
+            targets=list(review.revision_targets),
+        )
         if self.demo_safe_mode:
             return (
                 await self._block(
@@ -2923,11 +3251,646 @@ class DeliberationManager:
                 False,
                 False,
             )
+        authorization = self._create_revision_authorization(
+            state,
+            request,
+            actor_id=self.agent_id,
+            actor_source="SYSTEM",
+            reason="Safe Mode is disabled; runtime policy permits one automatic Revision",
+        )
+        self.repository.save(state)
+        return await self._execute_authorized_internal_revision(
+            state,
+            request=request,
+            authorization=authorization,
+            progress_callback=progress_callback,
+        )
 
+    def _plan_internal_revision(
+        self,
+        state: DeliberationWorkflowState,
+        review: DeliberationQualityReviewOutput,
+        *,
+        review_response_id: str,
+        targets: list[str],
+    ) -> RevisionRequestV1:
+        if not targets:
+            raise ValueError("Deliberation internal Revision has no target")
+        if state.final_integration is None:
+            raise ValueError("Deliberation internal Revision has no final integration")
+        revision_epoch = max(
+            state.revision_count,
+            state.revision_control.revision_epoch,
+        ) + 1
+        finding_ids = [item.finding_id for item in review.findings]
+        request_id = deterministic_revision_request_id(
+            workflow_id=state.workflow_id,
+            source_layer=LayerId.DELIBERATION,
+            target_layer=LayerId.DELIBERATION,
+            revision_epoch=revision_epoch,
+            source_review_id=review_response_id,
+            source_finding_ids=finding_ids,
+        )
+        final_id = str(state.final_integration.get("integration_id") or "")
+        report_id = str(state.research_report.get("research_report_id") or "")
+        parent_request_id = (
+            state.revision_control.active_request_id
+            if state.revision_control.active_request_id
+            and state.revision_control.phase
+            in {
+                RevisionControlPhase.COMPLETED.value,
+                RevisionControlPhase.WAITING_UPSTREAM_RESULT.value,
+            }
+            else None
+        )
+        request = RevisionRequestV1.create(
+            revision_request_id=request_id,
+            workflow_id=state.workflow_id,
+            route=RevisionRoute.INTERNAL,
+            source_layer=LayerId.DELIBERATION,
+            target_layer=LayerId.DELIBERATION,
+            revision_epoch=revision_epoch,
+            root_revision_request_id=(
+                (state.revision_control.root_revision_request_id or parent_request_id)
+                if parent_request_id
+                else request_id
+            ),
+            parent_revision_request_id=parent_request_id,
+            source_review_id=review_response_id,
+            source_finding_ids=finding_ids,
+            target_agent_ids=targets,
+            base_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="deliberation.final_integration",
+                    artifact_id=final_id,
+                    sha256=canonical_sha256(state.final_integration),
+                ),
+                RevisionArtifactRef(
+                    artifact_type="researcher.research_report",
+                    artifact_id=report_id,
+                    sha256=canonical_sha256(state.research_report),
+                ),
+            ],
+            required_actions=list(
+                dict.fromkeys(item.required_action for item in review.findings)
+            ),
+            acceptance_conditions=[
+                f"{item.finding_id} is resolved, rejected, or retained as unresolved"
+                for item in review.findings
+            ],
+            evidence_expansion_allowed=False,
+            retrieval_allowed=False,
+            expected_human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+        )
+        review_message = next(
+            (
+                item
+                for item in state.message_history
+                if item.message_id == review_response_id
+            ),
+            None,
+        )
+        if review_message is None:
+            raise ValueError("Deliberation Revision source review PMP is missing")
+        execution_receiver = (
+            targets[0]
+            if targets[0] != self.agent_id
+            else COUNTERARGUMENT_ANALYST_ID
+        )
+        message_id = str(uuid5(NAMESPACE_URL, f"{request_id}:request-message"))
+        message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=review_response_id,
+                    sender_agent_id=self.agent_id,
+                    receiver_agent_id=execution_receiver,
+                    message_type=MessageType.REVISION_REQUEST,
+                    objective="Execute an audited Deliberation internal Revision",
+                    payload=request.model_dump(mode="json"),
+                    context=PMPContext(
+                        current_stage="deliberation.manager",
+                        previous_stage=QUALITY_REVIEWER_ID,
+                        next_stage=execution_receiver,
+                    ),
+                    routing=PMPRouting(
+                        revision_target=execution_receiver,
+                        reply_required=True,
+                    ),
+                    metadata=PMPMetadata(
+                        created_at=review_message.metadata.updated_at,
+                        updated_at=review_message.metadata.updated_at,
+                        status=MessageStatus.REVISION_REQUIRED,
+                        extensions={"role_definition": state.role_definition_usage[-1]},
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": message_id,
+            }
+        )
+        self.revision_exchange.create_internal_request_once(message)
+        if not any(item.message_id == message.message_id for item in state.message_history):
+            state.message_history.append(message)
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.AUTHORIZATION_REQUIRED.value,
+                "revision_epoch": revision_epoch,
+                "active_request_id": request_id,
+                "active_request_message_id": message.message_id,
+                "active_result_id": None,
+                "root_revision_request_id": request.root_revision_request_id,
+                "parent_revision_request_id": request.parent_revision_request_id,
+                "pending_request_ids": list(
+                    dict.fromkeys([*state.revision_control.pending_request_ids, request_id])
+                ),
+            }
+        )
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"request_written_{revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.REQUEST_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=message.message_id,
+                artifact_ids=[final_id, report_id],
+                reason=review.reason,
+                created_at=review_message.metadata.updated_at,
+            ),
+        )
+        self.repository.save(state)
+        return request
+
+    def _activate_pending_conclusion_revision(
+        self,
+        state: DeliberationWorkflowState,
+    ) -> DeliberationWorkflowState:
+        pending: list[tuple[PMPMessage, RevisionRequestV1]] = []
+        for message in self.revision_exchange.list_requests(
+            target_layer=LayerId.DELIBERATION,
+            workflow_id=state.workflow_id,
+        ):
+            request = self.revision_exchange.validator.validate_request_message(
+                message
+            )
+            if (
+                request.route == RevisionRoute.UPSTREAM.value
+                and request.source_layer == LayerId.CONCLUSION.value
+                and request.revision_request_id
+                not in state.revision_control.consumed_request_ids
+            ):
+                pending.append((message, request))
+        if not pending:
+            raise FileNotFoundError(
+                f"No pending Conclusion Revision Request exists for {state.workflow_id}"
+            )
+        if len(pending) > 1:
+            raise ValueError("Multiple pending Conclusion Revision Requests require review")
+        message, request = pending[0]
+        allowed_targets = {
+            *PRIMARY_ANALYST_IDS,
+            COUNTERARGUMENT_ANALYST_ID,
+            self.agent_id,
+        }
+        if set(request.target_agent_ids) - allowed_targets:
+            raise ValueError("Conclusion requested an invalid Deliberation target")
+        if request.evidence_expansion_allowed or request.retrieval_allowed:
+            raise ValueError(
+                "Conclusion cannot authorize new evidence inside Deliberation"
+            )
+        owned = next(
+            (
+                item
+                for item in request.base_artifacts
+                if item.artifact_type == "deliberation.deliberation_result"
+            ),
+            None,
+        )
+        if state.deliberation_result is None or owned is None:
+            raise ValueError("Conclusion Revision lacks Deliberation Result provenance")
+        if (
+            owned.artifact_id
+            != str(state.deliberation_result.get("deliberation_result_id") or "")
+            or owned.sha256 != canonical_sha256(state.deliberation_result)
+        ):
+            raise ValueError("Conclusion Revision Request is stale for Deliberation Result")
+        if not any(item.message_id == message.message_id for item in state.message_history):
+            state.message_history.append(message)
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.AUTHORIZATION_REQUIRED.value,
+                "revision_epoch": request.revision_epoch,
+                "active_request_id": request.revision_request_id,
+                "active_request_message_id": message.message_id,
+                "active_result_id": None,
+                "root_revision_request_id": request.root_revision_request_id,
+                "parent_revision_request_id": request.parent_revision_request_id,
+                "pending_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.pending_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+            }
+        )
+        state.status = WorkflowStatus.BLOCKED
+        state.completed_at = None
+        state.error = {
+            "code": "DOWNSTREAM_REVISION_AUTHORIZATION_REQUIRED",
+            "message": "Conclusion requested a Deliberation Revision; authorization required",
+        }
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"downstream_request_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.REQUEST_CONSUMED,
+                actor_id=self.agent_id,
+                message_id=message.message_id,
+                reason="Deliberation adopted the Conclusion request at the authorization boundary",
+            ),
+        )
+        self.repository.save(state)
+        return state
+
+    def _active_revision_request_message(
+        self,
+        state: DeliberationWorkflowState,
+    ) -> PMPMessage:
+        request_id = state.revision_control.active_request_id
+        message_id = state.revision_control.active_request_message_id
+        if not request_id or not message_id:
+            raise ValueError("Deliberation has no active Revision Request")
+        message = next(
+            (item for item in state.message_history if item.message_id == message_id),
+            None,
+        )
+        if message is None:
+            try:
+                message = self.revision_exchange.load_internal_request(
+                    layer=LayerId.DELIBERATION,
+                    workflow_id=state.workflow_id,
+                    revision_request_id=request_id,
+                )
+            except FileNotFoundError:
+                try:
+                    message = self.revision_exchange.load_request(
+                        target_layer=LayerId.DELIBERATION,
+                        workflow_id=state.workflow_id,
+                        revision_request_id=request_id,
+                    )
+                except FileNotFoundError:
+                    message = self.revision_exchange.load_request(
+                        target_layer=LayerId.RESEARCHER,
+                        workflow_id=state.workflow_id,
+                        revision_request_id=request_id,
+                    )
+        request = self.revision_exchange.validator.validate_request_message(message)
+        if request.revision_request_id != request_id:
+            raise ValueError("Deliberation active Revision identity is inconsistent")
+        return message
+
+    def _create_revision_authorization(
+        self,
+        state: DeliberationWorkflowState,
+        request: RevisionRequestV1,
+        *,
+        actor_id: str,
+        actor_source: str,
+        reason: str,
+    ) -> RevisionExecutionAuthorization:
+        rerun_stages = self._revision_stages(request.target_agent_ids)
+        max_calls = len(
+            [item for item in request.target_agent_ids if item in PRIMARY_ANALYST_IDS]
+        ) + sum(
+            stage in rerun_stages
+            for stage in (
+                "initial_integration",
+                "counterargument",
+                "final_integration",
+                "quality_review",
+            )
+        )
+        try:
+            existing = self.revision_exchange.load_authorization(
+                executing_layer=LayerId.DELIBERATION,
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if (
+                existing.actor_id != actor_id
+                or existing.actor_source != actor_source
+                or existing.reason != reason
+            ):
+                raise ValueError("Deliberation Revision was authorized by another actor")
+            return existing
+        authorization = RevisionExecutionAuthorization(
+            authorization_id=(
+                "revision_authorization_"
+                + uuid5(NAMESPACE_URL, request.revision_request_id).hex
+            ),
+            workflow_id=state.workflow_id,
+            revision_request_id=request.revision_request_id,
+            executing_layer=LayerId.DELIBERATION,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+            max_provider_calls=max_calls,
+            max_retrieval_calls=0,
+        )
+        self.revision_exchange.create_authorization_once(authorization)
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"authorization_created_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CREATED,
+                actor_id=actor_id,
+                reason=reason,
+                created_at=authorization.created_at,
+            ),
+        )
+        return authorization
+
+    def _revision_provider_task_ids(
+        self,
+        state: DeliberationWorkflowState,
+        request: RevisionRequestV1,
+    ) -> list[str]:
+        rerun_stages = self._revision_stages(request.target_agent_ids)
+        task_ids = [
+            self._revision_task_id(state, target)
+            for target in request.target_agent_ids
+            if target in PRIMARY_ANALYST_IDS
+        ]
+        if "initial_integration" in rerun_stages:
+            task_ids.append(
+                self._manager_integration_task_id(
+                    state, "initial_integration", recovery=False
+                )
+            )
+        if "counterargument" in rerun_stages:
+            task_ids.append(self._counterargument_task_id(state))
+        if "final_integration" in rerun_stages:
+            task_ids.append(
+                self._manager_integration_task_id(
+                    state, "final_integration", recovery=False
+                )
+            )
+        if "quality_review" in rerun_stages:
+            task_ids.append(f"delib_review_task_revision_{state.revision_count}")
+        return list(dict.fromkeys(task_ids))
+
+    async def revise(
+        self,
+        workflow_id: str,
+        *,
+        actor_id: str = "cli.operator",
+        actor_source: str = "CLI",
+        reason: str = "Operator authorized one Deliberation internal Revision cycle",
+        progress_callback: ProgressCallback | None = None,
+    ) -> DeliberationWorkflowState:
+        state = self.repository.load(workflow_id)
+        if state.revision_control.phase != RevisionControlPhase.AUTHORIZATION_REQUIRED.value:
+            try:
+                state = self._activate_pending_conclusion_revision(state)
+            except FileNotFoundError:
+                if (
+                    state.status == WorkflowStatus.COMPLETED.value
+                    and state.revision_control.phase
+                    == RevisionControlPhase.COMPLETED.value
+                ):
+                    return state
+                raise
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        authorization = self._create_revision_authorization(
+            state,
+            request,
+            actor_id=actor_id,
+            actor_source=actor_source,
+            reason=reason,
+        )
+        self.repository.save(state)
+        outcome, rerun_initial, rerun_counterargument = (
+            await self._execute_authorized_internal_revision(
+                state,
+                request=request,
+                authorization=authorization,
+                progress_callback=progress_callback,
+            )
+        )
+        if outcome is not None:
+            return outcome
+        return await self._integrate_and_review(
+            state,
+            rerun_initial=rerun_initial,
+            rerun_counterargument=rerun_counterargument,
+            progress_callback=progress_callback,
+            recovery=True,
+        )
+
+    async def _execute_authorized_internal_revision(
+        self,
+        state: DeliberationWorkflowState,
+        *,
+        request: RevisionRequestV1,
+        authorization: RevisionExecutionAuthorization,
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[DeliberationWorkflowState | None, bool, bool]:
+        current_hashes = {
+                (
+                    "deliberation.final_integration",
+                    str((state.final_integration or {}).get("integration_id") or ""),
+                ): canonical_sha256(state.final_integration),
+                (
+                    "researcher.research_report",
+                    str(state.research_report.get("research_report_id") or ""),
+                ): canonical_sha256(state.research_report),
+                (
+                    "deliberation.deliberation_result",
+                    str((state.deliberation_result or {}).get("deliberation_result_id") or ""),
+                ): canonical_sha256(state.deliberation_result),
+            }
+        owned_artifacts = [
+            item
+            for item in request.base_artifacts
+            if item.artifact_type.startswith("deliberation.")
+            or item.artifact_type == "researcher.research_report"
+        ]
+        self.revision_exchange.validator.validate_current_base_artifacts(
+            request.model_copy(update={"base_artifacts": owned_artifacts}),
+            current_hashes,
+        )
+        try:
+            if request.route == RevisionRoute.INTERNAL.value:
+                budget = self.revision_exchange.budget_store.consume(
+                    policy=RevisionBudgetPolicy(
+                        internal_limit=max(0, self.max_revisions - 1),
+                        upstream_limit=self.max_revisions,
+                    ),
+                    workflow_id=state.workflow_id,
+                    layer=LayerId.DELIBERATION,
+                    route=RevisionRoute.INTERNAL,
+                    revision_request_id=request.revision_request_id,
+                )
+            else:
+                budget = self.revision_exchange.budget_store.for_request(
+                    workflow_id=state.workflow_id,
+                    layer=LayerId.CONCLUSION,
+                    route=RevisionRoute.UPSTREAM,
+                    revision_request_id=request.revision_request_id,
+                )
+                if budget is None:
+                    raise RevisionBudgetExhausted(
+                        "Conclusion upstream Revision has no consumed request budget"
+                    )
+                if state.revision_count >= self.max_revisions:
+                    raise RevisionBudgetExhausted(
+                        "Deliberation internal execution budget is exhausted"
+                    )
+        except RevisionBudgetExhausted as exc:
+            state.revision_count = max(state.revision_count, self.max_revisions)
+            if not any(
+                item.iteration == state.revision_count
+                for item in state.revision_history
+            ):
+                pending_review = self._pending_revision_review(state)
+                state.revision_history.append(
+                    DeliberationRevisionRecord(
+                        iteration=state.revision_count,
+                        target_agent_ids=request.target_agent_ids,
+                        findings=[
+                            item.model_dump(mode="json")
+                            for item in pending_review.findings
+                        ],
+                        rerun_stages=self._revision_stages(
+                            request.target_agent_ids
+                        ),
+                    )
+                )
+            state.revision_control.phase = RevisionControlPhase.BLOCKED
+            return (
+                await self._block(
+                    state,
+                    f"Quality Reviewerが{self.max_revisions}回revision_requiredを返したため停止しました",
+                    progress_callback,
+                ),
+                False,
+                False,
+            )
+        if request.route == RevisionRoute.INTERNAL.value:
+            state.revision_count = max(state.revision_count, budget.iteration)
+        else:
+            state.revision_count += 1
+        provider_ids = self._revision_provider_task_ids(state, request)
+        consumed = self.revision_exchange.consume_authorization(
+            authorization,
+            provider_reservation_ids=provider_ids,
+            retrieval_reservation_ids=[],
+        )
+        state.revision_control.phase = RevisionControlPhase.EXECUTING
+        state.status = WorkflowStatus.REVISING
+        state.error = None
+        state.completed_at = None
+        for event in (
+            RevisionAuditEvent(
+                audit_event_id=f"authorization_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.AUTHORIZATION_CONSUMED,
+                actor_id=authorization.actor_id,
+                reservation_ids=provider_ids,
+                reason=authorization.reason,
+                created_at=consumed.consumed_at,
+            ),
+            RevisionAuditEvent(
+                audit_event_id=f"budget_consumed_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.BUDGET_CONSUMED,
+                actor_id=self.agent_id,
+                reason=f"Deliberation internal revision slot {budget.iteration}",
+                created_at=budget.consumed_at,
+            ),
+        ):
+            self._record_revision_audit(state, event)
+        self.repository.save(state)
+        if request.route == RevisionRoute.UPSTREAM.value:
+            existing_review = DeliberationQualityReviewOutput.model_validate(
+                state.review_result
+            )
+            synthetic_findings = [
+                QualityFinding(
+                    finding_id=finding_id,
+                    severity="MAJOR",
+                    category="downstream_revision_request",
+                    issue="Conclusion requested additional Deliberation analysis",
+                    required_action=request.required_actions[
+                        min(index, len(request.required_actions) - 1)
+                    ],
+                    affected_agent_ids=request.target_agent_ids,
+                    evidence_ids=[],
+                )
+                for index, finding_id in enumerate(request.source_finding_ids)
+            ]
+            review = existing_review.model_copy(
+                update={
+                    "review_id": request.source_review_id,
+                    "status": QualityGateDecision.REVISION_REQUIRED.value,
+                    "conclusion_readiness": ConclusionReadiness.NOT_READY.value,
+                    "reason": request.required_actions[0],
+                    "findings": synthetic_findings,
+                    "blocking_finding_ids": request.source_finding_ids,
+                    "revision_scope": (
+                        RevisionScope.TARGETED.value
+                        if len(request.target_agent_ids) == 1
+                        else RevisionScope.MULTI_AGENT.value
+                    ),
+                    "revision_targets": request.target_agent_ids,
+                    "upstream_revision_requests": [],
+                }
+            )
+        elif state.review_result is None:
+            request_message = self._active_revision_request_message(state)
+            review_message = next(
+                (
+                    item
+                    for item in state.message_history
+                    if item.message_id == request_message.parent_message_id
+                ),
+                None,
+            )
+            if review_message is None:
+                raise ValueError(
+                    "Deliberation Revision cannot recover its source Quality Review"
+                )
+            recovered_review = DeliberationQualityReviewOutput.model_validate(
+                review_message.payload
+            )
+            state.review_result = recovered_review.model_dump(mode="json")
+            self._store_pending_revision(state, recovered_review)
+            review = recovered_review
+        else:
+            review = self._pending_revision_review(state)
         return await self._start_internal_revision(
             state,
             review,
-            targets=list(review.revision_targets),
+            targets=request.target_agent_ids,
             progress_callback=progress_callback,
         )
 
@@ -2939,20 +3902,27 @@ class DeliberationManager:
         targets: list[str],
         progress_callback: ProgressCallback | None,
     ) -> tuple[DeliberationWorkflowState | None, bool, bool]:
-        state.revision_count += 1
-        rerun_stages = self._revision_stages(targets)
-        state.revision_history.append(
-            DeliberationRevisionRecord(
-                iteration=state.revision_count,
-                target_agent_ids=targets,
-                findings=[item.model_dump(mode="json") for item in review.findings],
-                rerun_stages=rerun_stages,
-            )
+        common_execution = (
+            state.revision_control.phase == RevisionControlPhase.EXECUTING.value
         )
+        if not common_execution:
+            state.revision_count += 1
+        rerun_stages = self._revision_stages(targets)
+        if not any(
+            item.iteration == state.revision_count for item in state.revision_history
+        ):
+            state.revision_history.append(
+                DeliberationRevisionRecord(
+                    iteration=state.revision_count,
+                    target_agent_ids=targets,
+                    findings=[item.model_dump(mode="json") for item in review.findings],
+                    rerun_stages=rerun_stages,
+                )
+            )
         # Persist consumption of the pending plan and the single revision count
         # before any provider call, so a process restart cannot execute it twice.
         self.repository.save(state)
-        if state.revision_count >= self.max_revisions:
+        if not common_execution and state.revision_count >= self.max_revisions:
             return (
                 await self._block(
                     state,
@@ -3933,6 +4903,189 @@ class DeliberationManager:
             "validation_targets": payload.get("validation_targets"),
         }
 
+    def _finalize_internal_revision(
+        self,
+        state: DeliberationWorkflowState,
+        *,
+        review_response_id: str,
+        completed: bool,
+        reason: str,
+    ) -> None:
+        request_message = self._active_revision_request_message(state)
+        request = RevisionRequestV1.model_validate(request_message.payload)
+        review_message = next(
+            (
+                item
+                for item in state.message_history
+                if item.message_id == review_response_id
+            ),
+            None,
+        )
+        if review_message is None:
+            raise ValueError("Deliberation Revision result has no Quality Review PMP")
+        result_artifacts: list[RevisionArtifactRef] = []
+        if state.final_integration is not None:
+            final_id = str(state.final_integration.get("integration_id") or "")
+            if final_id:
+                result_artifacts.append(
+                    RevisionArtifactRef(
+                        artifact_type="deliberation.final_integration",
+                        artifact_id=final_id,
+                        sha256=canonical_sha256(state.final_integration),
+                    )
+                )
+        if state.deliberation_result is not None:
+            result_id = str(
+                state.deliberation_result.get("deliberation_result_id") or ""
+            )
+            if result_id:
+                result_artifacts.append(
+                    RevisionArtifactRef(
+                        artifact_type="deliberation.deliberation_result",
+                        artifact_id=result_id,
+                        sha256=canonical_sha256(state.deliberation_result),
+                    )
+                )
+        authorization = self.revision_exchange.load_authorization(
+            executing_layer=LayerId.DELIBERATION,
+            workflow_id=state.workflow_id,
+            revision_request_id=request.revision_request_id,
+        )
+        provider_ids = list(authorization.provider_reservation_ids)
+        result_id = "revision_result_" + uuid5(
+            NAMESPACE_URL, f"{request.revision_request_id}:result"
+        ).hex
+        result = RevisionResultV1.create(
+            revision_result_id=result_id,
+            revision_request_id=request.revision_request_id,
+            request_message_id=request_message.message_id,
+            workflow_id=state.workflow_id,
+            requester_layer=request.source_layer,
+            producer_layer=request.target_layer,
+            revision_epoch=request.revision_epoch,
+            status=(
+                RevisionExecutionStatus.COMPLETED
+                if completed
+                else RevisionExecutionStatus.PARTIAL
+            ),
+            base_artifacts=request.base_artifacts,
+            result_artifacts=result_artifacts,
+            finding_dispositions=[
+                RevisionFindingDisposition(
+                    finding_id=finding_id,
+                    outcome=(
+                        RevisionFindingOutcome.RESOLVED
+                        if completed
+                        else RevisionFindingOutcome.UNRESOLVED
+                    ),
+                    reason=reason,
+                    result_artifact_ids=[
+                        item.artifact_id for item in result_artifacts
+                    ],
+                )
+                for finding_id in request.source_finding_ids
+            ],
+            human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+            provider_reservation_ids=provider_ids,
+            retrieval_reservation_ids=[],
+            provider_call_count=len(provider_ids),
+            retrieval_call_count=0,
+            completed_at=review_message.metadata.updated_at,
+        )
+        result_message_id = str(
+            uuid5(NAMESPACE_URL, f"{request.revision_request_id}:result-message")
+        )
+        result_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=request_message.message_id,
+                    sender_agent_id=request_message.receiver_agent_id,
+                    receiver_agent_id=request_message.sender_agent_id,
+                    message_type=MessageType.REVISION_RESULT,
+                    objective=f"Return the audited Deliberation {request.route} Revision result",
+                    payload=result.model_dump(mode="json"),
+                    routing=PMPRouting(revision_target=None, reply_required=False),
+                    metadata=PMPMetadata(
+                        created_at=review_message.metadata.updated_at,
+                        updated_at=review_message.metadata.updated_at,
+                        status=(
+                            MessageStatus.COMPLETED
+                            if completed
+                            else MessageStatus.REVISION_REQUIRED
+                        ),
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": result_message_id,
+            }
+        )
+        if request.route == RevisionRoute.INTERNAL.value:
+            self.revision_exchange.create_internal_result_once(
+                request_message,
+                result_message,
+            )
+        else:
+            self.revision_exchange.create_result_once(
+                request_message,
+                result_message,
+            )
+        if not any(
+            item.message_id == result_message.message_id
+            for item in state.message_history
+        ):
+            state.message_history.append(result_message)
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"result_written_{request.revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request.revision_request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.RESULT_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=result_message.message_id,
+                artifact_ids=[item.artifact_id for item in result_artifacts],
+                reservation_ids=provider_ids,
+                reason=reason,
+                created_at=review_message.metadata.updated_at,
+            ),
+        )
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.COMPLETED.value,
+                "active_result_id": result_id,
+                "pending_request_ids": [
+                    item
+                    for item in state.revision_control.pending_request_ids
+                    if item != request.revision_request_id
+                ],
+                "consumed_request_ids": list(
+                    dict.fromkeys(
+                        [
+                            *state.revision_control.consumed_request_ids,
+                            request.revision_request_id,
+                        ]
+                    )
+                ),
+                "consumed_result_ids": list(
+                    dict.fromkeys(
+                        [*state.revision_control.consumed_result_ids, result_id]
+                    )
+                ),
+            }
+        )
+        self._clear_pending_revision(state)
+
+    def _record_revision_audit(
+        self,
+        state: DeliberationWorkflowState,
+        event: RevisionAuditEvent,
+    ) -> None:
+        self.revision_exchange.create_audit_event_once(event)
+        if event.audit_event_id not in state.revision_control.audit_event_ids:
+            state.revision_control.audit_event_ids.append(event.audit_event_id)
+
     @staticmethod
     def _store_pending_revision(
         state: DeliberationWorkflowState,
@@ -3979,6 +5132,114 @@ class DeliberationManager:
         parent_message_id: str,
         progress_callback: ProgressCallback | None,
     ) -> DeliberationWorkflowState:
+        source_finding_ids = list(
+            dict.fromkeys(
+                finding_id
+                for item in review.upstream_revision_requests
+                for finding_id in item.source_finding_ids
+            )
+        )
+        revision_epoch = max(
+            state.revision_count,
+            state.revision_control.revision_epoch,
+        ) + 1
+        request_id = deterministic_revision_request_id(
+            workflow_id=state.workflow_id,
+            source_layer=LayerId.DELIBERATION,
+            target_layer=LayerId.RESEARCHER,
+            revision_epoch=revision_epoch,
+            source_review_id=parent_message_id,
+            source_finding_ids=source_finding_ids,
+        )
+        parent_request_id = (
+            state.revision_control.active_request_id
+            if state.revision_control.active_request_id
+            and state.revision_control.phase == RevisionControlPhase.COMPLETED.value
+            else None
+        )
+        root_request_id = (
+            (state.revision_control.root_revision_request_id or parent_request_id)
+            if parent_request_id
+            else request_id
+        )
+        canonical_request = RevisionRequestV1.create(
+            revision_request_id=request_id,
+            workflow_id=state.workflow_id,
+            route=RevisionRoute.UPSTREAM,
+            source_layer=LayerId.DELIBERATION,
+            target_layer=LayerId.RESEARCHER,
+            revision_epoch=revision_epoch,
+            root_revision_request_id=root_request_id,
+            parent_revision_request_id=parent_request_id,
+            source_review_id=parent_message_id,
+            source_finding_ids=source_finding_ids,
+            target_agent_ids=["researcher.manager"],
+            base_artifacts=[
+                RevisionArtifactRef(
+                    artifact_type="researcher.research_report",
+                    artifact_id=str(state.research_report["research_report_id"]),
+                    sha256=canonical_sha256(state.research_report),
+                ),
+                RevisionArtifactRef(
+                    artifact_type="deliberation.final_integration",
+                    artifact_id=str(state.final_integration["integration_id"]),
+                    sha256=canonical_sha256(state.final_integration),
+                ),
+            ],
+            required_actions=list(
+                dict.fromkeys(
+                    item.missing_evidence_description
+                    for item in review.upstream_revision_requests
+                )
+            ),
+            acceptance_conditions=list(
+                dict.fromkeys(
+                    condition
+                    for item in review.upstream_revision_requests
+                    for condition in item.acceptance_conditions
+                )
+            ),
+            evidence_expansion_allowed=True,
+            retrieval_allowed=True,
+            expected_human_selection_impact=HumanSelectionImpact.NOT_APPLICABLE,
+        )
+        canonical_message_id = str(
+            uuid5(NAMESPACE_URL, f"{request_id}:request-message")
+        )
+        canonical_message = PMPMessage.model_validate(
+            {
+                **PMPMessage.create(
+                    workflow_id=state.workflow_id,
+                    parent_message_id=parent_message_id,
+                    sender_agent_id=self.agent_id,
+                    receiver_agent_id="researcher.manager",
+                    message_type=MessageType.REVISION_REQUEST,
+                    objective="Collect evidence through an audited upstream Revision",
+                    payload=canonical_request.model_dump(mode="json"),
+                    context=PMPContext(
+                        current_stage="deliberation.upstream_revision",
+                        previous_stage="deliberation.quality_review",
+                        next_stage="researcher.manager",
+                    ),
+                    routing=PMPRouting(
+                        revision_target="researcher.manager",
+                        reply_required=True,
+                    ),
+                    metadata=PMPMetadata(
+                        status=MessageStatus.REVISION_REQUIRED,
+                        extensions={"role_definition": state.role_definition_usage[-1]},
+                    ),
+                ).model_dump(mode="json"),
+                "message_id": canonical_message_id,
+            }
+        )
+        self.revision_exchange.create_request_once(
+            canonical_message,
+            budget_policy=RevisionBudgetPolicy(
+                internal_limit=max(0, self.max_revisions - 1),
+                upstream_limit=self.max_revisions,
+            ),
+        )
         message = PMPMessage.create(
             workflow_id=state.workflow_id,
             parent_message_id=parent_message_id,
@@ -4010,7 +5271,12 @@ class DeliberationManager:
         )
         self.pmp_validator.validate(message)
         self.repository.save_researcher_revision_outbox(message)
-        state.message_history.append(message)
+        for saved_message in (canonical_message, message):
+            if not any(
+                item.message_id == saved_message.message_id
+                for item in state.message_history
+            ):
+                state.message_history.append(saved_message)
         state.upstream_revision_count += 1
         state.upstream_revision_history.append(
             UpstreamRevisionRecord(
@@ -4020,6 +5286,38 @@ class DeliberationManager:
             )
         )
         state.status = WorkflowStatus.WAITING_UPSTREAM_REVISION
+        state.revision_control = RevisionControlState.model_validate(
+            {
+                **state.revision_control.model_dump(mode="json"),
+                "phase": RevisionControlPhase.WAITING_UPSTREAM_RESULT.value,
+                "revision_epoch": revision_epoch,
+                "active_request_id": request_id,
+                "active_request_message_id": canonical_message.message_id,
+                "active_result_id": None,
+                "root_revision_request_id": root_request_id,
+                "parent_revision_request_id": parent_request_id,
+                "pending_request_ids": list(
+                    dict.fromkeys([*state.revision_control.pending_request_ids, request_id])
+                ),
+            }
+        )
+        self._record_revision_audit(
+            state,
+            RevisionAuditEvent(
+                audit_event_id=f"upstream_request_written_{revision_epoch}",
+                workflow_id=state.workflow_id,
+                revision_request_id=request_id,
+                layer=LayerId.DELIBERATION,
+                event_type=RevisionAuditEventType.REQUEST_WRITTEN,
+                actor_id=self.agent_id,
+                message_id=canonical_message.message_id,
+                artifact_ids=[
+                    str(state.research_report["research_report_id"]),
+                    str(state.final_integration["integration_id"]),
+                ],
+                reason=review.reason,
+            ),
+        )
         state.error = None
         self.repository.save(state)
         await self._emit(progress_callback, "Researcherへ追加調査を要求し、Workflowを待機状態にしました")

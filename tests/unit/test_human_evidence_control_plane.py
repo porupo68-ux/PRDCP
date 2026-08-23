@@ -85,6 +85,7 @@ class HumanEvidenceControlPlaneTests(unittest.TestCase):
             "researcher_accept",
             "researcher_accept_limitations",
             "researcher_revise",
+            "researcher_revision_execute",
             "researcher_recover",
         ):
             with self.subTest(command=command):

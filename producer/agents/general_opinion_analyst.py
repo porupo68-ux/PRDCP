@@ -29,17 +29,28 @@ class GeneralOpinionAnalyst(ProducerAgent):
                 "RETRIEVAL_NOT_CONFIGURED: General Opinion Analyst requires retrieval",
                 automatic_retry_allowed=False,
             )
-        revision_hash = hashlib.sha256(
-            json.dumps(
-                canonical.revision_context,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()[:8]
-        task_id = (
-            f"general_opinion_{canonical.selected_topic.topic_id}_{revision_hash}"
-        )
+        revision_task_id = message.metadata.extensions.get("retrieval_task_id")
+        if revision_task_id is not None and (
+            not isinstance(revision_task_id, str) or not revision_task_id.strip()
+        ):
+            raise NonRetryableAgentError(
+                "Invalid retrieval_task_id override for General Opinion Analyst",
+                automatic_retry_allowed=False,
+            )
+        if revision_task_id is None:
+            revision_hash = hashlib.sha256(
+                json.dumps(
+                    canonical.revision_context,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:8]
+            task_id = (
+                f"general_opinion_{canonical.selected_topic.topic_id}_{revision_hash}"
+            )
+        else:
+            task_id = revision_task_id
         query = (
             f"{canonical.selected_topic.title} 一般的な見解 社会的議論 "
             "代表的な主張 ニュース SNS"

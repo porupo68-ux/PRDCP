@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from common.models.revision import RevisionControlState
 from common.models.workflow import WorkflowStatus
 
 
@@ -66,6 +67,7 @@ class DeliberationWorkflowState(BaseModel):
     pending_revision_iteration: int | None = Field(default=None, ge=1)
     pending_revision_review_id: str | None = None
     awaiting_upstream_revision: bool = False
+    revision_control: RevisionControlState = Field(default_factory=RevisionControlState)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
     conclusion_sent: bool = False

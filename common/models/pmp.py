@@ -19,6 +19,7 @@ class MessageType(str, Enum):
     ERROR = "error"
     REVIEW = "review"
     REVISION_REQUEST = "revision_request"
+    REVISION_RESULT = "revision_result"
     STATUS_UPDATE = "status_update"
     CANCELLATION = "cancellation"
     RESEARCH_PLAN = "research_plan"

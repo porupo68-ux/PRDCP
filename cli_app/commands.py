@@ -132,6 +132,25 @@ async def recover_saved_producer(
     return 0 if state.status in {"COMPLETED", "WAITING_HUMAN_EVIDENCE_REVIEW"} else 1
 
 
+async def revise_saved_producer(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    reason: str | None,
+    json_output: bool,
+) -> int:
+    producer = build_producer_manager(settings)
+    state = await producer.revise(
+        workflow_id,
+        actor_id="cli.operator",
+        actor_source="CLI",
+        reason=reason or "CLI operator authorized one Producer internal Revision cycle",
+        progress_callback=ProgressReporter("producer", settings.data_dir, workflow_id),
+    )
+    print_state("producer", state, json_output=json_output)
+    return 0 if state.status == "COMPLETED" else 1
+
+
 def inspect_saved_researcher_evidence(
     settings: Settings,
     workflow_id: str,
@@ -265,6 +284,29 @@ async def run_saved_researcher(
     )
     print_state("researcher", state, json_output=json_output)
     return 0 if state.status in {"COMPLETED", "WAITING_HUMAN_EVIDENCE_REVIEW"} else 1
+
+
+async def execute_saved_researcher_revision(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    reason: str | None,
+    json_output: bool,
+) -> int:
+    researcher = build_researcher_manager(settings)
+    state = await researcher.execute_authorized_revision(
+        workflow_id,
+        actor_id="cli.operator",
+        actor_source="CLI",
+        authorization_reason=(
+            reason or "CLI operator authorized one Researcher evidence Revision cycle"
+        ),
+        progress_callback=ProgressReporter(
+            "researcher", settings.data_dir, workflow_id
+        ),
+    )
+    print_state("researcher", state, json_output=json_output)
+    return 0 if state.status == "WAITING_HUMAN_EVIDENCE_REVIEW" else 1
 
 
 async def run_saved_researcher_task(
@@ -543,6 +585,27 @@ async def retry_saved_deliberation_provider(
     return 0 if state.status == "COMPLETED" else 1
 
 
+async def revise_saved_deliberation(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    reason: str | None,
+    json_output: bool,
+) -> int:
+    _producer, _researcher, deliberation = build_managers(settings)
+    state = await deliberation.revise(
+        workflow_id,
+        actor_id="cli.operator",
+        actor_source="CLI",
+        reason=reason or "CLI operator authorized one Deliberation Revision cycle",
+        progress_callback=ProgressReporter(
+            "deliberation", settings.data_dir, workflow_id
+        ),
+    )
+    print_state("deliberation", state, json_output=json_output)
+    return 0 if state.status in {"COMPLETED", "WAITING_UPSTREAM_REVISION"} else 1
+
+
 async def run_saved_conclusion(
     settings: Settings,
     workflow_id: str,
@@ -605,6 +668,9 @@ async def revise_saved_conclusion(
     )
     state = await conclusion.revise(
         workflow_id,
+        actor_id="cli.operator",
+        actor_source="CLI",
+        reason="CLI operator authorized Conclusion Revision",
         progress_callback=ProgressReporter(
             "conclusion",
             settings.data_dir,
@@ -687,7 +753,13 @@ async def run_saved_playwright(
     if recover:
         state = await playwright.recover(workflow_id, progress_callback=callback)
     elif resume:
-        state = await playwright.resume(workflow_id, progress_callback=callback)
+        state = await playwright.resume(
+            workflow_id,
+            actor_id="cli.operator",
+            actor_source="CLI",
+            reason="CLI operator authorized Playwright resume",
+            progress_callback=callback,
+        )
     else:
         state = await playwright.start(workflow_id, progress_callback=callback)
     print_state("playwright", state, json_output=json_output)
@@ -734,6 +806,9 @@ async def revise_saved_playwright(
     )
     state = await playwright.revise(
         workflow_id,
+        actor_id="cli.operator",
+        actor_source="CLI",
+        reason="CLI operator authorized Playwright Revision",
         progress_callback=ProgressReporter(
             "playwright",
             settings.data_dir,
@@ -833,6 +908,15 @@ def dispatch(args: Any, settings: Settings) -> int:
             recover_saved_producer(
                 settings,
                 args.producer_recover,
+                json_output=args.json_output,
+            )
+        )
+    if args.producer_revise:
+        return asyncio.run(
+            revise_saved_producer(
+                settings,
+                args.producer_revise,
+                reason=args.reason,
                 json_output=args.json_output,
             )
         )
@@ -971,6 +1055,15 @@ def dispatch(args: Any, settings: Settings) -> int:
                 json_output=args.json_output,
             )
         )
+    if args.researcher_revision_execute:
+        return asyncio.run(
+            execute_saved_researcher_revision(
+                settings,
+                args.researcher_revision_execute,
+                reason=args.reason,
+                json_output=args.json_output,
+            )
+        )
     if args.deliberation:
         return asyncio.run(
             run_saved_deliberation(
@@ -996,6 +1089,15 @@ def dispatch(args: Any, settings: Settings) -> int:
                 args.deliberation_recover,
                 resume=False,
                 recover=True,
+                json_output=args.json_output,
+            )
+        )
+    if args.deliberation_revise:
+        return asyncio.run(
+            revise_saved_deliberation(
+                settings,
+                args.deliberation_revise,
+                reason=args.reason,
                 json_output=args.json_output,
             )
         )

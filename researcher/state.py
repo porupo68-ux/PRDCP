@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.models.pmp import PMPMessage
+from common.models.revision import RevisionControlState
 from common.models.workflow import WorkflowStatus
 from researcher.schemas.human_evidence import (
     AcceptedEvidenceGap,
@@ -92,6 +93,7 @@ class ResearcherWorkflowState(BaseModel):
     pending_revision_source_agent_id: str | None = None
     external_revision_reply_sent: bool = False
     external_revision_status: ExternalRevisionCheckpoint | None = None
+    revision_control: RevisionControlState = Field(default_factory=RevisionControlState)
     message_history: list[PMPMessage] = Field(default_factory=list)
     role_definition_usage: list[dict[str, str]] = Field(default_factory=list)
     deliberation_sent: bool = False

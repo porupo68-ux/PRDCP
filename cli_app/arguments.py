@@ -20,6 +20,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Resume Producer from its first incomplete saved checkpoint",
     )
     operation.add_argument(
+        "--producer-revise",
+        metavar="WORKFLOW_ID",
+        help=(
+            "Authorize and execute exactly one saved Producer internal Revision "
+            "cycle; Safe Mode remains enabled"
+        ),
+    )
+    operation.add_argument(
         "--producer-provider-retry",
         metavar="WORKFLOW_ID",
         help=(
@@ -138,6 +146,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     operation.add_argument(
+        "--researcher-revision-execute",
+        metavar="WORKFLOW_ID",
+        help=(
+            "Human REVISEで保存したResearcher revision planを、別の明示承認として"
+            "一サイクルだけ実行する"
+        ),
+    )
+    operation.add_argument(
         "--researcher-task",
         nargs=2,
         metavar=("WORKFLOW_ID", "TASK_ID"),
@@ -149,6 +165,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--deliberation-recover",
         metavar="WORKFLOW_ID",
         help="保存済みcheckpointを検査し、Deliberationの障害発生箇所から復旧する",
+    )
+    operation.add_argument(
+        "--deliberation-revise",
+        metavar="WORKFLOW_ID",
+        help="保存済みDeliberation internal Revision planを明示的一回だけ実行する",
     )
     operation.add_argument(
         "--deliberation-provider-retry",

@@ -551,6 +551,69 @@ class DeliberationManagerTests(unittest.TestCase):
                 revision_zero_requests_before,
             )
 
+    def test_safe_mode_internal_revision_requires_explicit_common_authorization(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = MockModelProvider(
+                deliberation_review_decisions=["revision_required", "approved"],
+                reservation_root=root / "provider_call_reservations",
+            )
+            manager = make_manager(root, provider, demo_safe_mode=True)
+            blocked = asyncio.run(
+                manager.start_from_message(make_deliberation_handoff())
+            )
+            self.assertEqual(blocked.status, "BLOCKED")
+            self.assertEqual(
+                blocked.revision_control.phase,
+                "authorization_required",
+            )
+            request_id = blocked.revision_control.active_request_id
+            request_path = (
+                root
+                / "artifacts"
+                / "revision_requests"
+                / "internal"
+                / "deliberation"
+                / blocked.workflow_id
+                / f"{request_id}.json"
+            )
+            self.assertTrue(request_path.exists())
+            calls_before = len(provider.calls)
+
+            completed = asyncio.run(
+                manager.revise(
+                    blocked.workflow_id,
+                    actor_id="test.operator",
+                    actor_source="CLI",
+                    reason="Explicitly authorize the saved Deliberation plan",
+                )
+            )
+            self.assertEqual(completed.status, "COMPLETED")
+            self.assertEqual(completed.revision_control.phase, "completed")
+            self.assertGreater(len(provider.calls), calls_before)
+            result_path = (
+                root
+                / "artifacts"
+                / "revision_results"
+                / "internal"
+                / "deliberation"
+                / blocked.workflow_id
+                / f"{request_id}.json"
+            )
+            self.assertTrue(result_path.exists())
+
+            calls_after_completion = len(provider.calls)
+            replayed = asyncio.run(
+                manager.revise(
+                    blocked.workflow_id,
+                    actor_id="test.operator",
+                    actor_source="CLI",
+                    reason="Explicitly authorize the saved Deliberation plan",
+                )
+            )
+            self.assertEqual(replayed.status, "COMPLETED")
+            self.assertEqual(len(provider.calls), calls_after_completion)
+
     def test_recover_reuses_revision_review_after_checkpoint_was_cleared(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -16,6 +16,7 @@ from discord_app.channel_router import ChannelRouter, ChannelRoutingError
 from discord_app.commands import (
     decide_researcher_evidence,
     inspect_researcher_evidence,
+    execute_researcher_revision,
     integrate_conclusion_candidates,
     load_conclusion_package,
     load_conclusion_status,
@@ -28,13 +29,17 @@ from discord_app.commands import (
     load_researcher_result,
     load_researcher_status,
     resume_conclusion,
+    revise_conclusion,
     resume_deliberation,
+    revise_deliberation,
     resume_playwright,
+    revise_playwright,
     recover_researcher_evidence,
     run_conclusion,
     run_deliberation,
     run_playwright,
     run_producer,
+    revise_producer,
     run_researcher,
     select_conclusion,
 )
@@ -215,19 +220,24 @@ def create_bot(
         command_layer = {
             "deliberation": "Deliberation",
             "deliberation_resume": "Deliberation",
+            "deliberation_revise": "Deliberation",
             "researcher": "Researcher",
             "researcher_accept": "Researcher",
             "researcher_accept_limitations": "Researcher",
             "researcher_revise": "Researcher",
+            "researcher_revision_execute": "Researcher",
             "researcher_recover": "Researcher",
             "conclusion": "Conclusion",
             "conclusion_resume": "Conclusion",
+            "conclusion_revise": "Conclusion",
             "conclusion_select": "Conclusion",
             "conclusion_integrate": "Conclusion",
             "playwright": "Playwright",
             "playwright_resume": "Playwright",
+            "playwright_revise": "Playwright",
             "producer": "Producer",
             "producer_topic": "Producer",
+            "producer_revise": "Producer",
         }.get(command_name)
         if command_layer is None:
             return
@@ -435,6 +445,31 @@ def create_bot(
             return
         await router.send_chunks(ctx.guild, "producer", format_status(state))
 
+    @bot.command(name="producer_revise")
+    async def producer_revise_command(
+        ctx,
+        workflow_id: str = "",
+        *,
+        reason: str = "Discord operator authorized one Producer internal Revision cycle",
+    ):
+        if not workflow_id:
+            await ctx.send("使い方: !producer_revise <workflow_id> [reason]")
+            return
+        try:
+            state = await revise_producer(
+                manager,
+                workflow_id=workflow_id,
+                actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
+                reason=reason,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            await _send_operational_error(ctx, "Producer Revision failed", exc)
+            return
+        await router.send_chunks(ctx.guild, "producer", format_status(state))
+        await route_layer_status(
+            ctx.guild, workflow_id, "Producer", str(state.status)
+        )
+
     @bot.command(name="runtime_models")
     async def runtime_models_command(ctx, layer: str = ""):
         if runtime_model_guard is None:
@@ -594,6 +629,38 @@ def create_bot(
             ctx, workflow_id, HumanEvidenceDecisionType.REVISE, reason
         )
 
+    @bot.command(name="researcher_revision_execute")
+    async def researcher_revision_execute_command(
+        ctx,
+        workflow_id: str = "",
+        *,
+        reason: str = "Discord operator authorized one Researcher evidence Revision cycle",
+    ):
+        if researcher_manager is None:
+            await ctx.send("Researcher Managerが構成されていません")
+            return
+        if not workflow_id:
+            await ctx.send(
+                "使い方: !researcher_revision_execute <workflow_id> [reason]"
+            )
+            return
+        try:
+            state = await execute_researcher_revision(
+                researcher_manager,
+                workflow_id=workflow_id,
+                actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
+                reason=reason,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            await _send_operational_error(ctx, "Researcher Revision execution failed", exc)
+            return
+        await router.send_chunks(
+            ctx.guild, "researcher", format_researcher_status(state)
+        )
+        await route_layer_status(
+            ctx.guild, workflow_id, "Researcher", str(state.status)
+        )
+
     @bot.command(name="researcher_recover")
     async def researcher_recover_command(ctx, workflow_id: str = ""):
         if researcher_manager is None:
@@ -701,6 +768,45 @@ def create_bot(
             await ctx.send("使い方: !deliberation_resume <workflow_id>")
             return
         await execute_deliberation(ctx, workflow_id, resume=True)
+
+    @bot.command(name="deliberation_revise")
+    async def deliberation_revise_command(
+        ctx,
+        workflow_id: str = "",
+        *,
+        reason: str = "Discord operator authorized one Deliberation Revision cycle",
+    ):
+        if deliberation_manager is None:
+            await ctx.send("Deliberation Managerが構成されていません")
+            return
+        if not workflow_id:
+            await ctx.send("使い方: !deliberation_revise <workflow_id> [reason]")
+            return
+
+        async def progress(message: str) -> None:
+            await router.send_chunks(ctx.guild, "deliberation", message)
+
+        try:
+            state = await revise_deliberation(
+                deliberation_manager,
+                workflow_id=workflow_id,
+                actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
+                reason=reason,
+                progress_callback=progress,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            await _send_operational_error(ctx, "Deliberation Revision failed", exc)
+            return
+        await router.send_chunks(
+            ctx.guild,
+            "deliberation",
+            format_deliberation_result(state)
+            if state.status == "COMPLETED"
+            else format_deliberation_status(state),
+        )
+        await route_layer_status(
+            ctx.guild, workflow_id, "Deliberation", str(state.status)
+        )
 
     async def execute_conclusion(ctx, workflow_id: str, *, resume: bool = False):
         if conclusion_manager is None:
@@ -864,6 +970,43 @@ def create_bot(
             return
         await execute_conclusion(ctx, workflow_id, resume=True)
 
+    @bot.command(name="conclusion_revise")
+    async def conclusion_revise_command(
+        ctx,
+        workflow_id: str = "",
+        *,
+        reason: str = "Discord operator authorized Conclusion Revision",
+    ):
+        if conclusion_manager is None:
+            await ctx.send("Conclusion Managerが構成されていません")
+            return
+        if not workflow_id:
+            await ctx.send("使い方: !conclusion_revise <workflow_id> [reason]")
+            return
+
+        async def progress(message: str) -> None:
+            await router.send_chunks(ctx.guild, "conclusion", message)
+
+        try:
+            state = await revise_conclusion(
+                conclusion_manager,
+                workflow_id=workflow_id,
+                actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
+                reason=reason,
+                progress_callback=progress,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            await _send_operational_error(ctx, "Conclusion Revision failed", exc)
+            return
+        await router.send_chunks(
+            ctx.guild,
+            "conclusion",
+            format_conclusion_options(state)
+            if state.status == "WAITING_HUMAN_SELECTION"
+            else format_conclusion_status(state),
+        )
+        await route_layer_status(ctx.guild, workflow_id, "Conclusion", str(state.status))
+
     async def execute_playwright(ctx, workflow_id: str, *, resume: bool = False):
         if playwright_manager is None:
             await ctx.send("Playwright Managerが構成されていません")
@@ -886,6 +1029,7 @@ def create_bot(
                     resume_playwright(
                         playwright_manager,
                         workflow_id=workflow_id,
+                        actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
                         progress_callback=progress,
                     )
                     if resume
@@ -1013,5 +1157,46 @@ def create_bot(
             await ctx.send("使い方: !playwright_resume <workflow_id>")
             return
         await execute_playwright(ctx, workflow_id, resume=True)
+
+    @bot.command(name="playwright_revise")
+    async def playwright_revise_command(
+        ctx,
+        workflow_id: str = "",
+        *,
+        reason: str = "Discord operator authorized Playwright Revision",
+    ):
+        if playwright_manager is None:
+            await ctx.send("Playwright Managerが構成されていません")
+            return
+        if not workflow_id:
+            await ctx.send("使い方: !playwright_revise <workflow_id> [reason]")
+            return
+
+        async def progress(message: str) -> None:
+            await router.send_chunks(ctx.guild, "playwright", message)
+
+        try:
+            state = await revise_playwright(
+                playwright_manager,
+                workflow_id=workflow_id,
+                actor_id=f"discord.user.{getattr(ctx.author, 'id', 'unknown')}",
+                reason=reason,
+                progress_callback=progress,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            await _send_operational_error(ctx, "Playwright Revision failed", exc)
+            return
+        await router.send_chunks(
+            ctx.guild,
+            "playwright",
+            format_playwright_status(state),
+        )
+        if state.status == "COMPLETED":
+            await router.send_chunks(
+                ctx.guild,
+                "deliveries",
+                format_playwright_result(state),
+            )
+        await route_layer_status(ctx.guild, workflow_id, "Playwright", str(state.status))
 
     return bot

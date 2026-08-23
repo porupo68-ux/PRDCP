@@ -19,6 +19,76 @@ PRDCPは、複数のAIエージェントを5つの層に分け、社会で広く
 
 その結果、エージェント間の通信を安定させるPMPという共通プロトコルの設計や、各層にオーケストレーターとなるManager Agentを配置し、処理の進行・検証・再実行を管理することで、システム全体の動作を安定化させる設計を学ぶことができました。
 
+## 現行システム構成
+
+PRDCP v2は、31件のRole Definitionを持つ5 Layer構成です。各LayerのManagerが、Layer内Agentの直接呼び出し、checkpoint、品質判定、Revision、上流・下流Handoffを管理します。
+
+| Layer | RD数 | 主な責務 | 人間境界 |
+| --- | ---: | --- | --- |
+| Producer | 6 | Topic探索・選択、一般論分析、Research Plan作成、品質審査 | なし |
+| Researcher | 9 | 7系統の検索・Evidence整理、Report統合、品質審査 | Human Evidence Gate |
+| Deliberation | 6 | 3視点分析、初回統合、反論、最終統合、決定論的検証 | Evidence不足時のみ上流待機 |
+| Conclusion | 5 | Position生成、14基準評価、統合、品質審査 | Human Selection Gate |
+| Playwright | 5 | Narrative、Script、Citation Manifest、Visual Plan、Final Gate、Delivery | Final Gate |
+
+```text
+User / Discord Control Plane
+            |
+            v
+Producer -> Researcher -> Deliberation -> Conclusion -> Playwright -> Delivery
+   ^            ^             ^              ^
+   |            |             |              |
+   +-- revision-+-- revision--+--- revision--+
+
+Layer内: ManagerからAgentへのin-process direct call
+Layer間: PMP envelopeを格納したfile Outbox
+永続化: State / Message history / Artifact / Checkpoint / Reservation / Audit
+```
+
+PMP v2は、`workflow_id`、`message_id`、`parent_message_id`、sender/receiver、message type、status、routing、metadataを定めるメッセージ契約です。PMP自体はmessage brokerではありません。Layer内処理は同一プロセス内の直接呼び出しであり、Layer間HandoffとUpstream Revisionだけを`storage/data/outbox/`のファイルで受け渡します。DiscordもPMP transportではなく、既存Manager操作を人間が起動・承認・確認するControl Planeです。
+
+RD Loaderは`role_definitions/registry.json`を正本として31 RDをSTRICT読込し、Prompt Builderは共通規則、RD snapshot、task固有入力を優先順に合成します。Provider境界では22 root Structured Output Schemaを再帰検査し、全object nodeの`additionalProperties: false`と、propertiesを持つobjectの`required == properties.keys()`を保証します。自由形式dictは黙って閉じず、明示モデルがない場合はProvider呼び出し前にFail Closedとします。
+
+RetrievalはProducer General Opinion Analystと7 Researcher specialistの8 Agentだけで使用します。検索結果を先に`retrieval_contexts`へ保存し、Reasoning失敗後は同じContextを再利用します。Retrieval reservationとLLM Provider reservationは別台帳で、同じlogical taskの曖昧な二重送信を禁止します。
+
+## Revision Architecture
+
+全5 Layerは`revision.v1`共通契約を使用します。`RevisionRequestV1`はfinding、対象Agent、必要処理、受入条件、基準Artifact hash、親・root request、Evidence/検索許可、idempotency keyを保持します。`RevisionResultV1`はrequest/message相関、findingごとの解決状態、結果Artifact hash、Provider/Retrieval reservationとcall数を返します。Playwrightへ戻るConclusion Resultだけは、Human Selectionへの影響を`unchanged`または`reselection_required`で必ず宣言します。
+
+| Layer | Internal Revision | 直前LayerへのUpstream Revision | 直後LayerからのRequest処理 |
+| --- | --- | --- | --- |
+| Producer | finding対象から依存するProducer Agentだけを再実行 | なし（最上流） | ResearcherのPlan defectを受け、Research Planner範囲だけを修正 |
+| Researcher | Human `REVISE`計画を別実行承認後に実行。integrity repairとは別budget | ProducerへResearch Plan修正を要求 | DeliberationのEvidence追加要求を処理し、ReportとQuality Reviewを更新 |
+| Deliberation | Primary Analyst、Counterargument、Manager統合、Quality Reviewの最小依存閉包 | ResearcherへEvidence追加を要求 | Conclusionの分析修正要求を処理し、更新Deliberation Resultを返す |
+| Conclusion | Position、Evaluation、Integration、Quality Reviewの最小依存閉包 | Deliberationへ分析修正を要求 | Playwright要求を処理。構造修正は選択を保持し、意味変更は再選択で停止 |
+| Playwright | Narrative、Script、Citation、Visualの最小依存閉包 | ConclusionへFinal Conclusion修正を要求 | なし（最下流）。更新Handoffを検証して制作を再開 |
+
+Producer以外のUpstream Revisionは必ず隣接Layerだけを対象にします。Request writerはrequest単位の`outbox/revision_requests/<target_layer>/<workflow_id>/`へcreate-once保存し、上流consumerは基準Artifact hashとworkflow/message/request相関を検証します。Result writerは`outbox/revision_results/<requester_layer>/<workflow_id>/`へ保存し、下流consumerはstale Result、別workflow、別request、未知finding、Artifact hash不一致を拒否します。旧`researcher_revision`、`deliberation_revision`、`conclusion_revision` Outboxは読込時adapterで扱い、既存JSONは書き換えません。
+
+Internal Revisionも同じrequest/result Schemaを使いますが、Layer間transportには流しません。`artifacts/revision_requests/internal/`と`artifacts/revision_results/internal/`へ監査Artifactとして保存し、Managerがin-processで実行します。これにより、PMPをbrokerのように扱わず、内部処理と層間転送の責務を分離しています。
+
+```text
+idle
+  -> planned / requested
+  -> authorization_required       Safe Modeまたは有料処理の明示承認待ち
+  -> waiting_upstream_result      file Outboxの相関Result待ち
+  -> consuming_request
+  -> executing                    対象と依存checkpointだけを実行
+  -> result_ready
+  -> completed
+
+任意段階 -> blocked               budget枯渇、stale/duplicate、相関不一致、
+                                  未回答Provider request、Human Gate未確定
+```
+
+Internal budgetとUpstream budget、Provider Retry budget、Deterministic Repair budgetは別々です。各Revision requestは決定的IDとidempotency keyを持ち、budget slot、authorization、reservation、audit eventをappend-onlyまたはcreate-onceで保存します。同一requestの再開は同一identityを再利用し、異なる内容で同じidentityを使う操作は拒否します。Revision上限到達時、未回答Provider request、基準Artifactの変更、Human Decision不在、未知routeはFail Closedです。
+
+Safe ModeはRequest・計画・Outbox・checkpointの保存を妨げませんが、新しい有料実行の直前で停止します。CLI/Discordの`revise`操作は一サイクルだけの実行承認を別Artifactとして記録します。Human Evidence DecisionとProvider/Retrieval実行承認、Human SelectionとConclusion再生成承認はそれぞれ独立しており、一方から他方を推測しません。
+
+`resume`は正常なUpstream Revision Result受領後の再開、`recover`は障害後のcheckpoint復旧、`provider-retry`は課金済みの可能性がある失敗の別task identityによる一回限り再送です。決定論的修復はLLM Revisionより先にallowlist条件で実行できますが、Evidenceを捏造せず、専用budgetと前後hashを記録します。
+
+Human Evidence Gateは`ACCEPT`、`ACCEPT_WITH_LIMITATIONS`、`REVISE`を保持し、Hard Integrity Failureを人間判断で上書きしません。Human Selection Gateは品質審査済み候補を人間が選ぶまでFinal Conclusionを確定しません。Playwrightから意味変更を要求された場合も古いHuman Selectionを迂回せず、新しい選択が記録されるまで停止します。Final GateはCitation Manifest Contract、未裏付けclaim、limitations、Visual整合性を検査し、Deliveryは1 workflowにつき一度だけ6ファイルを生成します。
+
 
 ## Execution Modes
 
@@ -133,7 +203,7 @@ py main.py --demo-e2e --provider mock --topic "生成AIは人間の仕事を奪�
 py main.py --status <表示されたworkflow_id>
 ```
 
-- `--doctor`は依存関係、保存先、31 RD、32 Agent ID、30 Message Type、7 PMP Status、4 Handoff、Provider設定を検査します。
+- `--doctor`は依存関係、保存先、31 RD、32 Agent ID（31 RD + Delivery endpoint）、31 Message Type、7 PMP Status、6 Layer間Handoff契約、Provider設定を検査します。
 - `--demo-e2e`はAPI料金なしのMockで5層と6納品ファイルを確認します。
 - `--status`は停止した層、Agent、error、revision回数、次に実行するコマンドを表示します。
 - CLIは通常、読みやすい要約だけを表示します。内部状態が必要な場合だけ末尾へ`--json`を付けます。
@@ -150,7 +220,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | Resume | 正常な上流Revision結果を受け取って再分析 | `--researcher-resume`、`--deliberation-resume`、`--conclusion-resume`、`--playwright-resume` |
 | Recover | 保存済みcheckpointを照合し、完了済み処理を再利用 | `--producer-recover`、`--researcher-recover`、`--deliberation-recover`、`--conclusion-recover`、`--playwright-recover` |
 | Provider Retry | 課金済みの可能性がある一時障害を、保存済み認可と別task identityで一度だけ再送 | 各層の`--*-provider-retry` |
-| Revision | 保存済みQuality Findingに対する明示的一サイクル | `--researcher-revise`、`--conclusion-revise`、`--playwright-revise` |
+| Revision | 保存済みQuality Findingに対する明示的一サイクル | `--producer-revise`、`--researcher-revise` + `--researcher-revision-execute`、`--conclusion-revise`、`--playwright-revise` |
 | Deterministic Integrity Repair | 保存済みResearch Reportのallowlist対象relation不整合を外部call 0件で修復 | `--researcher-integrity-repair` |
 | Contract/Capability Repair | 同一model retryでは直らないProvider契約・能力不一致を、異なる明示modelで一度だけ修復 | `--conclusion-contract-repair`、`--playwright-capability-repair` |
 | Targeted Researcher Repair | 保存済みRetrievalを再利用する旧失敗専用の一回限り修復 | `--researcher-runtime-model-repair`、`--researcher-runtime-output-repair`、`--researcher-runtime-adapter-repair`、`--researcher-runtime-identity-repair`、`--researcher-runtime-provenance-repair` |
@@ -183,6 +253,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | コマンド | 説明 | 外部呼び出し |
 | --- | --- | --- |
 | `py main.py --producer-recover <WORKFLOW_ID>` | 最初の未完了checkpointから再開し、完了済み成果物とRetrievalを再利用 | checkpoint依存 |
+| `py main.py --producer-revise <WORKFLOW_ID> [--reason "..."] --safe-mode` | 保存済みQuality FindingのProducer内部Revisionを明示承認し、対象agent以降を一サイクルだけ再実行 | 対象checkpoint依存。Revision専用reservationを使用 |
 | `py main.py --producer-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | 保存済みRetrievalでGeneral Opinion Reasoningを一回だけ明示再送し、Research Planner前で停止 | LLM最大1、Retrieval 0 |
 | `py main.py --producer-output-repair <WORKFLOW_ID> --provider openrouter --safe-mode` | 消費済みretryが既知のmetadata hydration契約で失敗した場合に、別task identityで一回修復 | LLM最大1、Retrieval 0 |
 
@@ -197,6 +268,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --researcher-accept <WORKFLOW_ID> [--reason <REASON>]` | Evidence GapがないQuality AssessmentをHuman Decisionとして承認 | 0 |
 | `py main.py --researcher-accept-limitations <WORKFLOW_ID> [--reason <REASON>]` | Evidence Gapを未解決limitationsとして受容し、下流へ明示して完了 | 0 |
 | `py main.py --researcher-revise <WORKFLOW_ID> [--reason <REASON>]` | 追加調査のHuman DecisionとRevision Planだけを保存。API実行認可とは別 | 0 |
+| `py main.py --researcher-revision-execute <WORKFLOW_ID> [--reason <REASON>] --safe-mode` | 保存済みHuman `REVISE` planへ別の実行承認を記録し、対象ResearcherとQuality Reviewを一サイクルだけ実行 | plan記載の上限内 |
 | `py main.py --researcher-recover <WORKFLOW_ID>` | 保存済みHuman Decision、State、Outboxを照合し、allowlist対象のdedupe/classification repairも復旧 | 0 |
 | `py main.py --researcher-integrity-repair <WORKFLOW_ID>` | 同一文書系列のduplicate tracking relationだけを一回限り決定論的に修復 | 0 |
 | `py main.py --researcher-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | Retryable failureで止まったResearcher Quality Reviewerを一回だけ明示再送 | LLM最大1、Retrieval 0 |
@@ -215,6 +287,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --deliberation-resume <WORKFLOW_ID>` | Researcherの追加Evidence受領後にpending revisionを再分析 | LLMあり |
 | `py main.py --deliberation-recover <WORKFLOW_ID>` | checkpointを照合し、最後の未完了段階から障害復旧 | checkpoint依存 |
 | `py main.py --deliberation-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | RetryableなManagerまたはQuality Reviewer taskを一回だけ明示再送 | LLM最大1 |
+| `py main.py --deliberation-revise <WORKFLOW_ID> --provider openrouter --safe-mode` | 保存済みの内部Revision、またはConclusionから受信したRevision Requestを明示承認して最小依存閉包だけ再実行 | 対象checkpoint依存 |
 
 ### CLI Conclusion
 
@@ -224,7 +297,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --conclusion-resume <WORKFLOW_ID>` | Deliberationの修正版Handoff受領後に再開 | LLMあり |
 | `py main.py --conclusion-recover <WORKFLOW_ID>` | 保存済みResult PMPとcheckpointを照合し、未完了stageまたは既知Candidate Coverage failureから復旧 | checkpoint依存 |
 | `py main.py --conclusion-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | Retryable/応答契約failureの未完了taskを一回だけ明示再送 | LLM最大1 |
-| `py main.py --conclusion-revise <WORKFLOW_ID> --provider openrouter --safe-mode` | 保存済み`revision_required`に対する内部revisionを一サイクルだけ実行 | LLMあり |
+| `py main.py --conclusion-revise <WORKFLOW_ID> [--reason "..."] --provider openrouter --safe-mode` | 保存済み内部Revision、またはPlaywrightから受信したRevision Requestを明示承認。意味変更時は新しいHuman Selection待ちで停止 | 対象checkpoint依存 |
 | `py main.py --conclusion-contract-repair <WORKFLOW_ID> <REPAIR_MODEL_ID> --provider openrouter --safe-mode` | 元taskと一回retryがともに契約違反の場合、異なる明示modelで一回修復 | LLM最大1 |
 | `py main.py --conclusion-select <WORKFLOW_ID> <CANDIDATE_ID>` | 1候補をHuman Selectionとして確定し、Playwright Handoffを保存 | 0 |
 | `py main.py --conclusion-integrate <WORKFLOW_ID> <CANDIDATE_ID_1> <CANDIDATE_ID_2> [...]` | 2件以上の候補から統合案を再生成・再評価 | LLMあり |
@@ -248,7 +321,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `--safe-mode` | 自動retry・追加revisionを抑止し、明示的一回操作の境界を維持 |
 | `--no-safe-mode` | 設定された範囲で自動revision・追加Provider callを許可 |
 | `--topic <TOPIC>` | `--demo`、`--demo-full`、`--demo-e2e`へTopicを渡す |
-| `--reason <REASON>` | Researcher Human Evidence Decisionの監査理由を保存 |
+| `--reason <REASON>` | Human Evidence Decisionまたは各Layerの明示Revision承認理由を監査保存 |
 | `--json` | 要約ではなく完全な状態または診断JSONを表示 |
 | `--verbose` | エラー時だけ開発者向けTracebackを表示 |
 
@@ -261,6 +334,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 | `!producer` | Topic ScoutからProducerを開始 | 設定依存。自動下流起動の場合あり |
 | `!producer_topic <TOPIC>` | 指定TopicでProducerを開始 | 設定依存。自動下流起動の場合あり |
 | `!producer_status <WORKFLOW_ID>` | Producerの保存済み状態を表示 | 0 |
+| `!producer_revise <WORKFLOW_ID> [REASON]` | Safe Modeで停止した保存済みProducer内部Revisionを一サイクルだけ明示実行 | 対象checkpoint依存 |
 | `!runtime_models [LAYER]` | Runtime Model、現在設定、互換binding、driftを表示 | 0 |
 | `!researcher <WORKFLOW_ID>` | 保存済みResearch PlanからResearcherを開始 | 検索・LLMあり |
 | `!researcher_status <WORKFLOW_ID>` | Researcherの保存済み状態を表示 | 0 |
@@ -269,11 +343,13 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 | `!researcher_accept <WORKFLOW_ID> [REASON]` | Evidence Gapがない審査をHuman Decisionとして承認 | 0 |
 | `!researcher_accept_limitations <WORKFLOW_ID> [REASON]` | Evidence Gapを未解決limitationsとして受容 | 0 |
 | `!researcher_revise <WORKFLOW_ID> [REASON]` | 追加調査のHuman Decisionと計画を保存 | 0 |
+| `!researcher_revision_execute <WORKFLOW_ID> [REASON]` | 保存済みHuman `REVISE` planを別承認で一サイクル実行 | plan記載の上限内 |
 | `!researcher_recover <WORKFLOW_ID>` | 保存済みHuman Decision、State、Outboxを0-callで照合・復旧 | 0 |
 | `!deliberation <WORKFLOW_ID>` | 完了済みResearch ReportからDeliberationを開始 | LLMあり |
 | `!deliberation_status <WORKFLOW_ID>` | Deliberationの保存済み状態を表示 | 0 |
 | `!deliberation_result <WORKFLOW_ID>` | 保存済みDeliberation Resultを表示 | 0 |
 | `!deliberation_resume <WORKFLOW_ID>` | Researcherの追加Evidence受領後に再開 | LLMあり |
+| `!deliberation_revise <WORKFLOW_ID> [REASON]` | 保存済み内部RevisionまたはConclusionからのRevision Requestを明示承認して実行 | 対象checkpoint依存 |
 | `!conclusion <WORKFLOW_ID>` | 完了済みDeliberation ResultからConclusionを開始 | LLMあり |
 | `!conclusion_status <WORKFLOW_ID>` | Conclusionの保存済み状態を表示 | 0 |
 | `!conclusion_options <WORKFLOW_ID>` | Human Selection候補と評価要約を表示 | 0 |
@@ -281,6 +357,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 | `!conclusion_integrate <WORKFLOW_ID> <CANDIDATE_ID_1> <CANDIDATE_ID_2> [...]` | 2件以上の候補から統合案を再生成 | LLMあり |
 | `!conclusion_result <WORKFLOW_ID>` | 保存済みFinal Conclusionを表示 | 0 |
 | `!conclusion_resume <WORKFLOW_ID>` | Deliberationの修正版Handoff受領後に再開 | LLMあり |
+| `!conclusion_revise <WORKFLOW_ID> [REASON]` | 保存済み内部Revision、またはPlaywrightからのRevision Requestを明示承認して実行。再選択が必要な変更はHuman Selection待ちで停止 | 対象checkpoint依存 |
 | `!playwright <WORKFLOW_ID>` | Human Selection済みConclusionから制作工程を開始 | LLMあり |
 | `!playwright_status <WORKFLOW_ID>` | Playwrightの保存済み状態を表示 | 0 |
 | `!playwright_script <WORKFLOW_ID>` | 保存済みScript本文を表示 | 0 |
@@ -288,6 +365,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 | `!playwright_visuals <WORKFLOW_ID>` | 保存済みVisual Planを表示 | 0 |
 | `!playwright_result <WORKFLOW_ID>` | Final Script Packageの要約を表示 | 0 |
 | `!playwright_resume <WORKFLOW_ID>` | Conclusionの修正版Handoff受領後に再開 | LLMあり |
+| `!playwright_revise <WORKFLOW_ID> [REASON]` | 保存済みFinal Gateの内部Revisionを最小依存閉包で一サイクル実行 | 対象checkpoint依存 |
 
 <!-- COMMAND_CATALOG_END -->
 
@@ -296,7 +374,11 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 ### 共通・Producer
 
 - PMP v2.0モデル、親子message追跡、Agent ID・message type・status検証
+- `revision.v1`共通Request/Result、finding・parent/root message・Artifact hash相関、Layer別`revision_control`
+- request単位のRevision Outbox、内部Revision監査Artifact、独立budget、明示authorization、append-only audit
+- 旧checkpointと旧単一ファイルRevision Outboxを変更せず扱うread adapter
 - Producerの5専門工程と最大3回の修正ループ
+- Quality Findingから必要なProducer Agentだけを再実行するInternal Revisionと、ResearcherからのResearch Plan修正Requestの往復
 - JSON/JSONL永続化とResearcher Inboxへの`research_plan`出力
 - Mock Providerと任意利用のOpenRouter Provider
 
@@ -313,6 +395,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 - Quality Review後に必ず停止するHuman Evidence Gateと、Evidence不足・hard integrity failureの型付き分類
 - 人間判断、Revision Plan、Provider call authorizationを分離し、`REVISE`だけでは追加APIを呼ばない制御
 - Human Decisionと受容済み未解決gapを全下流層へ明示的に伝播
+- Researcher内部Revision、Researcher→Producer→ResearcherのPlan修正往復、Deliberation→Researcher→DeliberationのEvidence追加往復
 - 同一文書系列をSource削除ではなくrelation正規化として扱う、明示的・一回限り・hash監査付きの0-call integrity repair
 - classification repair、完全一致limitation deduplication、duplicate tracking repairを1つのdiscriminated unionで保存・再読込・全下流検証
 - 独立Research Report artifactとDeliberation Outboxへの`research_result`出力
@@ -331,6 +414,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 - blocking counterargumentを修正、棄却、未解決保持、Researcher返送のいずれかへ必ずrouting
 - 対象Agentだけを再実行し、依存する統合工程だけを再実行する最大2回の修正ループ
 - Evidence不足時のResearcher追加調査要求と`WAITING_UPSTREAM_REVISION`再開処理
+- ConclusionからのRevision Requestを消費し、相関した`revision_result`と更新Deliberation Resultを返す完全往復
 - 一次分析の一部失敗を条件付きで継続し、2系統未満では安全停止
 - 旧保存JSONを変更せず読込時互換変換し、完了済み高コストcheckpointを再実行しない障害復旧
 - Deliberation Result artifactとConclusion Outboxへの`deliberation_result`出力
@@ -349,6 +433,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 - Candidate間の両立性を検査し、必要な場合だけIntegrated Optionを生成
 - 対象Agentと依存工程だけを再実行する最大2回の修正ループ
 - 根拠不足時のDeliberation差し戻しと`WAITING_UPSTREAM_REVISION`再開処理
+- PlaywrightからのRevision Requestを消費し、構造変更では既存Human Selectionを保持、意味変更では再選択を必須化してResultを返す完全往復
 - Quality Gate通過後も`WAITING_HUMAN_SELECTION`で停止し、人間の選択を必須化
 - 選択済みFinal Conclusionを不変Artifactとして保存し、Playwright Outboxへ`conclusion_handoff`を出力
 - Discordからの開始、候補表示、統合依頼、選択、状態確認、結果表示、再開
@@ -365,6 +450,7 @@ Discordコマンドは`.env`のProvider、Retrieval Provider、Safe Modeを使�
 - allowlist対象のCitation mapping・unsupported metadata不整合をProvider/Retrieval 0件で修復する監査付きRecovery
 - 対象Agentと依存工程だけを再実行する最大2回の修正ループ
 - 上流不足時のConclusion差し戻しと`WAITING_UPSTREAM_REVISION`再開処理
+- Conclusion Revision Resultのrequest/hash/selection impactを検証し、更新Handoffから最小工程を再開
 - 独立Playwright Quality Reviewerを置かず、ValidatorとManager Final Gateで最終判定
 - JSON・MarkdownによるFinal Script Package 6ファイルの納品
 - CLI・Discordからの開始、状態確認、台本・引用・映像指示・結果表示、再開
@@ -581,6 +667,13 @@ storage/data/artifacts/citation_manifests/<workflow_id>.json
 storage/data/artifacts/visual_plans/<workflow_id>.json
 storage/data/artifacts/final_script_packages/<workflow_id>.json
 storage/data/outbox/conclusion_revision/<workflow_id>.json
+storage/data/outbox/revision_requests/<target_layer>/<workflow_id>/<revision_request_id>.json
+storage/data/outbox/revision_results/<requester_layer>/<workflow_id>/<revision_request_id>.json
+storage/data/artifacts/revision_requests/internal/<layer>/<workflow_id>/<revision_request_id>.json
+storage/data/artifacts/revision_results/internal/<layer>/<workflow_id>/<revision_request_id>.json
+storage/data/artifacts/revision_budget/<layer>/<workflow_id>/<internal_or_upstream>/slot_<n>.json
+storage/data/artifacts/revision_audit/<workflow_id>/<revision_request_id>/<audit_event_id>.json
+storage/data/revision_authorizations/<layer>/<workflow_id>/<revision_request_id>.json
 storage/data/retrieval_contexts/<workflow_id>/
 storage/data/retrieval_call_reservations/
 storage/data/provider_call_reservations/
@@ -616,7 +709,7 @@ py scripts\verify.py
 py main.py
 ```
 
-Discordで利用できる全30コマンドは、上の[コマンド早見表（CLI / Discord）](#command-catalog)に用途と外部呼び出しの目安を付けて掲載しています。Discordへ長いTracebackや巨大payloadは投稿せずApplication Logへ保存し、Channelには短いoperational summaryだけを返します。Layer実行またはhandoff validation失敗時は対応statusを`ERROR`へ閉じ、表示上の`RUNNING`を残しません。
+Discordで利用できる全35コマンドは、上の[コマンド早見表（CLI / Discord）](#command-catalog)に用途と外部呼び出しの目安を付けて掲載しています。Discordへ長いTracebackや巨大payloadは投稿せずApplication Logへ保存し、Channelには短いoperational summaryだけを返します。Layer実行またはhandoff validation失敗時は対応statusを`ERROR`へ閉じ、表示上の`RUNNING`を残しません。
 
 初期値ではResearcherは手動起動です。Producer完了後の自動起動を使う場合は`.env`で次を設定します。
 
