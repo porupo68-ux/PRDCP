@@ -9,6 +9,13 @@ storage/data/outbox/**/*.json
 storage/data/artifacts/**/*.json
 storage/data/deliveries/**
 storage/data/provider_call_reservations/**/*.json
+storage/data/provider_contract_repair_authorizations/**/*.json
+storage/data/provider_model_compatibility/**/*.json
+storage/data/provider_retry_authorizations/**/*.json
+storage/data/retrieval_call_reservations/**/*.json
+storage/data/retrieval_contexts/**/*.json
+storage/data/retrieval_provider_retry_authorizations/**/*.json
+storage/data/revision_authorizations/**/*.json
 storage/data/openrouter_batch_jobs/**/*.json
 storage/data/logs/*
 !storage/data/**/.gitkeep
