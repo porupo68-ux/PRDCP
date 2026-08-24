@@ -1,0 +1,187 @@
+Cycle 048 — OpenRouter Gemini Batch / Sync Fresh Real E2E
+Date: 2026-08-24
+Workflow: c6b93797-38d2-45e0-b227-d62d2526f870
+
+Outcome
+-------
+The Fresh Real E2E completed all five layers and produced Delivery. Producer,
+Researcher, Deliberation, Conclusion, and Playwright are all COMPLETED. The
+Playwright Final Gate is APPROVED_WITH_LIMITATIONS and six delivery artifacts
+were written exactly once.
+
+The operator first requested google/gemini-3.7-flash:batch for every
+non-Deliberation model. Investigation proved that OpenRouter Batch is an
+asynchronous API rather than a synchronous model alias, and that web-search
+Retrieval did not complete through the Batch endpoint. After explicit operator
+direction, the run continued with google/gemini-3.7-flash for non-Deliberation
+work. Deliberation's original model configuration was preserved. The original
+.env was restored after Delivery without reading or printing any secret value;
+its final SHA-256 exactly matches the pre-run hash:
+e304904facee22ad343b133322c71a9803a8dc163b09742e442fb73fcef186f9.
+
+Failures and root causes
+------------------------
+1. Batch transport and Retrieval
+   - The :batch model cannot be sent to the synchronous chat endpoint.
+   - Durable Batch submission/polling was implemented with saved remote identity.
+   - Google/OpenRouter Batch web-search ended terminally even though minimal
+     text-only and Structured Output Batch jobs completed.
+   - Recovery therefore required one explicitly authorized synchronous Retrieval
+     identity. Completed Topic Scout and Topic Selector checkpoints were reused.
+
+2. Gemini request-schema INVALID_ARGUMENT
+   - Producer and Researcher dynamic source binding remained correct: only compact
+     source IDs were placed in enums and retrieved identity was hydrated locally.
+   - Deliberation Stakeholder and Conclusion Position schemas were syntactically
+     strict but too complex for Gemini's opaque controlled-generation compiler.
+   - The canonical Pydantic schemas were not weakened. Only the Gemini wire view
+     omits titles, string length/pattern annotations, and array cardinality
+     annotations. Types, properties, required keys, closed objects, and ID enums
+     remain authoritative, and Pydantic validates the response afterward.
+   - A request-schema contract repair may reuse the configured model only when it
+     is correlated to the named gemini_wire_schema_v2 revision. It does not create
+     a model compatibility fallback binding. Response-contract repair still
+     requires a distinct model.
+
+3. Playwright Citation schema union explosion
+   - Sixteen paragraph-correlated variants expanded the exact Citation wire schema
+     to 24,450 bytes, 90 total anyOf branches, 38 anyOf nodes, and depth 11.
+   - Gemini rejected it with HTTP 400 INVALID_ARGUMENT.
+   - Correlated variants are now bounded at eight. Longer scripts retain the
+     global canonical ID allowlists in the strict schema; the existing
+     deterministic Playwright validator enforces paragraph-local
+     Claim/Evidence/Source correlation.
+   - Provider preflight rejects a single anyOf with more than eight branches.
+     It deliberately does not reject the aggregate number of small unions because
+     Researcher schemas with larger aggregate counts succeeded in real calls.
+
+4. Playwright Final Gate findings
+   - After Citation/Visual recovery, Safe Mode stopped at the Final Gate because
+     required QUESTION and LIMITATION sections were absent.
+   - One explicit Playwright internal revision reran only its dependency closure.
+     The second Final Gate passed. The remaining script character-count mismatch
+     is a non-blocking warning and is disclosed in the final package.
+
+Why Mock and Doctor did not detect the failures
+-----------------------------------------------
+Mock validates PRDCP contracts but does not compile the exact dynamic production
+schema with Google's controlled-generation grammar. Doctor and the 22-root audit
+exercise static root schemas, while the failing schemas were specialized with real
+candidate, source, paragraph, claim, evidence, and source ID sets. Previous
+preflight bounded total bytes and enum payloads but not per-node union width. The
+new regression suite therefore builds dynamic production-sized schemas and applies
+the same provider-bound specialization and compatibility gate used immediately
+before HTTP.
+
+Systemic repairs
+----------------
+- Added durable OpenRouter Batch submission, polling, sidecar correlation, and
+  GET-only recovery. Ambiguous acceptance never triggers automatic resubmission.
+- Added an explicit Producer Retrieval retry contract with a new synchronous
+  Retrieval identity; prior Batch reservation and completed checkpoints remain.
+- Applied Gemini wire specialization to both sync and Batch paths across all 22
+  Structured Output roots.
+- Added named same-model request-schema repair while retaining the existing
+  distinct-model response-contract repair contract.
+- Normalized Gemini HTTP 400 INVALID_ARGUMENT to an operator-retryable request
+  schema error in Deliberation, Conclusion, and Playwright recovery boundaries.
+- Bounded Playwright paragraph-correlated union generation without weakening
+  global ID allowlists or deterministic citation validation.
+
+Fresh Real E2E result
+---------------------
+- Producer: COMPLETED; internal revisions 0.
+- Researcher: COMPLETED; 25 saved sources; internal revisions 0; external
+  revisions 0. Human Evidence Decision is ACCEPT_WITH_LIMITATIONS for one
+  unresolved ACADEMIC evidence gap. That decision did not authorize or create
+  evidence and did not override a Hard Integrity Failure.
+- Deliberation: COMPLETED; internal revisions 1; upstream revisions 0;
+  deterministic validation passed; Quality Review approved_with_conditions.
+- Conclusion: COMPLETED; internal revisions 0; upstream revisions 0; Quality
+  Review approved_with_conditions. Human Selection chose
+  cand_distributional_equity_and_governance_framework (candidate 3).
+- Playwright: COMPLETED; internal revisions 1; deterministic repairs 0; upstream
+  revisions 0; Final Gate APPROVED_WITH_LIMITATIONS; delivered=true.
+
+Real API accounting
+-------------------
+Fresh workflow provider reservations / attempted calls: 44
+- google/gemini-3.7-flash:batch: 2 (Topic Scout and Topic Selector)
+- google/gemini-3.7-flash synchronous: 35
+- openai/gpt-5.5 Deliberation: 7
+- By layer: Producer 5, Researcher 10, Deliberation 14, Conclusion 6,
+  Playwright 9.
+
+Fresh workflow Retrieval reservations / attempted searches: 11
+- One terminal Batch Retrieval attempt for General Opinion.
+- One explicitly authorized synchronous General Opinion Retrieval.
+- Nine synchronous Researcher task Retrieval calls.
+- Ten Retrieval calls completed and were persisted; no completed Retrieval was
+  automatically repeated after a Reasoning failure.
+
+Explicit recovery operations
+- Producer synchronous Retrieval retry: 1.
+- Deliberation operator Provider retry: 1; contract repair: 1.
+- Conclusion operator Provider retry: 1; named schema contract repair: 1.
+- Playwright operator Provider retry: 1; internal revision: 1.
+- No automatic retry-of-retry occurred.
+
+The local reservation records do not contain authoritative synchronous OpenRouter
+cost totals, so no cost is inferred. The earlier isolated Batch diagnostics retain
+a known recorded cost of USD 0.0019606875; two pre-repair diagnostic jobs have no
+recoverable cost record. No secret, token, or API key was copied into this report.
+
+Delivery
+--------
+storage/data/deliveries/c6b93797-38d2-45e0-b227-d62d2526f870/
+- final_script_package.json
+- script.md
+- citation_manifest.json
+- source_list.md
+- visual_plan.md
+- production_notes.md
+
+Remaining limitations
+---------------------
+- rq-ai-emp-001 lacks the requested peer-reviewed ACADEMIC evidence. The Human
+  Decision accepted this only as a disclosed limitation.
+- National, occupation-level, and firm-size-level measurements of layoffs,
+  attrition, hiring suppression, reassignment, and wages remain limited.
+- Several sources are surveys, case studies, simulations, or think-tank analysis;
+  generalization to small firms, non-regular workers, non-union workplaces, and
+  regional employers is constrained.
+- The delivered script retains a non-blocking estimated-character-count warning.
+
+Regression and acceptance verification
+--------------------------------------
+- README command-catalog targeted regression: 3 PASS.
+- The first full discovery ran 661 tests in 901.351s; 660 passed and the only
+  failure identified two missing README command entries. No product behavior
+  failed. README and the developer guide source were then synchronized.
+- Final full discovery: 661/661 PASS in 1013.557s.
+- Static compilation: PASS.
+- Doctor in isolated Mock configuration: READY, fail=0, warn=3. The warnings are
+  optional Discord dependency/token and the expected reminder to recheck real
+  OpenRouter readiness before a future paid run.
+- 31 RD Strict: PASS.
+- 22 Structured Output root schemas, including recursive objects/$defs/arrays/
+  unions and Deliberation required_scope: PASS.
+- Five-layer Mock E2E: PASS through Human Evidence Gate, Human Selection, Final
+  Gate, and six isolated Delivery artifacts.
+- PRDCP_v2_Developer_Guide.docx was rebuilt from the active code-aligned source,
+  exported with Microsoft Word to 20 pages, and every rendered page was visually
+  inspected. No clipping, overlap, broken table, or header/footer defect was found.
+
+Prevention
+----------
+- Test the exact provider-bound schema after every request-specific specialization,
+  including long paragraph/candidate/source sets.
+- Keep Pydantic/local validation authoritative when provider-only annotations are
+  compacted.
+- Bound per-node union complexity and distinguish it from aggregate small unions.
+- Require named schema revisions for same-model contract repair and reject stale
+  authorizations.
+- Preserve provider and Retrieval reservations across all recovery paths and never
+  infer that an ambiguous request is safe to resend.
+- Keep the command catalog regression tied to active CLI registration so README
+  drift fails CI.

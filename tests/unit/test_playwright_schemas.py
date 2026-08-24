@@ -251,6 +251,42 @@ class PlaywrightSchemaTests(unittest.TestCase):
         self.assertEqual(1, supported["maxItems"])
         self.assertEqual(["claim_1"], supported["items"]["enum"])
 
+    def test_long_citation_schema_keeps_global_ids_without_variant_explosion(self):
+        context = production_context_data()
+        draft = script_data()
+        prototype = draft["sections"][0]["paragraphs"][0]
+        draft["sections"][0]["paragraphs"] = [
+            {
+                **prototype,
+                "paragraph_id": f"paragraph_{index}",
+            }
+            for index in range(16)
+        ]
+        input_data = {
+            "task_id": "playwright_citation_long_script",
+            "target_agent_id": "playwright.evidence_citation_editor",
+            "production_context": context,
+            "script_draft": draft,
+            "revision_context": None,
+        }
+
+        schema = strict_output_schema(CitationEditingResult, input_data=input_data)
+        self.assertEqual([], strict_schema_violations(schema))
+        mapping_array = self._property_node(schema, "mappings")
+        self.assertEqual(
+            mapping_array["items"],
+            {"$ref": "#/$defs/CitationMapping"},
+        )
+        mapping = schema["$defs"]["CitationMapping"]["properties"]
+        self.assertEqual(
+            [f"paragraph_{index}" for index in range(16)],
+            mapping["paragraph_id"]["enum"],
+        )
+        self.assertEqual(
+            ["evidence_1"],
+            mapping["evidence_ids"]["items"]["enum"],
+        )
+
     def test_visual_strict_schema_binds_cues_to_paragraph_local_references(self):
         citation = playwright_fixtures.citation_editing(
             {

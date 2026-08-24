@@ -296,7 +296,10 @@ class ProviderRetryAuthorizationStore:
     @staticmethod
     def _write_atomic(path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        # Do not repeat a long logical task filename in the sibling temp name.
+        # On Windows the canonical authorization can fit below MAX_PATH while
+        # ``.<task>.json.<uuid>.tmp`` crosses it during the atomic update.
+        temporary = path.with_name(f".retry-{uuid4().hex}.tmp")
         try:
             with temporary.open("x", encoding="utf-8", newline="\n") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)

@@ -5,6 +5,7 @@ import unittest
 from pydantic import ValidationError
 
 from common.structured_outputs import strict_output_schema
+from deliberation.manager import DeliberationManager
 from deliberation.schemas.analysis_task import CounterargumentTask, DeliberationAnalysisTask
 from deliberation.schemas.argument_analysis import ArgumentAnalysisResult
 from deliberation.schemas.causal_structural_analysis import (
@@ -31,6 +32,7 @@ from deliberation.schemas.stakeholder_response_analysis import (
     SpecificFact,
     StakeholderResponseAnalysisResult,
 )
+from deliberation.agents.stakeholder_response_analyst import StakeholderResponseAnalyst
 from deliberation.validator import DeliberationValidator
 from providers.mock import deliberation_fixtures
 from tests.deliberation_helpers import make_report
@@ -496,6 +498,67 @@ class DeliberationPayloadTests(unittest.TestCase):
                 }
             )
 
+    def test_stakeholder_strict_schema_binds_assigned_evidence_and_source_ids(self):
+        report = make_report()
+        task = next(
+            item
+            for item in DeliberationManager._create_analysis_tasks(report)
+            if item.target_agent_id
+            == "deliberation.stakeholder_response_analyst"
+        )
+        schema = strict_output_schema(
+            StakeholderResponseAnalysisResult,
+            input_data=task.model_dump(mode="json"),
+        )
+        specific_fact = schema["$defs"]["SpecificFact"]["properties"]
+        self.assertEqual(
+            set(schema["$defs"]["AssignedEvidenceId"]["enum"]),
+            set(task.target_evidence_ids),
+        )
+        self.assertEqual(
+            set(schema["$defs"]["AssignedSourceId"]["enum"]),
+            {item.source_id for item in task.evidence_context},
+        )
+        self.assertEqual(
+            schema["properties"]["task_id"]["enum"],
+            [task.task_id],
+        )
+        self.assertEqual(
+            specific_fact["evidence_ids"]["items"],
+            {"$ref": "#/$defs/AssignedEvidenceId"},
+        )
+        self.assertEqual(
+            specific_fact["source_ids"]["items"],
+            {"$ref": "#/$defs/AssignedSourceId"},
+        )
+
+    def test_stakeholder_provider_output_hydrates_source_ids_from_evidence(self):
+        raw = {
+            "specific_facts": [
+                {
+                    "fact_id": "fact_1",
+                    "statement": "verified fact",
+                    "verification_status": "verified",
+                    "evidence_ids": ["evidence_0"],
+                    "source_ids": ["source_invented"],
+                    "research_gap": "",
+                }
+            ]
+        }
+        normalized = StakeholderResponseAnalyst.normalize_provider_output(
+            None,
+            raw,
+            provider_input={
+                "evidence_context": [
+                    {"evidence_id": "evidence_0", "source_id": "source_0"}
+                ]
+            },
+        )
+        self.assertEqual(
+            normalized["specific_facts"][0]["source_ids"],
+            ["source_0"],
+        )
+
     def test_stakeholder_specifics_require_evidence_or_a_fact_record(self):
         task = valid_task(
             analysis_type="STAKEHOLDER_RESPONSE",
@@ -701,6 +764,24 @@ class DeliberationPayloadTests(unittest.TestCase):
         )
         FinalIntegratedAnalysis.model_validate(unknown)
         self.assertTrue(integration_provenance_errors(unknown, final_input))
+
+    def test_final_disposition_resolution_is_a_provider_visible_closed_enum(self):
+        schema = strict_output_schema(FinalIntegratedAnalysis)
+        resolution = schema["$defs"]["CounterargumentDisposition"]["properties"][
+            "resolution"
+        ]
+        self.assertEqual(
+            set(resolution["enum"]),
+            {"revised", "rejected", "unresolved", "researcher_return"},
+        )
+        with self.assertRaises(ValidationError):
+            FinalIntegratedAnalysis.model_validate(
+                {
+                    "counterargument_dispositions": [
+                        {"resolution": "revised_with_research_gap_retained"}
+                    ]
+                }
+            )
 
     def test_counterargument_output_rejects_challenge_id_namespace(self):
         raw = deliberation_fixtures.counterargument_analysis(

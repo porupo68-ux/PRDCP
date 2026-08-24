@@ -465,7 +465,8 @@ def build() -> Path:
         "OpenRouterは`provider.require_parameters=true`とstrict `response_format`を弱めない。",
         "公開Endpoint metadataでmodel/alias/structured output能力を予約前に検査する。",
         "曖昧な通信障害は自動retryせず、operator retryを別task identityで一回だけ許可する。",
-        "異なるmodelのcontract/capability repairは専用authorizationと互換bindingを持つ。",
+        "応答契約のcontract/capability repairは異なるmodel、request-schema repairは名前付きwire revision一致時だけ同じmodelを許可する。",
+        "同一modelのschema repairは互換bindingを作らず、distinct-model repairだけが専用bindingを持つ。",
     ])
     add_code(doc, "providers/openrouter_provider.py\nproviders/mock_provider.py\ncommon/provider_model_compatibility.py\nstorage/data/provider_call_reservations/")
 
@@ -480,6 +481,7 @@ def build() -> Path:
         ["free-form dict", "意味を壊して閉じず、Structured Output境界では明示modelを要求"],
     ], [2700, 6660])
     add_note(doc, "Dynamic constraints", "Retrieval Agentは長いtitle/URL/excerptではなく短いsource_idだけをenum拘束し、保存Contextからidentityを決定論的に復元します。")
+    add_note(doc, "Gemini wire schema", "Canonical strict schemaとPydantic契約は変更せず、Geminiへ送るwire viewだけからtitle、文字列長/pattern、配列件数制約を除きます。単一anyOfが8 branchを超える場合は送信前に停止します。長いPlaywright台本ではglobal ID allowlistを保持し、paragraph-local相関を決定論的Validatorで検査します。")
 
     add_chapter(doc, 11, "Retrieval")
     add_para(doc, "検索とStructured Reasoningは別工程です。General Opinion Analystと7 Researcher specialistだけがRetrievalを使い、Research Plannerには付与しません。")
@@ -590,7 +592,7 @@ def build() -> Path:
         ["Resume", "正常なUpstream Revision Resultを受領", "相関Resultを消費し、stale依存checkpointだけ再計算"],
         ["Recover", "process/state/checkpoint障害", "保存Resultと予約を照合し、最後の未完了地点から再開"],
         ["Provider Retry", "課金済み可能性のある曖昧通信障害", "元reservationを保持し、別task identityで明示的一回"],
-        ["Contract/Capability Repair", "同一model retryで直らないProvider契約", "異なる明示model、一回限り、互換bindingを監査保存"],
+        ["Contract/Capability Repair", "同一model retryで直らないProvider契約", "応答契約は異なる明示model。名前付きrequest-schema revisionだけ同一modelを一回許可"],
         ["Deterministic Repair", "一意に直せるmetadata/schema relation", "Provider/Retrieval 0、専用budget、前後hash、allowlist"],
     ], [1800, 3600, 3960], font_size=8.7)
     add_bullets(doc, [
@@ -615,11 +617,11 @@ def build() -> Path:
     add_table(doc, ["目的", "コマンド"], [
         ["診断・状態", "--doctor、--status WORKFLOW_ID、--help、--version、--json、--verbose"],
         ["Mock検証", "--demo、--demo-full、--demo-e2e --provider mock"],
-        ["Producer", "--producer-recover、--producer-revise、--producer-provider-retry、--producer-output-repair"],
+        ["Producer", "--producer-recover、--producer-revise、--producer-provider-retry、--producer-retrieval-retry、--producer-output-repair"],
         ["Researcher", "--researcher、--researcher-resume、--researcher-recover、--researcher-evidence、--researcher-accept、--researcher-accept-limitations、--researcher-revise、--researcher-revision-execute"],
-        ["Deliberation", "--deliberation、--deliberation-resume、--deliberation-recover、--deliberation-revise、--deliberation-provider-retry"],
-        ["Conclusion", "--conclusion、--conclusion-resume、--conclusion-recover、--conclusion-revise、--conclusion-provider-retry、--conclusion-select、--conclusion-integrate"],
-        ["Playwright", "--playwright、--playwright-resume、--playwright-recover、--playwright-revise、--playwright-provider-retry"],
+        ["Deliberation", "--deliberation、--deliberation-resume、--deliberation-recover、--deliberation-revise、--deliberation-provider-retry、--deliberation-contract-repair"],
+        ["Conclusion", "--conclusion、--conclusion-resume、--conclusion-recover、--conclusion-revise、--conclusion-provider-retry、--conclusion-contract-repair、--conclusion-select、--conclusion-integrate"],
+        ["Playwright", "--playwright、--playwright-resume、--playwright-recover、--playwright-revise、--playwright-provider-retry、--playwright-capability-repair"],
     ], [1900, 7460], font_size=8.4)
     add_code(doc, "py main.py --status <WORKFLOW_ID>\npy main.py --<layer>-revise <WORKFLOW_ID> --reason \"operator rationale\" --safe-mode\npy main.py --<layer>-recover <WORKFLOW_ID>")
 

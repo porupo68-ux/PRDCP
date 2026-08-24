@@ -21,5 +21,6 @@ class ModelProvider(Protocol):
         input_data: dict,
         output_schema: type[OutputT],
         timeout_seconds: int | None = None,
+        invocation_reservation_path: Path | None = None,
     ) -> dict:
         ...

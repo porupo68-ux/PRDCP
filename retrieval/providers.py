@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from common.models.errors import NonRetryableAgentError
+from providers.openrouter_batch import OpenRouterBatchClient, is_openrouter_batch_model
 from retrieval.models import SearchResult, RetrievalStrategy
 
 
@@ -25,6 +26,8 @@ class RetrievalProvider(Protocol):
         strategy: RetrievalStrategy,
         max_results: int,
         timeout_seconds: int,
+        invocation_reservation_path: Path | None = None,
+        invocation_discriminator: str = "retrieval",
     ) -> list[SearchResult]: ...
 
 
@@ -43,8 +46,10 @@ class MockRetrievalProvider:
         strategy: RetrievalStrategy,
         max_results: int,
         timeout_seconds: int,
+        invocation_reservation_path: Path | None = None,
+        invocation_discriminator: str = "retrieval",
     ) -> list[SearchResult]:
-        del timeout_seconds
+        del timeout_seconds, invocation_reservation_path, invocation_discriminator
         self.calls += 1
         if self.failure is not None:
             raise self.failure
@@ -89,6 +94,7 @@ class OpenRouterWebSearchProvider:
         base_url: str = "https://openrouter.ai/api/v1",
         engine: str = "exa",
         reservation_root: Path | None = None,
+        batch_poll_interval_seconds: float = 5.0,
     ) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required for retrieval")
@@ -99,6 +105,12 @@ class OpenRouterWebSearchProvider:
         self.base_url = base_url.rstrip("/")
         self.engine = engine
         self.reservation_root = reservation_root
+        self.batch_client = OpenRouterBatchClient(
+            api_key=api_key,
+            base_url=self.base_url,
+            default_timeout_seconds=600,
+            poll_interval_seconds=batch_poll_interval_seconds,
+        )
 
     async def search(
         self,
@@ -107,6 +119,8 @@ class OpenRouterWebSearchProvider:
         strategy: RetrievalStrategy,
         max_results: int,
         timeout_seconds: int,
+        invocation_reservation_path: Path | None = None,
+        invocation_discriminator: str = "retrieval",
     ) -> list[SearchResult]:
         body = {
             "model": self.model,
@@ -136,7 +150,30 @@ class OpenRouterWebSearchProvider:
             ],
             "tool_choice": "required",
         }
+        if is_openrouter_batch_model(self.model):
+            envelope = await asyncio.to_thread(
+                self.batch_client.execute_chat,
+                model_id=self.model,
+                request_body=body,
+                reservation_path=invocation_reservation_path,
+                timeout_seconds=timeout_seconds,
+                invocation_discriminator=invocation_discriminator,
+            )
+            return self._extract(envelope)
         return await asyncio.to_thread(self._post_and_extract, body, timeout_seconds)
+
+    def can_resume(
+        self,
+        *,
+        reservation_path: Path,
+        invocation_discriminator: str,
+    ) -> bool:
+        return is_openrouter_batch_model(self.model) and (
+            OpenRouterBatchClient.has_resumable_state(
+                reservation_path,
+                invocation_discriminator=invocation_discriminator,
+            )
+        )
 
     def _post_and_extract(self, body: dict, timeout_seconds: int) -> list[SearchResult]:
         request = Request(
@@ -177,6 +214,9 @@ class OpenRouterWebSearchProvider:
                 automatic_retry_allowed=False,
             ) from exc
 
+        return self._extract(envelope)
+
+    def _extract(self, envelope: dict) -> list[SearchResult]:
         try:
             annotations = envelope["choices"][0]["message"].get("annotations", [])
         except (KeyError, IndexError, TypeError) as exc:

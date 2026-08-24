@@ -43,6 +43,7 @@ from common.models.revision import (
     deterministic_revision_request_id,
 )
 from common.provider_retry import (
+    OPERATOR_RETRY_SUFFIX,
     ProviderRetryAuthorization,
     ProviderRetryAuthorizationStore,
     ProviderRetryStatus,
@@ -192,6 +193,35 @@ class DeliberationManager:
                 source_error_class=manager_failure["error_class"],
             )
 
+        primary_failure = self._latest_primary_provider_error(state)
+        if primary_failure is not None:
+            error_response, request = primary_failure
+            provider_id = getattr(self.registry.provider, "provider_id", None)
+            if not isinstance(provider_id, str):
+                raise ValueError(
+                    "Deliberation primary Analyst provider has no stable logical provider ID"
+                )
+            error_class = str(error_response.payload.get("error_class") or "")
+            error_message = str(error_response.payload.get("message") or "")
+            http_status = error_response.payload.get("http_status")
+            if (
+                error_class == "NonRetryableAgentError"
+                and http_status == 400
+                and "invalid argument" in error_message.lower()
+            ):
+                # The endpoint explicitly rejected the request before returning
+                # a generation.  A code-level schema/input repair may receive one
+                # separately identified operator retry; arbitrary 400s remain closed.
+                error_class = "ProviderRequestSchemaError"
+            return self.provider_retry_store.authorize_once(
+                workflow_id=workflow_id,
+                provider_id=provider_id,
+                agent_id=request.receiver_agent_id,
+                original_task_id=str(request.payload["task_id"]),
+                source_error_message_id=error_response.message_id,
+                source_error_class=error_class,
+            )
+
         error_response = self._latest_retryable_review_error(state)
         if error_response is None:
             raise ValueError(
@@ -265,12 +295,44 @@ class DeliberationManager:
         if state.status != WorkflowStatus.FAILED.value:
             raise ValueError("Deliberation must be FAILED before contract repair")
         failure = self._current_manager_provider_failure(state)
-        if failure is None or failure.get("error_class") != "ProviderResponseContractError":
-            raise ValueError("No contract-invalid Deliberation Manager task was found")
         provider_id = getattr(self.registry.provider, "provider_id", None)
         if not isinstance(provider_id, str):
-            raise ValueError("Deliberation Manager provider has no stable provider ID")
-        original_task_id = str(failure["logical_task_id"])
+            raise ValueError("Deliberation provider has no stable provider ID")
+        if failure is not None:
+            if failure.get("error_class") != "ProviderResponseContractError":
+                raise ValueError(
+                    "Deliberation Manager failure is not a response-contract failure"
+                )
+            original_task_id = str(failure["logical_task_id"])
+            agent_id = self.agent_id
+            source_error_message_id = "manager_retry_failure_" + hashlib.sha256(
+                str((state.error or {}).get("message") or "").encode("utf-8")
+            ).hexdigest()[:24]
+            source_error_class = "NonRetryableAgentError"
+            failed_model_id = str(failure.get("model_id") or "")
+            source_failure_message = str((state.error or {}).get("message") or "")
+        else:
+            primary_failure = self._latest_primary_provider_error(state)
+            if primary_failure is None:
+                raise ValueError(
+                    "No contract-invalid Deliberation Manager or primary Analyst task was found"
+                )
+            error_response, request = primary_failure
+            retry_task_id = str(request.payload.get("task_id") or "")
+            if not retry_task_id.endswith(OPERATOR_RETRY_SUFFIX):
+                raise ValueError(
+                    "Primary Analyst contract repair requires a failed one-shot retry"
+                )
+            original_task_id = retry_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
+            agent_id = request.receiver_agent_id
+            source_error_message_id = error_response.message_id
+            source_error_class = str(
+                error_response.payload.get("error_class") or ""
+            )
+            failed_model_id = ""
+            source_failure_message = str(
+                error_response.payload.get("message") or ""
+            )
         existing_repair = self.provider_contract_repair_store.for_original_task(
             workflow_id=workflow_id,
             provider_id=provider_id,
@@ -302,24 +364,30 @@ class DeliberationManager:
             retry_reservation_path.read_text(encoding="utf-8")
         )
         retry_model_id = str(retry_reservation.get("model_id") or "")
-        failure_message = str((state.error or {}).get("message") or "")
         if not retry_model_id or not (
-            "OpenRouter HTTP 400" in failure_message
-            or "strict JSON contract" in failure_message
+            "OpenRouter HTTP 400" in source_failure_message
+            or "strict JSON contract" in source_failure_message
         ):
             raise ValueError("Consumed retry has no auditable contract failure")
-        source_id = "manager_retry_failure_" + hashlib.sha256(
-            failure_message.encode("utf-8")
-        ).hexdigest()[:24]
+        original_reservation = json.loads(
+            self.provider_retry_store.reservation_path(
+                provider_id=provider_id,
+                workflow_id=workflow_id,
+                task_id=original_task_id,
+            ).read_text(encoding="utf-8")
+        )
+        original_model_id = str(original_reservation.get("model_id") or "")
+        if failed_model_id and failed_model_id != original_model_id:
+            raise ValueError("Original Deliberation failure model identity changed")
         return self.provider_contract_repair_store.authorize_once(
             workflow_id=workflow_id,
             provider_id=provider_id,
-            agent_id=self.agent_id,
+            agent_id=agent_id,
             original_task_id=original_task_id,
             retry_task_id=retry.retry_task_id,
-            source_error_message_id=source_id,
-            source_error_class="NonRetryableAgentError",
-            failed_model_id=str(failure.get("model_id") or ""),
+            source_error_message_id=source_error_message_id,
+            source_error_class=source_error_class,
+            failed_model_id=original_model_id,
             retry_failed_model_id=retry_model_id,
             repair_model_id=repair_model_id.strip(),
         )
@@ -895,7 +963,22 @@ class DeliberationManager:
         downstream_exists = state.initial_integration is not None
         required_primary_targets = self._current_revision_primary_targets(state)
         for task in tasks:
-            recovered_payload = self._recover_saved_invalid_analysis(state, task)
+            # Once an initial integration has deliberately proceeded with one
+            # optional primary failure, its authoritative input set is fixed.
+            # Adopting a late deterministic repair during downstream recovery
+            # would silently change provenance and require invalidating every
+            # expensive downstream checkpoint.  Only an explicitly targeted
+            # Revision may change that set.
+            tolerated_checkpoint_failure = (
+                downstream_exists
+                and task.target_agent_id in state.failed_agents
+                and task.target_agent_id not in required_primary_targets
+            )
+            recovered_payload = (
+                None
+                if tolerated_checkpoint_failure
+                else self._recover_saved_invalid_analysis(state, task)
+            )
             if recovered_payload is not None:
                 state.analysis_results[task.target_agent_id] = recovered_payload
                 state.checkpoint_revisions[f"primary:{task.target_agent_id}"] = (
@@ -938,6 +1021,8 @@ class DeliberationManager:
                 if state.revision_count > 0
                 and self._task_has_provider_attempt(state, task.task_id)
                 and not self._task_has_contract_repairable_failure(state, task.task_id)
+                and self._pending_primary_provider_retry(state, task) is None
+                and self._pending_primary_provider_contract_repair(state, task) is None
             ]
             if ambiguous:
                 return await self._fail(
@@ -948,11 +1033,20 @@ class DeliberationManager:
                     progress_callback,
                 )
             recovery_tasks = [
-                self._make_contract_repair_task(state, task)
-                if self._task_has_contract_repairable_failure(state, task.task_id)
-                else self._mark_recovery_task(task)
-                if state.revision_count > 0
-                else self._make_recovery_task(task)
+                self._make_primary_provider_contract_repair_task(state, task)
+                if self._pending_primary_provider_contract_repair(state, task)
+                is not None
+                else (
+                    self._make_operator_retry_task(state, task)
+                    if self._pending_primary_provider_retry(state, task) is not None
+                    else (
+                        self._make_contract_repair_task(state, task)
+                        if self._task_has_contract_repairable_failure(state, task.task_id)
+                        else self._mark_recovery_task(task)
+                        if state.revision_count > 0
+                        else self._make_recovery_task(task)
+                    )
+                )
                 for task in incomplete_tasks
             ]
             self._replace_analysis_tasks(state, recovery_tasks)
@@ -1311,6 +1405,10 @@ class DeliberationManager:
     @staticmethod
     def _create_analysis_tasks(report: ResearchReport) -> list[DeliberationAnalysisTask]:
         evidence_ids = [item.evidence_id for item in report.evidence_items]
+        evidence_context_by_id = {
+            item.evidence_id: item
+            for item in build_deliberation_research_context(report).evidence_items
+        }
         question_ids = [item.research_question_id for item in report.research_questions]
         source_type_by_id = {
             item.source_id: str(item.source_type)
@@ -1349,6 +1447,10 @@ class DeliberationManager:
                     research_report_id=report.research_report_id,
                     research_question_ids=question_ids,
                     target_evidence_ids=target_ids,
+                    evidence_context=[
+                        evidence_context_by_id[evidence_id]
+                        for evidence_id in target_ids
+                    ],
                     problem_definition=(
                         f"Topic『{report.topic}』について、一般論『{report.general_opinion}』を"
                         "Research Reportの証拠だけで分析する"
@@ -1423,7 +1525,7 @@ class DeliberationManager:
         self.repository.save(state)
         responses = await asyncio.gather(
             *[
-                self.registry.get(task.target_agent_id).execute(request)
+                self._execute_primary_request(state, task, request)
                 for task, request in zip(tasks, requests, strict=True)
             ],
             return_exceptions=True,
@@ -1467,6 +1569,28 @@ class DeliberationManager:
         state.status = WorkflowStatus.RUNNING if completed == len(tasks) else WorkflowStatus.PARTIALLY_COMPLETED
         self.repository.save(state)
         return completed
+
+    async def _execute_primary_request(
+        self,
+        state: DeliberationWorkflowState,
+        task: DeliberationAnalysisTask,
+        request: PMPMessage,
+    ) -> PMPMessage:
+        model_override = None
+        if task.task_id.endswith(PROVIDER_CONTRACT_REPAIR_SUFFIX):
+            authorization = self._pending_primary_provider_contract_repair(
+                state,
+                task,
+            )
+            if authorization is None:
+                raise ValueError(
+                    "Primary Analyst contract repair authorization is not pending"
+                )
+            model_override = authorization.repair_model_id
+        return await self.registry.get(task.target_agent_id).execute(
+            request,
+            model_override=model_override,
+        )
 
     def _create_analysis_message(
         self,
@@ -1668,6 +1792,53 @@ class DeliberationManager:
         )
 
     @staticmethod
+    def _latest_primary_provider_error(
+        state: DeliberationWorkflowState,
+    ) -> tuple[PMPMessage, PMPMessage] | None:
+        """Return one correlated Analyst provider failure eligible for operator review."""
+
+        requests = {
+            message.message_id: message
+            for message in state.message_history
+            if message.sender_agent_id == "deliberation.manager"
+            and message.receiver_agent_id in PRIMARY_ANALYST_IDS
+            and message.message_type == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+        }
+        for response in reversed(state.message_history):
+            if (
+                response.sender_agent_id not in PRIMARY_ANALYST_IDS
+                or response.receiver_agent_id != "deliberation.manager"
+                or response.message_type != MessageType.ERROR.value
+            ):
+                continue
+            request = requests.get(str(response.parent_message_id or ""))
+            if request is None:
+                continue
+            task_id = request.payload.get("task_id")
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or response.payload.get("task_id") != task_id
+            ):
+                continue
+            error_class = str(response.payload.get("error_class") or "")
+            if error_class in {
+                "RetryableAgentError",
+                "ProviderResponseContractError",
+                "PayloadValidationError",
+                "ProviderRequestSchemaError",
+            }:
+                return response, request
+            if (
+                error_class == "NonRetryableAgentError"
+                and response.payload.get("http_status") == 400
+                and "invalid argument"
+                in str(response.payload.get("message") or "").lower()
+            ):
+                return response, request
+        return None
+
+    @staticmethod
     def _analysis_schema(agent_id: str):
         return {
             "deliberation.argument_analyst": ArgumentAnalysisResult,
@@ -1744,9 +1915,35 @@ class DeliberationManager:
             task.target_agent_id: task for task in self._create_analysis_tasks(report)
         }
         return [
-            tasks_by_agent.get(agent_id, generated[agent_id])
+            self._hydrate_analysis_task_evidence(
+                tasks_by_agent.get(agent_id, generated[agent_id]),
+                report,
+            )
             for agent_id in PRIMARY_ANALYST_IDS
         ]
+
+    @staticmethod
+    def _hydrate_analysis_task_evidence(
+        task: DeliberationAnalysisTask,
+        report: ResearchReport,
+    ) -> DeliberationAnalysisTask:
+        """Add the canonical provider view when loading a pre-context checkpoint."""
+
+        by_id = {
+            item.evidence_id: item
+            for item in build_deliberation_research_context(report).evidence_items
+        }
+        missing = set(task.target_evidence_ids) - set(by_id)
+        if missing:
+            raise ValueError(
+                f"analysis task references unknown Evidence IDs: {sorted(missing)}"
+            )
+        raw = task.model_dump(mode="json")
+        raw["evidence_context"] = [
+            by_id[evidence_id].model_dump(mode="json")
+            for evidence_id in task.target_evidence_ids
+        ]
+        return DeliberationAnalysisTask.model_validate(raw)
 
     def _prepare_revision_recovery_tasks(
         self,
@@ -1938,6 +2135,100 @@ class DeliberationManager:
             and isinstance(message.payload.get("invalid_payload"), dict)
             for message in state.message_history
         )
+
+    def _pending_primary_provider_retry(
+        self,
+        state: DeliberationWorkflowState,
+        task: DeliberationAnalysisTask,
+    ) -> ProviderRetryAuthorization | None:
+        provider_id = getattr(self.registry.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            return None
+        original_task_id = task.task_id
+        if original_task_id.endswith(OPERATOR_RETRY_SUFFIX):
+            original_task_id = original_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
+        authorization = self.provider_retry_store.for_original_task(
+            workflow_id=state.workflow_id,
+            provider_id=provider_id,
+            original_task_id=original_task_id,
+        )
+        if (
+            authorization is None
+            or authorization.agent_id != task.target_agent_id
+            or authorization.status != ProviderRetryStatus.PENDING.value
+        ):
+            return None
+        return authorization
+
+    def _make_operator_retry_task(
+        self,
+        state: DeliberationWorkflowState,
+        task: DeliberationAnalysisTask,
+    ) -> DeliberationAnalysisTask:
+        authorization = self._pending_primary_provider_retry(state, task)
+        if authorization is None:
+            raise ValueError("Primary Analyst provider retry authorization is not pending")
+        raw = task.model_dump(mode="json")
+        raw["task_id"] = authorization.retry_task_id
+        raw["revision_context"] = {
+            **(task.revision_context or {}),
+            "checkpoint_recovery": True,
+            "operator_provider_retry": True,
+            "previous_task_id": authorization.original_task_id,
+            "source_error_message_id": authorization.source_error_message_id,
+        }
+        return DeliberationAnalysisTask.model_validate(raw)
+
+    def _pending_primary_provider_contract_repair(
+        self,
+        state: DeliberationWorkflowState,
+        task: DeliberationAnalysisTask,
+    ) -> ProviderContractRepairAuthorization | None:
+        provider_id = getattr(self.registry.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            return None
+        original_task_id = task.task_id
+        for suffix in (
+            PROVIDER_CONTRACT_REPAIR_SUFFIX,
+            OPERATOR_RETRY_SUFFIX,
+        ):
+            if original_task_id.endswith(suffix):
+                original_task_id = original_task_id[: -len(suffix)]
+                break
+        authorization = self.provider_contract_repair_store.for_original_task(
+            workflow_id=state.workflow_id,
+            provider_id=provider_id,
+            original_task_id=original_task_id,
+        )
+        if (
+            authorization is None
+            or authorization.agent_id != task.target_agent_id
+            or authorization.status
+            != ProviderContractRepairStatus.PENDING.value
+        ):
+            return None
+        return authorization
+
+    def _make_primary_provider_contract_repair_task(
+        self,
+        state: DeliberationWorkflowState,
+        task: DeliberationAnalysisTask,
+    ) -> DeliberationAnalysisTask:
+        authorization = self._pending_primary_provider_contract_repair(state, task)
+        if authorization is None:
+            raise ValueError(
+                "Primary Analyst provider contract repair is not pending"
+            )
+        raw = task.model_dump(mode="json")
+        raw["task_id"] = authorization.repair_task_id
+        raw["revision_context"] = {
+            **(task.revision_context or {}),
+            "checkpoint_recovery": True,
+            "provider_contract_repair": True,
+            "previous_task_id": authorization.retry_task_id,
+            "source_error_message_id": authorization.source_error_message_id,
+        }
+        return DeliberationAnalysisTask.model_validate(raw)
 
     def _make_contract_repair_task(
         self,
@@ -2642,43 +2933,107 @@ class DeliberationManager:
 
         changes = normalized["integration_changes"]
         dispositions = normalized["counterargument_dispositions"]
+        repaired_resolution_tokens: dict[str, str] = {}
+        for disposition in dispositions:
+            if not isinstance(disposition, dict):
+                raise ValueError("saved final disposition is not an object")
+            resolution = disposition.get("resolution")
+            if resolution == "revised_with_research_gap_retained":
+                if (
+                    disposition.get("research_gap_required") is not True
+                    or not disposition.get("remaining_uncertainty")
+                    or not disposition.get("integration_change_ids")
+                ):
+                    raise ValueError(
+                        "compound revised resolution lacks explicit retained-gap fields"
+                    )
+                disposition["resolution"] = "revised"
+                repaired_resolution_tokens[str(disposition.get("counterargument_id"))] = (
+                    resolution
+                )
         counterarguments = list(counterargument.counterarguments)
         if len(dispositions) != len(counterarguments):
             raise ValueError("saved final disposition cardinality is ambiguous")
-        disposition_change_counts: list[int] = []
-        for disposition in dispositions:
-            if not isinstance(disposition, dict) or not isinstance(
-                disposition.get("integration_change_ids"), list
-            ):
-                raise ValueError("saved final disposition routing is encoded")
-            disposition_change_counts.append(
-                len(disposition["integration_change_ids"])
+        authoritative_counterargument_ids = {
+            item.counterargument_id for item in counterarguments
+        }
+        raw_change_ids = [
+            change.get("change_id") if isinstance(change, dict) else None
+            for change in changes
+        ]
+        raw_disposition_ids = [
+            disposition.get("counterargument_id")
+            if isinstance(disposition, dict)
+            else None
+            for disposition in dispositions
+        ]
+        preserve_canonical_change_routing = (
+            all(
+                isinstance(change_id, str)
+                and change_id.startswith("change_")
+                and len(change_id) > len("change_")
+                for change_id in raw_change_ids
             )
-        if sum(disposition_change_counts) != len(changes):
-            raise ValueError("saved final change routing is ambiguous")
-
-        change_ids: list[str] = []
-        for index, change in enumerate(changes, start=1):
-            if not isinstance(change, dict):
-                raise ValueError("saved final integration change is not an object")
-            change_id = f"change_{workflow_token}_{index:03d}"
-            change["change_id"] = change_id
-            change_ids.append(change_id)
-        cursor = 0
+            and len(set(raw_change_ids)) == len(raw_change_ids)
+            and set(raw_disposition_ids) == authoritative_counterargument_ids
+            and len(set(raw_disposition_ids)) == len(raw_disposition_ids)
+        )
         disposition_bindings: dict[str, list[str]] = {}
-        for index, (disposition, source) in enumerate(
-            zip(dispositions, counterarguments, strict=True)
-        ):
-            count = disposition_change_counts[index]
-            assigned = change_ids[cursor : cursor + count]
-            cursor += count
-            disposition["counterargument_id"] = source.counterargument_id
-            disposition["integration_change_ids"] = assigned
-            disposition_bindings[source.counterargument_id] = assigned
-            for change in changes[cursor - count : cursor]:
-                change["source_counterargument_ids"] = [
-                    source.counterargument_id
-                ]
+        if preserve_canonical_change_routing:
+            change_ids = [str(item) for item in raw_change_ids]
+            known_change_ids = set(change_ids)
+            for disposition in dispositions:
+                assigned = disposition.get("integration_change_ids")
+                if not isinstance(assigned, list) or any(
+                    not isinstance(item, str) or item not in known_change_ids
+                    for item in assigned
+                ):
+                    raise ValueError("saved final disposition change reference is unknown")
+                disposition_bindings[str(disposition["counterargument_id"])] = list(
+                    assigned
+                )
+            for change in changes:
+                source_ids = change.get("source_counterargument_ids")
+                if not isinstance(source_ids, list) or any(
+                    not isinstance(item, str)
+                    or item not in authoritative_counterargument_ids
+                    for item in source_ids
+                ):
+                    raise ValueError("saved final change counterargument lineage is unknown")
+        else:
+            disposition_change_counts: list[int] = []
+            for disposition in dispositions:
+                if not isinstance(disposition, dict) or not isinstance(
+                    disposition.get("integration_change_ids"), list
+                ):
+                    raise ValueError("saved final disposition routing is encoded")
+                disposition_change_counts.append(
+                    len(disposition["integration_change_ids"])
+                )
+            if sum(disposition_change_counts) != len(changes):
+                raise ValueError("saved final change routing is ambiguous")
+
+            change_ids = []
+            for index, change in enumerate(changes, start=1):
+                if not isinstance(change, dict):
+                    raise ValueError("saved final integration change is not an object")
+                change_id = f"change_{workflow_token}_{index:03d}"
+                change["change_id"] = change_id
+                change_ids.append(change_id)
+            cursor = 0
+            for index, (disposition, source) in enumerate(
+                zip(dispositions, counterarguments, strict=True)
+            ):
+                count = disposition_change_counts[index]
+                assigned = change_ids[cursor : cursor + count]
+                cursor += count
+                disposition["counterargument_id"] = source.counterargument_id
+                disposition["integration_change_ids"] = assigned
+                disposition_bindings[source.counterargument_id] = assigned
+                for change in changes[cursor - count : cursor]:
+                    change["source_counterargument_ids"] = [
+                        source.counterargument_id
+                    ]
 
         normalized = self._expand_saved_counterargument_placeholders(
             normalized,
@@ -2759,7 +3114,9 @@ class DeliberationManager:
                 dict.fromkeys(preserved_interpretation_ids)
             ),
             "rebound_change_count": len(change_ids),
+            "preserved_canonical_change_routing": preserve_canonical_change_routing,
             "rebound_disposition_change_ids": disposition_bindings,
+            "normalized_compound_resolution_tokens": repaired_resolution_tokens,
             "evidence_alias_candidates": {
                 key: sorted(value)
                 for key, value in evidence_alias_candidates.items()
@@ -5099,7 +5456,7 @@ class DeliberationManager:
         state.pending_revision_scope = str(review.revision_scope)
         state.pending_revision_iteration = state.revision_count + 1
         state.pending_revision_review_id = review.review_id
-        state.awaiting_upstream_revision = True
+        state.awaiting_upstream_revision = bool(review.upstream_revision_requests)
 
     @staticmethod
     def _clear_pending_revision(state: DeliberationWorkflowState) -> None:
@@ -5329,7 +5686,14 @@ class DeliberationManager:
         targets: list[str],
         review: DeliberationQualityReviewOutput,
     ) -> list[DeliberationAnalysisTask]:
-        originals = [DeliberationAnalysisTask.model_validate(item) for item in state.analysis_tasks]
+        report = ResearchReport.model_validate(state.research_report)
+        originals = [
+            self._hydrate_analysis_task_evidence(
+                DeliberationAnalysisTask.model_validate(item),
+                report,
+            )
+            for item in state.analysis_tasks
+        ]
         selected: list[DeliberationAnalysisTask] = []
         for target in targets:
             original = next((item for item in originals if item.target_agent_id == target), None)

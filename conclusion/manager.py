@@ -46,6 +46,7 @@ from common.provider_contract_repair import (
     ProviderContractRepairAuthorizationStore,
 )
 from common.provider_model_compatibility import ProviderModelCompatibilityStore
+from common.provider_schema_compatibility import GEMINI_WIRE_SCHEMA_REVISION
 from common.provider_retry import (
     OPERATOR_RETRY_SUFFIX,
     ProviderRetryAuthorization,
@@ -179,10 +180,18 @@ class ConclusionManager:
                 raise ValueError(
                     "Conclusion PayloadValidationError has no auditable Provider output payload"
                 )
+        elif (
+            error_class == "NonRetryableAgentError"
+            and error_response.payload.get("http_status") == 400
+            and "invalid argument"
+            in str(error_response.payload.get("message") or "").lower()
+        ):
+            normalized_error_class = "ProviderRequestSchemaError"
         if normalized_error_class not in {
             "RetryableAgentError",
             "ProviderResponseContractError",
             "PayloadValidationError",
+            "ProviderRequestSchemaError",
         }:
             raise ValueError(
                 "Latest Conclusion failure is not eligible for an explicit Provider retry"
@@ -241,9 +250,14 @@ class ConclusionManager:
             raise ValueError(
                 "Provider contract repair requires a failed one-shot operator retry"
             )
-        if retry_error.payload.get("error_class") != "ProviderResponseContractError":
+        retry_error_class = self._normalized_contract_failure_class(retry_error)
+        if retry_error_class not in {
+            "ProviderResponseContractError",
+            "ProviderRequestSchemaError",
+        }:
             raise ValueError(
-                "Provider contract repair requires a contract-invalid retry response"
+                "Provider contract repair requires a contract-invalid retry response "
+                "or request-schema rejection"
             )
         original_task_id = retry_task_id[: -len(OPERATOR_RETRY_SUFFIX)]
         original_exchange = self._failed_provider_exchange_for_task(
@@ -255,10 +269,10 @@ class ConclusionManager:
                 "Provider contract repair could not find the original failed exchange"
             )
         original_request, original_error = original_exchange
-        original_error_class = str(original_error.payload.get("error_class") or "")
+        original_error_class = self._normalized_contract_failure_class(original_error)
         if not (
-            original_error_class == "ProviderResponseContractError"
-            or self._is_legacy_non_finite_root_error(original_error)
+            original_error_class
+            in {"ProviderResponseContractError", "ProviderRequestSchemaError"}
         ):
             raise ValueError(
                 "Provider contract repair requires two contract-invalid responses"
@@ -283,6 +297,13 @@ class ConclusionManager:
             source_error_message_id=retry_error.message_id,
             failed_model_id=failed_model_id,
             repair_model_id=repair_model_id,
+            source_error_class=retry_error_class,
+            repair_contract_revision=(
+                GEMINI_WIRE_SCHEMA_REVISION
+                if retry_error_class == "ProviderRequestSchemaError"
+                and repair_model_id == failed_model_id
+                else None
+            ),
         )
 
     async def repair_provider_contract(
@@ -2793,6 +2814,15 @@ class ConclusionManager:
         )
         if authorization is None:
             raise ValueError("Validated contract repair has no saved authorization")
+        if authorization.repair_kind == "same_model_schema":
+            if authorization.repair_contract_revision != GEMINI_WIRE_SCHEMA_REVISION:
+                raise ValueError(
+                    "Validated request-schema repair uses a stale wire-schema revision"
+                )
+            return (
+                f"{authorization.agent_id}: same-model request schema repaired at "
+                f"{authorization.repair_contract_revision}"
+            )
         binding = self.provider_model_compatibility_store.record_verified_repair(
             authorization,
             output_schema_id=self._output_schema_id(output_schema),
@@ -4104,6 +4134,22 @@ class ConclusionManager:
                 for marker in ("input_value=inf", "input_value=-inf", "input_value=nan")
             )
         )
+
+    @classmethod
+    def _normalized_contract_failure_class(cls, error_response: PMPMessage) -> str:
+        error_class = str(error_response.payload.get("error_class") or "")
+        if error_class == "PayloadValidationError" and cls._is_legacy_non_finite_root_error(
+            error_response
+        ):
+            return "ProviderResponseContractError"
+        if (
+            error_class == "NonRetryableAgentError"
+            and error_response.payload.get("http_status") == 400
+            and "invalid argument"
+            in str(error_response.payload.get("message") or "").lower()
+        ):
+            return "ProviderRequestSchemaError"
+        return error_class
 
     @staticmethod
     def _is_persisted_provider_output_validation_error(

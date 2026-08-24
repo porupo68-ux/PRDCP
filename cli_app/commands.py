@@ -250,6 +250,27 @@ async def retry_saved_producer_provider(
     return 0 if state.status == "RUNNING" else 1
 
 
+async def retry_saved_producer_retrieval(
+    settings: Settings,
+    workflow_id: str,
+    *,
+    json_output: bool,
+) -> int:
+    if not settings.demo_safe_mode:
+        raise ValueError(
+            "--producer-retrieval-retry requires Demo Safe Mode to remain enabled"
+        )
+    producer = build_producer_manager(settings)
+    state = await producer.retry_retrieval_provider(
+        workflow_id,
+        progress_callback=ProgressReporter(
+            "producer", settings.data_dir, workflow_id
+        ),
+    )
+    print_state("producer", state, json_output=json_output)
+    return 0 if state.status == "RUNNING" else 1
+
+
 async def repair_saved_producer_output(
     settings: Settings,
     workflow_id: str,
@@ -575,6 +596,31 @@ async def retry_saved_deliberation_provider(
     _producer, _researcher, deliberation = build_managers(settings)
     state = await deliberation.retry_provider_call(
         workflow_id,
+        progress_callback=ProgressReporter(
+            "deliberation",
+            settings.data_dir,
+            workflow_id,
+        ),
+    )
+    print_state("deliberation", state, json_output=json_output)
+    return 0 if state.status == "COMPLETED" else 1
+
+
+async def repair_saved_deliberation_provider_contract(
+    settings: Settings,
+    workflow_id: str,
+    repair_model_id: str,
+    *,
+    json_output: bool,
+) -> int:
+    if not settings.demo_safe_mode:
+        raise ValueError(
+            "--deliberation-contract-repair requires Demo Safe Mode to remain enabled"
+        )
+    _producer, _researcher, deliberation = build_managers(settings)
+    state = await deliberation.repair_provider_contract(
+        workflow_id,
+        repair_model_id=repair_model_id,
         progress_callback=ProgressReporter(
             "deliberation",
             settings.data_dir,
@@ -928,6 +974,14 @@ def dispatch(args: Any, settings: Settings) -> int:
                 json_output=args.json_output,
             )
         )
+    if args.producer_retrieval_retry:
+        return asyncio.run(
+            retry_saved_producer_retrieval(
+                settings,
+                args.producer_retrieval_retry,
+                json_output=args.json_output,
+            )
+        )
     if args.producer_output_repair:
         return asyncio.run(
             repair_saved_producer_output(
@@ -1106,6 +1160,14 @@ def dispatch(args: Any, settings: Settings) -> int:
             retry_saved_deliberation_provider(
                 settings,
                 args.deliberation_provider_retry,
+                json_output=args.json_output,
+            )
+        )
+    if args.deliberation_contract_repair:
+        return asyncio.run(
+            repair_saved_deliberation_provider_contract(
+                settings,
+                *args.deliberation_contract_repair,
                 json_output=args.json_output,
             )
         )

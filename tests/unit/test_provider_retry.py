@@ -116,6 +116,51 @@ class ProviderRetryAuthorizationStoreTests(unittest.TestCase):
             "PayloadValidationError",
         )
 
+    def test_long_logical_task_consumes_with_a_short_atomic_temp_name(self) -> None:
+        task_id = "delib_task_revision_1_" + ("stakeholder_" * 8)
+        data_dir = self.data_dir
+        store = ProviderRetryAuthorizationStore(data_dir)
+        original_reservation = (
+            data_dir
+            / "provider_call_reservations"
+            / self.provider_id
+            / self.workflow_id
+            / f"{task_id}.json"
+        )
+        original_reservation.parent.mkdir(parents=True, exist_ok=True)
+        original_reservation.write_text(
+            json.dumps(
+                {
+                    "workflow_id": self.workflow_id,
+                    "task_id": task_id,
+                    "agent_id": self.agent_id,
+                    "model_id": "test-model",
+                }
+            ),
+            encoding="utf-8",
+        )
+        authorization = store.authorize_once(
+            workflow_id=self.workflow_id,
+            provider_id=self.provider_id,
+            agent_id=self.agent_id,
+            original_task_id=task_id,
+            source_error_message_id="message-long-task",
+            source_error_class="ProviderRequestSchemaError",
+        )
+        retry_reservation = store.reservation_path(
+            provider_id=self.provider_id,
+            workflow_id=self.workflow_id,
+            task_id=authorization.retry_task_id,
+        )
+        retry_reservation.write_text("{}", encoding="utf-8")
+
+        consumed = store.consume(
+            authorization,
+            reservation_path=retry_reservation,
+        )
+
+        self.assertEqual(consumed.status, ProviderRetryStatus.CONSUMED.value)
+
 
 if __name__ == "__main__":
     unittest.main()

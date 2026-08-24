@@ -150,6 +150,89 @@ class RetrievalSeparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(results[0].url), "https://example.com/source")
         self.assertEqual(results[0].content, "Grounded excerpt")
 
+    async def test_openrouter_batch_retrieval_uses_saved_reservation_and_server_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reservation = (
+                Path(temporary)
+                / "retrieval_call_reservations"
+                / "openrouter_web_search"
+                / "workflow"
+                / "retrieval.json"
+            )
+            reservation.parent.mkdir(parents=True)
+            reservation.write_text("{}", encoding="utf-8")
+            provider = OpenRouterWebSearchProvider(
+                api_key="test-key",
+                model="google/gemini-3.7-flash:batch",
+                batch_poll_interval_seconds=0,
+            )
+            submitted = None
+
+            def response(payload):
+                value = MagicMock()
+                value.__enter__.return_value = value
+                value.read.return_value = json.dumps(payload).encode("utf-8")
+                return value
+
+            def fake_urlopen(request, timeout):
+                nonlocal submitted
+                if request.method == "POST":
+                    submitted = json.loads(request.data.decode("utf-8"))
+                    return response({"id": "batch_retrieval", "status": "validating"})
+                custom_id = submitted["requests"][0]["custom_id"]
+                return response(
+                    {
+                        "id": "batch_retrieval",
+                        "status": "completed",
+                        "results": [
+                            {
+                                "custom_id": custom_id,
+                                "response": {
+                                    "status_code": 200,
+                                    "body": {
+                                        "id": "gen-retrieval",
+                                        "choices": [
+                                            {
+                                                "message": {
+                                                    "annotations": [
+                                                        {
+                                                            "type": "url_citation",
+                                                            "url_citation": {
+                                                                "url": "https://example.com/batch",
+                                                                "title": "Batch source",
+                                                                "content": "Batch excerpt",
+                                                            },
+                                                        }
+                                                    ]
+                                                }
+                                            }
+                                        ],
+                                    },
+                                },
+                                "error": None,
+                            }
+                        ],
+                    }
+                )
+
+            with patch("providers.openrouter_batch.urlopen", side_effect=fake_urlopen):
+                results = await provider.search(
+                    query="batch query",
+                    strategy=RetrievalStrategy.NEWS,
+                    max_results=3,
+                    timeout_seconds=10,
+                    invocation_reservation_path=reservation,
+                    invocation_discriminator="retrieval-test",
+                )
+
+            self.assertEqual(submitted["model"], "google/gemini-3.7-flash")
+            request_body = submitted["requests"][0]["body"]
+            self.assertEqual(request_body["model"], "google/gemini-3.7-flash")
+            self.assertNotIn("provider", request_body)
+            self.assertEqual(request_body["tool_choice"], "required")
+            self.assertEqual(request_body["tools"][0]["type"], "openrouter:web_search")
+            self.assertEqual(str(results[0].url), "https://example.com/batch")
+
     async def test_default_prepare_provider_input_is_exact_noop(self) -> None:
         payload = research_task()
         agent = object.__new__(StructuredAgent)

@@ -61,6 +61,41 @@ class _InvalidStakeholderOnceProvider(MockModelProvider):
         return payload
 
 
+class _RejectedStakeholderRevisionOnceProvider(MockModelProvider):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.stakeholder_rejections_remaining = 0
+
+    async def generate_structured(self, **kwargs):
+        schema_name = kwargs["output_schema"].__name__
+        if (
+            schema_name == "StakeholderResponseAnalysisResult"
+            and self.stakeholder_rejections_remaining > 0
+        ):
+            self.stakeholder_rejections_remaining -= 1
+            self.calls.append(schema_name)
+            raise NonRetryableAgentError(
+                "OpenRouter HTTP 400: Request contains an invalid argument.",
+                http_status=400,
+                provider=self.provider_id,
+                model_id=kwargs["model"],
+            )
+        payload = await super().generate_structured(**kwargs)
+        if (
+            schema_name == "DeliberationQualityReviewOutput"
+            and payload.get("status") == "revision_required"
+        ):
+            payload["reason"] = "Stakeholder analysis requires a canonical Evidence rerun"
+            payload["revision_scope"] = "targeted"
+            payload["revision_targets"] = [
+                "deliberation.stakeholder_response_analyst"
+            ]
+            payload["findings"][0]["affected_agent_ids"] = [
+                "deliberation.stakeholder_response_analyst"
+            ]
+        return payload
+
+
 class _InvalidInitialIntegrationOnceProvider(MockModelProvider):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -302,6 +337,83 @@ class DeliberationManagerTests(unittest.TestCase):
             self.assertEqual(state.status, "COMPLETED")
             self.assertEqual(state.review_result["status"], "approved_with_conditions")
             self.assertIn("deliberation.stakeholder_response_analyst", state.failed_agents)
+
+    def test_downstream_recovery_keeps_tolerated_primary_input_set_fixed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = MockModelProvider(
+                fail_agent_ids={"deliberation.stakeholder_response_analyst"},
+                reservation_root=root / "provider_call_reservations",
+            )
+            manager = make_manager(root, provider)
+            state = asyncio.run(
+                manager.start_from_message(make_deliberation_handoff())
+            )
+            self.assertEqual(state.status, "COMPLETED")
+            raw = json.loads(json.dumps(state.final_integration))
+            target = raw["counterargument_dispositions"][0]
+            target["resolution"] = "revised_with_research_gap_retained"
+            target["research_gap_required"] = True
+            target["remaining_uncertainty"] = "Retained research gap"
+            state.status = "FAILED"
+            state.error = {"message": "saved final resolution contract failure"}
+            state.final_integration = None
+            state.deterministic_validation = None
+            state.deliberation_result = None
+            state.review_result = None
+            state.conclusion_sent = False
+            state.completed_at = None
+            for checkpoint in (
+                "final_integration",
+                "deterministic_validation",
+                "quality_review",
+            ):
+                state.checkpoint_revisions.pop(checkpoint, None)
+            state.manager_invalid_payloads[
+                "deliberation_manager_final_integration_revision_0"
+            ] = {
+                "stage": "final_integration",
+                "output_schema": "FinalIntegratedAnalysis",
+                "invalid_payload": raw,
+                "validation_errors": [],
+                "recorded_at": "2026-08-24T00:00:00+00:00",
+            }
+            manager.repository.save(state)
+            outbox = manager.repository.conclusion_outbox_dir / f"{state.workflow_id}.json"
+            if outbox.exists():
+                outbox.unlink()
+            calls_before = len(provider.calls)
+            initial_before = provider.calls.count("InitialIntegratedAnalysis")
+            counter_before = provider.calls.count("CounterargumentAnalysisResult")
+            final_before = provider.calls.count("FinalIntegratedAnalysis")
+
+            recovered = asyncio.run(manager.recover(state.workflow_id))
+
+            self.assertEqual(recovered.status, "COMPLETED")
+            self.assertIn(
+                "deliberation.stakeholder_response_analyst",
+                recovered.failed_agents,
+            )
+            self.assertNotIn(
+                "deliberation.stakeholder_response_analyst",
+                recovered.analysis_results,
+            )
+            self.assertEqual(
+                provider.calls.count("InitialIntegratedAnalysis"), initial_before
+            )
+            self.assertEqual(
+                provider.calls.count("CounterargumentAnalysisResult"), counter_before
+            )
+            self.assertEqual(
+                provider.calls.count("FinalIntegratedAnalysis"), final_before
+            )
+            self.assertEqual(len(provider.calls), calls_before)
+            self.assertEqual(
+                recovered.final_integration["counterargument_dispositions"][0][
+                    "resolution"
+                ],
+                "revised",
+            )
 
     def test_any_single_primary_failure_can_complete_with_conditions(self):
         agent_ids = (
@@ -567,6 +679,7 @@ class DeliberationManagerTests(unittest.TestCase):
                 blocked.revision_control.phase,
                 "authorization_required",
             )
+            self.assertFalse(blocked.awaiting_upstream_revision)
             request_id = blocked.revision_control.active_request_id
             request_path = (
                 root
@@ -613,6 +726,120 @@ class DeliberationManagerTests(unittest.TestCase):
             )
             self.assertEqual(replayed.status, "COMPLETED")
             self.assertEqual(len(provider.calls), calls_after_completion)
+
+    def test_rejected_primary_schema_gets_one_operator_retry_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = _RejectedStakeholderRevisionOnceProvider(
+                deliberation_review_decisions=["revision_required", "approved"],
+                reservation_root=root / "provider_call_reservations",
+            )
+            manager = make_manager(root, provider, demo_safe_mode=True)
+            blocked = asyncio.run(
+                manager.start_from_message(make_deliberation_handoff())
+            )
+            self.assertEqual(blocked.status, "BLOCKED")
+
+            provider.stakeholder_rejections_remaining = 1
+            failed = asyncio.run(
+                manager.revise(
+                    blocked.workflow_id,
+                    reason="Authorize targeted Stakeholder revision",
+                )
+            )
+            self.assertEqual(failed.status, "FAILED")
+            original_task = next(
+                message.payload["task_id"]
+                for message in reversed(failed.message_history)
+                if message.message_type
+                == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+                and message.receiver_agent_id
+                == "deliberation.stakeholder_response_analyst"
+            )
+
+            authorization = manager.authorize_provider_retry(failed.workflow_id)
+            self.assertEqual(
+                authorization.source_error_class,
+                "ProviderRequestSchemaError",
+            )
+            completed = asyncio.run(
+                manager.retry_provider_call(failed.workflow_id)
+            )
+
+            self.assertEqual(completed.status, "COMPLETED")
+            saved_authorization = manager.provider_retry_store.for_original_task(
+                workflow_id=failed.workflow_id,
+                provider_id="mock",
+                original_task_id=original_task,
+            )
+            self.assertEqual(saved_authorization.status, "CONSUMED")
+            retry_requests = [
+                message
+                for message in completed.message_history
+                if message.message_type
+                == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+                and message.payload.get("task_id")
+                == f"{original_task}_operator_retry_1"
+            ]
+            self.assertEqual(len(retry_requests), 1)
+
+    def test_primary_contract_repair_uses_a_distinct_model_after_retry_400(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = _RejectedStakeholderRevisionOnceProvider(
+                deliberation_review_decisions=["revision_required", "approved"],
+                reservation_root=root / "provider_call_reservations",
+            )
+            manager = make_manager(root, provider, demo_safe_mode=True)
+            blocked = asyncio.run(
+                manager.start_from_message(make_deliberation_handoff())
+            )
+            provider.stakeholder_rejections_remaining = 2
+            first_failure = asyncio.run(
+                manager.revise(
+                    blocked.workflow_id,
+                    reason="Authorize targeted Stakeholder revision",
+                )
+            )
+            self.assertEqual(first_failure.status, "FAILED")
+            second_failure = asyncio.run(
+                manager.retry_provider_call(first_failure.workflow_id)
+            )
+            self.assertEqual(second_failure.status, "FAILED")
+
+            completed = asyncio.run(
+                manager.repair_provider_contract(
+                    second_failure.workflow_id,
+                    repair_model_id="vendor/mock-contract-repair",
+                )
+            )
+
+            self.assertEqual(completed.status, "COMPLETED")
+            original_task_id = next(
+                message.payload["task_id"]
+                for message in second_failure.message_history
+                if message.message_type
+                == MessageType.DELIBERATION_TASK_ASSIGNMENT.value
+                and message.receiver_agent_id
+                == "deliberation.stakeholder_response_analyst"
+                and message.payload["task_id"].startswith("delib_task_revision_1_")
+                and not message.payload["task_id"].endswith("_operator_retry_1")
+            )
+            authorization = (
+                manager.provider_contract_repair_store.for_original_task(
+                    workflow_id=second_failure.workflow_id,
+                    provider_id="mock",
+                    original_task_id=original_task_id,
+                )
+            )
+            self.assertEqual(authorization.status, "CONSUMED")
+            repair_reservation = json.loads(
+                Path(authorization.reservation_path).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                repair_reservation["model_id"],
+                "vendor/mock-contract-repair",
+            )
 
     def test_recover_reuses_revision_review_after_checkpoint_was_cleared(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1923,6 +2150,59 @@ class DeliberationManagerTests(unittest.TestCase):
                 state.manager_payload_recoveries[-1]["compatibility_adapter"],
             )
 
+    def test_saved_final_compound_revised_resolution_recovers_without_provider_call(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = MockModelProvider(
+                reservation_root=root / "provider_call_reservations"
+            )
+            manager = make_manager(root, provider)
+            state = asyncio.run(
+                manager.start_from_message(make_deliberation_handoff())
+            )
+            raw = json.loads(json.dumps(state.final_integration))
+            target = raw["counterargument_dispositions"][0]
+            target["resolution"] = "revised_with_research_gap_retained"
+            target["research_gap_required"] = True
+            target["remaining_uncertainty"] = "Explicit retained research gap"
+            logical_task_id = "deliberation_manager_final_integration_revision_0"
+            state.final_integration = None
+            state.manager_invalid_payloads[logical_task_id] = {
+                "stage": "final_integration",
+                "output_schema": "FinalIntegratedAnalysis",
+                "invalid_payload": raw,
+                "validation_errors": [
+                    {
+                        "loc": ["counterargument_dispositions", 0, "resolution"],
+                        "input": "revised_with_research_gap_retained",
+                    }
+                ],
+                "recorded_at": "2026-08-24T00:00:00+00:00",
+            }
+            calls_before = len(provider.calls)
+
+            recovered = manager._recover_saved_manager_payload(
+                state,
+                output_schema=FinalIntegratedAnalysis,
+                stage="final_integration",
+            )
+
+            self.assertIsNotNone(recovered)
+            self.assertEqual(len(provider.calls), calls_before)
+            disposition = recovered.counterargument_dispositions[0]
+            self.assertEqual(disposition.resolution, "revised")
+            self.assertTrue(disposition.research_gap_required)
+            self.assertEqual(
+                disposition.remaining_uncertainty,
+                "Explicit retained research gap",
+            )
+            self.assertEqual(
+                state.manager_payload_recoveries[-1][
+                    "normalized_compound_resolution_tokens"
+                ][disposition.counterargument_id],
+                "revised_with_research_gap_retained",
+            )
+
     def test_saved_manager_payload_is_not_replayed_across_revisions(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2197,6 +2477,12 @@ class DeliberationManagerTests(unittest.TestCase):
         tasks = DeliberationManager._create_analysis_tasks(report)
         self.assertEqual(len(tasks), 3)
         self.assertTrue(all(len(task.target_evidence_ids) <= 50 for task in tasks))
+        for task in tasks:
+            self.assertEqual(
+                {item.evidence_id for item in task.evidence_context},
+                set(task.target_evidence_ids),
+            )
+            self.assertTrue(all(item.source_id for item in task.evidence_context))
 
     def test_conclusion_handoff_contains_canonical_contract(self):
         with tempfile.TemporaryDirectory() as temporary:

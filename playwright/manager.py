@@ -2772,6 +2772,13 @@ class PlaywrightManager:
             and bool(error_response.payload.get("validation_errors"))
         ):
             return error_class
+        if (
+            error_class == "NonRetryableAgentError"
+            and error_response.payload.get("http_status") == 400
+            and "invalid argument"
+            in str(error_response.payload.get("message") or "").lower()
+        ):
+            return "ProviderRequestSchemaError"
         return None
 
     @staticmethod

@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from common.models.errors import ProviderCapabilityError, RetryableAgentError
+from common.models.errors import (
+    NonRetryableAgentError,
+    ProviderCapabilityError,
+    RetryableAgentError,
+)
 from common.models.pmp import PMPMessage
 from playwright.schemas import (
     CitationEditingResult,
@@ -46,6 +50,25 @@ class InterruptScriptwriterOnceProvider(MockModelProvider):
                 automatic_retry_allowed=False,
                 provider="OpenRouterModelProvider",
                 model_id="~anthropic/claude-sonnet-latest",
+            )
+        return await super().generate_structured(**kwargs)
+
+
+class RejectCitationSchemaOnceProvider(MockModelProvider):
+    def __init__(self):
+        super().__init__()
+        self.rejected = False
+
+    async def generate_structured(self, **kwargs):
+        if kwargs["output_schema"] is CitationEditingResult and not self.rejected:
+            self.rejected = True
+            self.calls.append("CitationEditingResult")
+            self.agent_calls.append("playwright.evidence_citation_editor")
+            raise NonRetryableAgentError(
+                "OpenRouter HTTP 400: Request contains an invalid argument.",
+                http_status=400,
+                provider=self.provider_id,
+                model_id=kwargs["model"],
             )
         return await super().generate_structured(**kwargs)
 
@@ -337,6 +360,54 @@ class PlaywrightManagerTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 asyncio.run(manager.retry_provider_call(failed.workflow_id))
+
+    def test_schema_rejection_retries_only_citation_with_new_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            provider = RejectCitationSchemaOnceProvider()
+            manager = make_playwright_manager(
+                data_dir,
+                provider,
+                demo_safe_mode=True,
+            )
+            failed = asyncio.run(
+                manager.start_from_message(make_playwright_handoff(data_dir, provider))
+            )
+
+            self.assertEqual(failed.status, "FAILED")
+            self.assertEqual(
+                failed.completed_agents,
+                ["playwright.narrative_architect", "playwright.scriptwriter"],
+            )
+            authorization = manager.authorize_provider_retry(failed.workflow_id)
+            self.assertEqual(
+                authorization.source_error_class,
+                "ProviderRequestSchemaError",
+            )
+            completed = asyncio.run(manager.retry_provider_call(failed.workflow_id))
+
+            self.assertEqual(completed.status, "COMPLETED")
+            self.assertEqual(
+                provider.agent_calls.count("playwright.narrative_architect"), 1
+            )
+            self.assertEqual(provider.agent_calls.count("playwright.scriptwriter"), 1)
+            self.assertEqual(
+                provider.agent_calls.count("playwright.evidence_citation_editor"), 2
+            )
+            self.assertEqual(provider.agent_calls.count("playwright.visual_director"), 1)
+            citation_task_ids = [
+                message.payload.get("task_id")
+                for message in completed.message_history
+                if message.sender_agent_id == "playwright.manager"
+                and message.receiver_agent_id == "playwright.evidence_citation_editor"
+            ]
+            self.assertEqual(
+                citation_task_ids,
+                [
+                    "playwright_citation_upstream_0_revision_0",
+                    "playwright_citation_upstream_0_revision_0_operator_retry_1",
+                ],
+            )
 
     def test_visual_capability_repair_uses_one_distinct_model_and_persists_binding(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -206,6 +206,79 @@ class StakeholderResponseAnalysisResult(BaseModel):
     research_gaps: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
 
+    @classmethod
+    def specialize_strict_output_schema(
+        cls,
+        schema: dict[str, Any],
+        input_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind trace IDs to the Evidence records supplied in this assignment."""
+
+        context = input_data.get("evidence_context")
+        if not isinstance(context, list) or not context:
+            return schema
+        evidence_ids = list(
+            dict.fromkeys(
+                item.get("evidence_id")
+                for item in context
+                if isinstance(item, dict)
+                and isinstance(item.get("evidence_id"), str)
+            )
+        )
+        source_ids = list(
+            dict.fromkeys(
+                item.get("source_id")
+                for item in context
+                if isinstance(item, dict)
+                and isinstance(item.get("source_id"), str)
+            )
+        )
+        task_id = input_data.get("task_id")
+        definitions = schema.setdefault("$defs", {})
+        if not isinstance(definitions, dict):
+            raise ValueError("Stakeholder strict schema has no usable $defs")
+        definitions["AssignedEvidenceId"] = {
+            "type": "string",
+            "enum": evidence_ids,
+        }
+        definitions["AssignedSourceId"] = {
+            "type": "string",
+            "enum": source_ids,
+        }
+        evidence_reference = {"$ref": "#/$defs/AssignedEvidenceId"}
+        source_reference = {"$ref": "#/$defs/AssignedSourceId"}
+
+        def bind(node: Any) -> None:
+            if isinstance(node, dict):
+                properties = node.get("properties")
+                if isinstance(properties, dict):
+                    for field_name, field_schema in properties.items():
+                        if not isinstance(field_schema, dict):
+                            continue
+                        if field_name == "evidence_ids" and evidence_ids:
+                            field_schema["items"] = dict(evidence_reference)
+                        elif field_name == "evidence_id" and evidence_ids:
+                            properties[field_name] = dict(evidence_reference)
+                        elif field_name == "source_ids" and source_ids:
+                            field_schema["items"] = dict(source_reference)
+                        elif (
+                            field_name == "task_id"
+                            and isinstance(task_id, str)
+                            and task_id
+                        ):
+                            properties[field_name] = {
+                                "type": "string",
+                                "enum": [task_id],
+                            }
+                for child in node.values():
+                    bind(child)
+            elif isinstance(node, list):
+                for child in node:
+                    bind(child)
+
+        bind(schema)
+        return schema
+
     @model_validator(mode="before")
     @classmethod
     def downgrade_legacy_specifics(cls, value: object) -> object:

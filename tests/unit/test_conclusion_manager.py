@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from common.models.errors import ProviderResponseContractError
+from common.models.errors import NonRetryableAgentError, ProviderResponseContractError
 from common.models.pmp import PMPMessage
 from common.structured_outputs import strict_output_schema, strict_schema_violations
 from conclusion.manager import (
@@ -54,6 +54,45 @@ class _FailOnceConclusionProvider(MockModelProvider):
                 response_root_type="float",
                 response_invalid_path="$",
             )
+        return await super().generate_structured(**kwargs)
+
+
+class _RejectPositionRequestOnceProvider(MockModelProvider):
+    def __init__(self, *, reservation_root: Path) -> None:
+        super().__init__(reservation_root=reservation_root)
+        self.reject_once = True
+
+    async def generate_structured(self, **kwargs) -> dict:
+        if kwargs["output_schema"] is PositionGenerationResult and self.reject_once:
+            self.reject_once = False
+            raise NonRetryableAgentError(
+                "OpenRouter HTTP 400: Request contains an invalid argument.",
+                http_status=400,
+                provider=self.provider_id,
+                model_id=kwargs["model"],
+            )
+        return await super().generate_structured(**kwargs)
+
+
+class _RejectPositionRequestTwiceProvider(MockModelProvider):
+    """Reject original and retry, then accept the audited schema-repair task."""
+
+    def __init__(self, *, reservation_root: Path) -> None:
+        super().__init__(reservation_root=reservation_root)
+        self.position_attempts = 0
+        self.position_models: list[str] = []
+
+    async def generate_structured(self, **kwargs) -> dict:
+        if kwargs["output_schema"] is PositionGenerationResult:
+            self.position_attempts += 1
+            self.position_models.append(kwargs["model"])
+            if self.position_attempts <= 2:
+                raise NonRetryableAgentError(
+                    "OpenRouter HTTP 400: Request contains an invalid argument.",
+                    http_status=400,
+                    provider=self.provider_id,
+                    model_id=kwargs["model"],
+                )
         return await super().generate_structured(**kwargs)
 
 
@@ -1321,6 +1360,103 @@ class ConclusionManagerTests(unittest.TestCase):
                 authorization.source_error_class,
                 "ProviderResponseContractError",
             )
+
+    def test_rejected_position_schema_gets_one_operator_retry_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            provider = _RejectPositionRequestOnceProvider(
+                reservation_root=data_dir / "provider_call_reservations"
+            )
+            manager = make_conclusion_manager(
+                data_dir,
+                provider,
+                demo_safe_mode=True,
+            )
+            failed = asyncio.run(
+                manager.start_from_message(
+                    make_conclusion_handoff(data_dir, provider)
+                )
+            )
+            self.assertEqual(failed.status, "FAILED")
+
+            authorization = manager.authorize_provider_retry(failed.workflow_id)
+            self.assertEqual(
+                authorization.source_error_class,
+                "ProviderRequestSchemaError",
+            )
+            recovered = asyncio.run(manager.retry_provider_call(failed.workflow_id))
+
+            self.assertEqual(recovered.status, "WAITING_HUMAN_SELECTION")
+            self.assertEqual(
+                manager.provider_retry_store.for_original_task(
+                    workflow_id=failed.workflow_id,
+                    provider_id="mock",
+                    original_task_id=authorization.original_task_id,
+                ).status,
+                "CONSUMED",
+            )
+            retry_requests = [
+                message
+                for message in recovered.message_history
+                if message.payload.get("task_id") == authorization.retry_task_id
+                and message.sender_agent_id == "conclusion.manager"
+            ]
+            self.assertEqual(len(retry_requests), 1)
+
+    def test_repeated_schema_rejection_allows_one_same_model_schema_repair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            model_id = "google/gemini-3.7-flash"
+            provider = _RejectPositionRequestTwiceProvider(
+                reservation_root=data_dir / "provider_call_reservations"
+            )
+            manager = make_conclusion_manager(
+                data_dir,
+                provider,
+                demo_safe_mode=True,
+            )
+            manager.registry.get(POSITION_GENERATOR_ID).model = model_id
+
+            failed = asyncio.run(
+                manager.start_from_message(make_conclusion_handoff(data_dir, provider))
+            )
+            failed = asyncio.run(manager.retry_provider_call(failed.workflow_id))
+            repaired = asyncio.run(
+                manager.repair_provider_contract(
+                    failed.workflow_id,
+                    repair_model_id=model_id,
+                )
+            )
+
+            self.assertEqual(repaired.status, "WAITING_HUMAN_SELECTION")
+            self.assertEqual(provider.position_models, [model_id, model_id, model_id])
+            authorization = manager.provider_contract_repair_store.for_original_task(
+                workflow_id=repaired.workflow_id,
+                provider_id=provider.provider_id,
+                original_task_id=(
+                    "conclusion_position_generation_upstream_0_revision_0"
+                ),
+            )
+            self.assertIsNotNone(authorization)
+            self.assertEqual(authorization.status, "CONSUMED")
+            self.assertEqual(authorization.repair_kind, "same_model_schema")
+            self.assertEqual(
+                authorization.repair_contract_revision,
+                "gemini_wire_schema_v2",
+            )
+            self.assertEqual(
+                manager.provider_model_compatibility_store.list_verified(
+                    provider_id=provider.provider_id
+                ),
+                [],
+            )
+            with self.assertRaisesRegex(ValueError, "must be FAILED"):
+                asyncio.run(
+                    manager.repair_provider_contract(
+                        repaired.workflow_id,
+                        repair_model_id=model_id,
+                    )
+                )
 
     def test_saved_result_messages_restore_all_missing_checkpoints_without_calls(self):
         with tempfile.TemporaryDirectory() as temporary:

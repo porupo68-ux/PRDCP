@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1062,7 +1062,7 @@ class CounterargumentDisposition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     counterargument_id: CounterargumentId
-    resolution: str = Field(min_length=1)
+    resolution: Literal["revised", "rejected", "unresolved", "researcher_return"]
     rationale: str = Field(min_length=1)
     revision_target_agent_ids: list[str] = Field(default_factory=list)
     integration_change_ids: list[str] = Field(default_factory=list)
@@ -1087,14 +1087,6 @@ class CounterargumentDisposition(BaseModel):
             ("change_",),
             field_name="integration_change_ids",
         )
-
-    @field_validator("resolution")
-    @classmethod
-    def validate_resolution(cls, value: str) -> str:
-        allowed = {"revised", "rejected", "unresolved", "researcher_return"}
-        if value not in allowed:
-            raise ValueError(f"resolution must be one of {sorted(allowed)}")
-        return value
 
     @model_validator(mode="after")
     def validate_resolution_details(self) -> "CounterargumentDisposition":

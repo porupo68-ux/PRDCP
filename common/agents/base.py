@@ -171,10 +171,11 @@ class StructuredAgent(ABC):
                     input_data=input_data,
                     output_schema=self.output_schema,
                 )
-            if self.demo_safe_mode or (
+            invocation_reservation_path: Path | None = None
+            if self.demo_safe_mode or self._is_batch_model(effective_model) or (
                 isinstance(provider_id, str) and explicit_task_id is not None
             ):
-                self._reserve_provider_invocation(
+                invocation_reservation_path = self._reserve_provider_invocation(
                     validated,
                     logical_task_id=logical_task_id,
                     model_id=effective_model,
@@ -186,6 +187,7 @@ class StructuredAgent(ABC):
                 timeout_seconds=execution.runtime_config.timeout_seconds,
                 model=effective_model,
                 prepared_input=input_data,
+                invocation_reservation_path=invocation_reservation_path,
             )
             return self.create_result_message(
                 validated,
@@ -222,6 +224,7 @@ class StructuredAgent(ABC):
         timeout_seconds: int,
         model: str | None = None,
         prepared_input: dict | None = None,
+        invocation_reservation_path: Path | None = None,
     ) -> tuple[BaseModel, int]:
         input_data = (
             payload.model_dump(mode="json")
@@ -241,6 +244,7 @@ class StructuredAgent(ABC):
                         input_data=input_data,
                         output_schema=self.output_schema,
                         timeout_seconds=timeout_seconds,
+                        invocation_reservation_path=invocation_reservation_path,
                     ),
                     timeout=timeout_seconds,
                 )
@@ -343,7 +347,7 @@ class StructuredAgent(ABC):
         *,
         logical_task_id: str,
         model_id: str | None = None,
-    ) -> None:
+    ) -> Path:
         provider_name = type(self.provider).__name__
         provider_id = getattr(self.provider, "provider_id", None)
         effective_model = model_id or self.model
@@ -670,6 +674,12 @@ class StructuredAgent(ABC):
                     reservation_path=reservation_path,
                 )
         except FileExistsError as exc:
+            can_resume = getattr(self.provider, "can_resume_invocation", None)
+            if callable(can_resume) and can_resume(
+                reservation_path=reservation_path,
+                model_id=effective_model,
+            ):
+                return reservation_path
             raise NonRetryableAgentError(
                 f"Persistent reservation blocked a repeated call for {self.agent_id} "
                 f"task {logical_task_id}",
@@ -684,6 +694,7 @@ class StructuredAgent(ABC):
                 provider=provider_name,
                 model_id=effective_model,
             ) from exc
+        return reservation_path
 
     def _logical_task_id(
         self,
@@ -721,6 +732,10 @@ class StructuredAgent(ABC):
             return value
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
         return f"id-{digest}"
+
+    @staticmethod
+    def _is_batch_model(model_id: str) -> bool:
+        return model_id.strip().lower().endswith(":batch")
 
     def resolve_result_message_type(self, request: PMPMessage) -> MessageType:
         return self.output_message_type

@@ -85,7 +85,9 @@ class MockModelProvider:
         input_data: dict,
         output_schema: type[BaseModel],
         timeout_seconds: int | None = None,
+        invocation_reservation_path: Path | None = None,
     ) -> dict:
+        del invocation_reservation_path
         schema_name = output_schema.__name__
         self.calls.append(schema_name)
         if schema_name in self.fail_schemas:

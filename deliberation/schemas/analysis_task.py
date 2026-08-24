@@ -5,7 +5,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from deliberation.schemas.research_context import DeliberationResearchContext
+from deliberation.schemas.research_context import (
+    DeliberationEvidenceContext,
+    DeliberationResearchContext,
+)
 
 
 class AnalysisType(str, Enum):
@@ -31,6 +34,7 @@ class DeliberationAnalysisTask(BaseModel):
     research_report_id: str = Field(min_length=1)
     research_question_ids: list[str] = Field(min_length=1)
     target_evidence_ids: list[str] = Field(min_length=1)
+    evidence_context: list[DeliberationEvidenceContext] = Field(default_factory=list)
     problem_definition: str = Field(min_length=1)
     shared_definitions: dict[str, str] = Field(default_factory=dict)
     geographic_scope: list[str] = Field(min_length=1)
@@ -48,6 +52,14 @@ class DeliberationAnalysisTask(BaseModel):
             raise ValueError("research_question_ids must be unique")
         if len(set(self.target_evidence_ids)) != len(self.target_evidence_ids):
             raise ValueError("target_evidence_ids must be unique")
+        if self.evidence_context:
+            context_ids = [item.evidence_id for item in self.evidence_context]
+            if len(set(context_ids)) != len(context_ids):
+                raise ValueError("evidence_context must have unique evidence_id values")
+            if set(context_ids) != set(self.target_evidence_ids):
+                raise ValueError(
+                    "evidence_context must cover exactly target_evidence_ids"
+                )
         return self
 
 

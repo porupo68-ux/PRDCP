@@ -87,6 +87,10 @@ class MaintainabilityTests(unittest.TestCase):
     def test_cli_accepts_producer_checkpoint_recovery(self) -> None:
         args = parse_args(["--producer-recover", "workflow-1"])
         self.assertEqual(args.producer_recover, "workflow-1")
+
+    def test_cli_accepts_producer_retrieval_retry(self) -> None:
+        args = parse_args(["--producer-retrieval-retry", "workflow-1"])
+        self.assertEqual(args.producer_retrieval_retry, "workflow-1")
         self.assertIsNone(args.producer_provider_retry)
 
     def test_cli_accepts_producer_internal_revision(self) -> None:

@@ -13,6 +13,7 @@ from common.models.pmp import MessageStatus, MessageType, PMPContext, PMPMessage
 from common.models.errors import NonRetryableAgentError
 from common.provider_output_repair import ProviderOutputRepairStatus
 from common.provider_retry import ProviderRetryStatus
+from common.retrieval_provider_retry import RetrievalProviderRetryStatus
 from common.role_definitions import RoleDefinitionLoader
 from config.settings import BASE_DIR
 from producer.manager import ProducerManager
@@ -30,6 +31,11 @@ class OneCallGeneralOpinionProvider:
         self.reservation_root = data_dir / "provider_call_reservations"
         self.calls: list[str] = []
         self.fail = False
+        self.allow_failed_batch_retry = False
+
+    def can_retry_failed_invocation(self, **kwargs) -> bool:
+        del kwargs
+        return self.allow_failed_batch_retry
 
     def validate_request_budget(self, **kwargs) -> int:
         del kwargs
@@ -264,6 +270,353 @@ def build_cycle031_case(data_dir: Path):
 
 
 class ProducerCheckpointRecoveryTests(unittest.TestCase):
+    def test_terminal_batch_retrieval_retries_once_with_new_sync_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            workflow_id = str(uuid4())
+            retrieval_provider = MockRetrievalProvider(
+                reservation_root=data_dir / "retrieval_call_reservations"
+            )
+            retrieval_provider.provider_id = "openrouter_web_search"
+            retrieval_provider.model = "google/gemini-3.7-flash"
+            coordinator = RetrievalCoordinator(
+                retrieval_provider,
+                data_dir=data_dir,
+                demo_safe_mode=True,
+            )
+            model_provider = OneCallGeneralOpinionProvider(data_dir)
+            rd_loader = RoleDefinitionLoader.from_project(
+                BASE_DIR,
+                access_log_path=data_dir / "logs" / "rd_access.jsonl",
+            )
+            registry = ProducerRegistry(
+                model_provider,
+                {"producer.general_opinion_analyst": "google/gemini-3.7-flash"},
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+                retrieval_coordinator=coordinator,
+            )
+            repository = WorkflowRepository(data_dir)
+            manager = ProducerManager(
+                registry,
+                repository,
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+            )
+            selected_topic = {
+                "topic_id": "topic_batch_retrieval",
+                "title": "Generative AI and work",
+                "selection_reason": "saved selection",
+            }
+            request = PMPMessage.create(
+                workflow_id=workflow_id,
+                sender_agent_id="producer.manager",
+                receiver_agent_id="producer.general_opinion_analyst",
+                message_type=MessageType.TASK,
+                objective="saved Batch Retrieval request",
+                payload={"selected_topic": selected_topic, "revision_context": None},
+            )
+            error = PMPMessage.create(
+                workflow_id=workflow_id,
+                parent_message_id=request.message_id,
+                sender_agent_id="producer.general_opinion_analyst",
+                receiver_agent_id="producer.manager",
+                message_type=MessageType.ERROR,
+                objective="saved terminal Batch Retrieval failure",
+                payload={
+                    "message": "OPENROUTER_BATCH_FAILED: terminal status=failed",
+                    "task_id": "producer.general_opinion_analyst",
+                    "agent_id": "producer.general_opinion_analyst",
+                    "provider": "openrouter",
+                    "model_id": "google/gemini-3.7-flash:batch",
+                    "error_class": "NonRetryableAgentError",
+                    "http_status": None,
+                },
+                metadata=PMPMetadata(status=MessageStatus.FAILED),
+            )
+            repository.save(
+                ProducerWorkflowState(
+                    workflow_id=workflow_id,
+                    status="FAILED",
+                    initial_request={"topic": "", "search_constraints": {}},
+                    topic_candidates=[{"topic_id": "topic_batch_retrieval"}],
+                    selected_topic=selected_topic,
+                    completed_agents=[
+                        "producer.topic_scout",
+                        "producer.topic_selector",
+                    ],
+                    message_history=[request, error],
+                    role_definition_usage=[
+                        rd_loader.load("producer.manager").trace()
+                    ],
+                    error={"message": "saved terminal Batch Retrieval failure"},
+                )
+            )
+            revision_hash = hashlib.sha256(b"null").hexdigest()[:8]
+            original_task_id = (
+                f"general_opinion_topic_batch_retrieval_{revision_hash}"
+            )
+            original_retrieval_id = coordinator.retrieval_identity(
+                workflow_id=workflow_id,
+                task_id=original_task_id,
+                agent_id="producer.general_opinion_analyst",
+                strategy=RetrievalStrategy.GENERAL_OPINION,
+            )
+            original_reservation = (
+                data_dir
+                / "retrieval_call_reservations"
+                / "openrouter_web_search"
+                / workflow_id
+                / f"{original_retrieval_id}.json"
+            )
+            original_reservation.parent.mkdir(parents=True, exist_ok=True)
+            original_reservation.write_text(
+                json.dumps(
+                    {
+                        "retrieval_id": original_retrieval_id,
+                        "workflow_id": workflow_id,
+                        "task_id": original_task_id,
+                        "agent_id": "producer.general_opinion_analyst",
+                        "strategy": RetrievalStrategy.GENERAL_OPINION.value,
+                        "provider_id": "openrouter_web_search",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sidecar = (
+                data_dir
+                / "openrouter_batch_jobs"
+                / "retrieval_call_reservations"
+                / "openrouter_web_search"
+                / workflow_id
+                / f"{original_retrieval_id}.0123456789abcdef.json"
+            )
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "model_id": "google/gemini-3.7-flash:batch",
+                        "batch_id": "batch-terminal",
+                        "status": "failed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            recovered = asyncio.run(manager.retry_retrieval_provider(workflow_id))
+
+            self.assertEqual(recovered.status, "RUNNING")
+            self.assertEqual(recovered.completed_agents[-1], "producer.general_opinion_analyst")
+            self.assertEqual(retrieval_provider.calls, 1)
+            self.assertEqual(model_provider.calls, ["GeneralOpinionOutput"])
+            authorization = manager.retrieval_provider_retry_store.for_original_task(
+                workflow_id=workflow_id,
+                retrieval_provider_id="openrouter_web_search",
+                original_task_id=original_task_id,
+            )
+            self.assertIsNotNone(authorization)
+            self.assertEqual(
+                authorization.status,
+                RetrievalProviderRetryStatus.CONSUMED.value,
+            )
+            self.assertIsNotNone(authorization.retrieval_context_sha256)
+            with self.assertRaisesRegex(ValueError, "must be FAILED"):
+                asyncio.run(manager.retry_retrieval_provider(workflow_id))
+            self.assertEqual(retrieval_provider.calls, 1)
+            self.assertEqual(model_provider.calls, ["GeneralOpinionOutput"])
+
+    def test_batch_endpoint_404_can_authorize_one_code_repair_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            workflow_id = str(uuid4())
+            model_provider = OneCallGeneralOpinionProvider(data_dir)
+            rd_loader = RoleDefinitionLoader.from_project(
+                BASE_DIR,
+                access_log_path=data_dir / "logs" / "rd_access.jsonl",
+            )
+            registry = ProducerRegistry(
+                model_provider,
+                {
+                    "producer.topic_scout": (
+                        "google/gemini-3.7-flash:batch"
+                    )
+                },
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+                retrieval_coordinator=RetrievalCoordinator(
+                    MockRetrievalProvider(
+                        reservation_root=data_dir / "retrieval_call_reservations"
+                    ),
+                    data_dir=data_dir,
+                    demo_safe_mode=True,
+                ),
+            )
+            repository = WorkflowRepository(data_dir)
+            manager = ProducerManager(
+                registry,
+                repository,
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+            )
+            request = PMPMessage.create(
+                workflow_id=workflow_id,
+                sender_agent_id="producer.manager",
+                receiver_agent_id="producer.topic_scout",
+                message_type=MessageType.TASK,
+                objective="saved batch transport request",
+                payload={"topic": "batch", "search_constraints": {}},
+            )
+            error = PMPMessage.create(
+                workflow_id=workflow_id,
+                parent_message_id=request.message_id,
+                sender_agent_id="producer.topic_scout",
+                receiver_agent_id="producer.manager",
+                message_type=MessageType.ERROR,
+                objective="saved batch transport error",
+                payload={
+                    "message": (
+                        "OpenRouter HTTP 404: This model is only available through the "
+                        "Batch API. Use the /api/beta/batches endpoint instead."
+                    ),
+                    "task_id": "producer.topic_scout",
+                    "agent_id": "producer.topic_scout",
+                    "provider": "openrouter",
+                    "model_id": "google/gemini-3.7-flash:batch",
+                    "error_class": "NonRetryableAgentError",
+                    "http_status": 404,
+                },
+                metadata=PMPMetadata(status=MessageStatus.FAILED),
+            )
+            repository.save(
+                ProducerWorkflowState(
+                    workflow_id=workflow_id,
+                    status="FAILED",
+                    initial_request={"topic": "", "search_constraints": {}},
+                    completed_agents=[],
+                    message_history=[request, error],
+                    error={"message": "saved batch endpoint mismatch"},
+                )
+            )
+            reservation = manager.provider_retry_store.reservation_path(
+                provider_id="openrouter",
+                workflow_id=workflow_id,
+                task_id="producer.topic_scout",
+            )
+            reservation.parent.mkdir(parents=True)
+            reservation.write_text(
+                json.dumps(
+                    {
+                        "workflow_id": workflow_id,
+                        "task_id": "producer.topic_scout",
+                        "agent_id": "producer.topic_scout",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            authorization = manager.authorize_provider_retry(workflow_id)
+
+            self.assertEqual(authorization.status, ProviderRetryStatus.PENDING.value)
+            self.assertEqual(
+                authorization.retry_task_id,
+                "producer.topic_scout_operator_retry_1",
+            )
+
+    def test_terminal_failed_batch_can_authorize_one_new_task_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            workflow_id = str(uuid4())
+            model_provider = OneCallGeneralOpinionProvider(data_dir)
+            model_provider.allow_failed_batch_retry = True
+            rd_loader = RoleDefinitionLoader.from_project(
+                BASE_DIR,
+                access_log_path=data_dir / "logs" / "rd_access.jsonl",
+            )
+            registry = ProducerRegistry(
+                model_provider,
+                {"producer.topic_scout": "google/gemini-3.7-flash:batch"},
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+                retrieval_coordinator=RetrievalCoordinator(
+                    MockRetrievalProvider(
+                        reservation_root=data_dir / "retrieval_call_reservations"
+                    ),
+                    data_dir=data_dir,
+                    demo_safe_mode=True,
+                ),
+            )
+            repository = WorkflowRepository(data_dir)
+            manager = ProducerManager(
+                registry,
+                repository,
+                rd_loader=rd_loader,
+                demo_safe_mode=True,
+            )
+            request = PMPMessage.create(
+                workflow_id=workflow_id,
+                sender_agent_id="producer.manager",
+                receiver_agent_id="producer.topic_scout",
+                message_type=MessageType.TASK,
+                objective="saved native batch request",
+                payload={"topic": "batch", "search_constraints": {}},
+            )
+            error = PMPMessage.create(
+                workflow_id=workflow_id,
+                parent_message_id=request.message_id,
+                sender_agent_id="producer.topic_scout",
+                receiver_agent_id="producer.manager",
+                message_type=MessageType.ERROR,
+                objective="saved native batch failure",
+                payload={
+                    "message": "OPENROUTER_BATCH_FAILED: terminal status=failed",
+                    "task_id": "producer.topic_scout",
+                    "agent_id": "producer.topic_scout",
+                    "provider": "openrouter",
+                    "model_id": "google/gemini-3.7-flash:batch",
+                    "error_class": "NonRetryableAgentError",
+                    "http_status": None,
+                },
+                metadata=PMPMetadata(status=MessageStatus.FAILED),
+            )
+            repository.save(
+                ProducerWorkflowState(
+                    workflow_id=workflow_id,
+                    status="FAILED",
+                    initial_request={"topic": "", "search_constraints": {}},
+                    completed_agents=[],
+                    message_history=[request, error],
+                    error={"message": "saved terminal batch failure"},
+                )
+            )
+            reservation = manager.provider_retry_store.reservation_path(
+                provider_id="openrouter",
+                workflow_id=workflow_id,
+                task_id="producer.topic_scout",
+            )
+            reservation.parent.mkdir(parents=True)
+            reservation.write_text(
+                json.dumps(
+                    {
+                        "workflow_id": workflow_id,
+                        "task_id": "producer.topic_scout",
+                        "agent_id": "producer.topic_scout",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            authorization = manager.authorize_provider_retry(workflow_id)
+
+            self.assertEqual(authorization.status, ProviderRetryStatus.PENDING.value)
+            self.assertEqual(
+                authorization.retry_task_id,
+                "producer.topic_scout_operator_retry_1",
+            )
+            self.assertEqual(
+                authorization.source_error_class,
+                "ProviderRequestSchemaError",
+            )
+
     def test_one_time_reasoning_retry_reuses_retrieval_and_stops_downstream(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary)

@@ -63,6 +63,12 @@ class RetrievalCoordinator:
             "provider_id": self.provider.provider_id,
             "reserved_at": datetime.now(timezone.utc).isoformat(),
         }
+        first_discriminator = self._invocation_discriminator(
+            query=queries[0] if queries else "",
+            strategy=strategy,
+            max_results=max_results,
+        )
+        reservation_created = False
         try:
             reservation_path.parent.mkdir(parents=True, exist_ok=True)
             with reservation_path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -70,13 +76,27 @@ class RetrievalCoordinator:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            reservation_created = True
         except FileExistsError as exc:
-            raise NonRetryableAgentError(
-                "RETRIEVAL_AMBIGUOUS_STATE: reservation exists without persisted context; "
-                "automatic search retry is blocked",
-                provider=self.provider.provider_id,
-                automatic_retry_allowed=False,
-            ) from exc
+            # An explicit one-shot recovery callback is allowed to adopt a
+            # reservation that was durably written immediately before a local
+            # process stop.  The callback must validate and consume its own
+            # pending authorization before any provider method is reached.
+            if before_provider_call is not None:
+                before_provider_call(reservation_path, retrieval_id)
+                reservation_created = False
+            else:
+                can_resume = getattr(self.provider, "can_resume", None)
+                if not callable(can_resume) or not can_resume(
+                    reservation_path=reservation_path,
+                    invocation_discriminator=first_discriminator,
+                ):
+                    raise NonRetryableAgentError(
+                        "RETRIEVAL_AMBIGUOUS_STATE: reservation exists without persisted context; "
+                        "automatic search retry is blocked",
+                        provider=self.provider.provider_id,
+                        automatic_retry_allowed=False,
+                    ) from exc
         except OSError as exc:
             raise NonRetryableAgentError(
                 "RETRIEVAL_RESERVATION_ERROR: search call blocked before provider invocation",
@@ -86,16 +106,23 @@ class RetrievalCoordinator:
 
         # One-shot recovery workflows consume their durable authorization only
         # after this reservation exists, but still before a paid search starts.
-        if before_provider_call is not None:
+        if before_provider_call is not None and reservation_created:
             before_provider_call(reservation_path, retrieval_id)
 
         all_results = []
         for query in queries:
+            invocation_discriminator = self._invocation_discriminator(
+                query=query,
+                strategy=strategy,
+                max_results=max_results,
+            )
             results = await self.provider.search(
                 query=query,
                 strategy=strategy,
                 max_results=max_results,
                 timeout_seconds=timeout_seconds,
+                invocation_reservation_path=reservation_path,
+                invocation_discriminator=invocation_discriminator,
             )
             all_results.extend((query, result) for result in results)
             if len(all_results) >= max_results:
@@ -209,3 +236,15 @@ class RetrievalCoordinator:
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
             return value
         return "id-" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _invocation_discriminator(
+        *,
+        query: str,
+        strategy: RetrievalStrategy,
+        max_results: int,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"{strategy.value}\0{max_results}\0{query}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"retrieval-{digest}"

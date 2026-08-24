@@ -19,9 +19,16 @@ from common.models.errors import (
     ProviderResponseContractError,
     RetryableAgentError,
 )
-from common.provider_schema_compatibility import validate_provider_schema_compatibility
-from common.structured_outputs import strict_output_schema
+from common.provider_schema_compatibility import (
+    specialize_provider_output_schema,
+    validate_provider_schema_compatibility,
+)
+from common.structured_outputs import (
+    strict_output_schema,
+    validate_strict_output_schema,
+)
 from providers.openrouter_capabilities import OpenRouterModelCapabilityClient
+from providers.openrouter_batch import OpenRouterBatchClient, is_openrouter_batch_model
 
 
 RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
@@ -52,6 +59,7 @@ class OpenRouterModelProvider:
         timeout: int = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
         reservation_root: Path | None = None,
         capability_client: OpenRouterModelCapabilityClient | None = None,
+        batch_poll_interval_seconds: float = 5.0,
     ) -> None:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required")
@@ -64,6 +72,35 @@ class OpenRouterModelProvider:
         self.capability_client = capability_client or OpenRouterModelCapabilityClient(
             base_url=self.base_url,
         )
+        self.batch_client = OpenRouterBatchClient(
+            api_key=api_key,
+            base_url=self.base_url,
+            default_timeout_seconds=timeout,
+            poll_interval_seconds=batch_poll_interval_seconds,
+        )
+
+    def can_resume_invocation(
+        self,
+        *,
+        reservation_path: Path,
+        model_id: str,
+    ) -> bool:
+        return is_openrouter_batch_model(model_id) and (
+            OpenRouterBatchClient.has_resumable_state(reservation_path)
+        )
+
+    def can_retry_failed_invocation(
+        self,
+        *,
+        reservation_path: Path,
+        model_id: str,
+    ) -> bool:
+        return is_openrouter_batch_model(model_id) and (
+            OpenRouterBatchClient.has_terminal_failed_state(
+                reservation_path,
+                model_id=model_id,
+            )
+        )
 
     async def generate_structured(
         self,
@@ -73,6 +110,7 @@ class OpenRouterModelProvider:
         input_data: dict,
         output_schema: type[BaseModel],
         timeout_seconds: int | None = None,
+        invocation_reservation_path: Path | None = None,
     ) -> dict:
         if not model:
             raise NonRetryableAgentError(
@@ -91,7 +129,29 @@ class OpenRouterModelProvider:
             input_data=input_data,
             output_schema=output_schema,
         )
+        if is_openrouter_batch_model(model):
+            return await asyncio.to_thread(
+                self._batch_post,
+                body,
+                timeout_seconds,
+                invocation_reservation_path,
+            )
         return await asyncio.to_thread(self._post, body, timeout_seconds)
+
+    def _batch_post(
+        self,
+        body: dict,
+        timeout_seconds: int | None,
+        invocation_reservation_path: Path | None,
+    ) -> dict:
+        model_id = str(body.get("model") or "")
+        envelope = self.batch_client.execute_chat(
+            model_id=model_id,
+            request_body=body,
+            reservation_path=invocation_reservation_path,
+            timeout_seconds=timeout_seconds,
+        )
+        return self._extract_structured_content(envelope, model_id=model_id)
 
     @staticmethod
     def build_request_body(
@@ -104,6 +164,8 @@ class OpenRouterModelProvider:
         """Build the exact secret-free JSON body posted to OpenRouter."""
 
         schema = strict_output_schema(output_schema, input_data=input_data)
+        schema = specialize_provider_output_schema(model, schema)
+        validate_strict_output_schema(schema, schema_name=output_schema.__name__)
         validate_provider_schema_compatibility(model, schema)
         return {
             "model": model,
@@ -158,6 +220,8 @@ class OpenRouterModelProvider:
             ) from exc
         context_limit = MODEL_INPUT_CONTEXT_LIMITS.get(model.lower())
         schema = strict_output_schema(output_schema, input_data=input_data)
+        schema = specialize_provider_output_schema(model, schema)
+        validate_strict_output_schema(schema, schema_name=output_schema.__name__)
         validate_provider_schema_compatibility(model, schema)
         serialized = "\n".join(
             (
@@ -260,6 +324,17 @@ class OpenRouterModelProvider:
                 provider="openrouter",
                 model_id=str(body.get("model") or "") or None,
             ) from exc
+        return self._extract_structured_content(
+            result,
+            model_id=str(body.get("model") or "") or None,
+        )
+
+    def _extract_structured_content(
+        self,
+        result: dict,
+        *,
+        model_id: str | None,
+    ) -> dict:
         try:
             content = result["choices"][0]["message"]["content"]
             if isinstance(content, list):
@@ -268,7 +343,7 @@ class OpenRouterModelProvider:
                 raise TypeError("message content must be text")
             return self._decode_strict_json_object(
                 content,
-                model_id=str(body.get("model") or "") or None,
+                model_id=model_id,
                 document_name="structured message content",
             )
         except ProviderResponseContractError:
@@ -277,7 +352,7 @@ class OpenRouterModelProvider:
             raise NonRetryableAgentError(
                 "OpenRouter did not return a valid JSON object",
                 provider="openrouter",
-                model_id=str(body.get("model") or "") or None,
+                model_id=model_id,
             ) from exc
 
     @classmethod

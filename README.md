@@ -132,7 +132,9 @@ OpenRouter応答が`IncompleteRead`などで途中切断された場合は、Pro
 
 OpenRouterのStructured Output応答は、Provider境界でroot object、標準JSON数値、再帰的な有限数を検査します。`Infinity`、`NaN`、指数overflow、array/scalar rootはPydanticへ渡しません。応答本文は保存せず、hash・長さ・root型・不正pathだけをError PMPへ記録します。Conclusionでこの種の失敗または課金済みの可能性がある通信失敗から再開する場合は、`--conclusion-provider-retry`をDemo Safe Modeで一回だけ使用します。通常の`--conclusion-recover`は未消費の明示認可なしにProviderを再送しません。
 
-すべてのOpenRouter Structured Output要求は `provider.require_parameters=true` を送信し、`response_format` を実装しないEndpointへのroutingを禁止します。有料chat completionの予約・送信前にも同じ公開Endpoint metadataを検査します。必要能力を持つ稼働Endpointがない場合は`MODEL_CAPABILITY_ERROR`として停止し、reservationとchat completionを作成しません。`require_parameters=true`、`json_schema.strict=true`、`response_format.type=json_schema`を弱めるfallbackはありません。`~vendor/...-latest`形式のaliasはcatalogの`alias_target`をたどって実体Endpointを検査します。元のConclusion taskと一回限りのoperator retryがどちらも `ProviderResponseContractError` になった場合だけ、`py main.py --conclusion-contract-repair <WORKFLOW_ID> <REPAIR_MODEL_ID> --provider openrouter --safe-mode` を使用できます。この操作は、元モデルと異なる明示モデル、`_provider_contract_repair_1` の決定論的task ID、専用のPENDING/CONSUMED認可、独立reservationを使う一回限りの契約修復です。同じtaskの再々送ではなく、正常なupstream checkpointを再利用します。
+すべてのOpenRouter Structured Output要求は `provider.require_parameters=true` を送信し、`response_format` を実装しないEndpointへのroutingを禁止します。有料chat completionの予約・送信前にも同じ公開Endpoint metadataを検査します。必要能力を持つ稼働Endpointがない場合は`MODEL_CAPABILITY_ERROR`として停止し、reservationとchat completionを作成しません。`require_parameters=true`、`json_schema.strict=true`、`response_format.type=json_schema`を弱めるfallbackはありません。`~vendor/...-latest`形式のaliasはcatalogの`alias_target`をたどって実体Endpointを検査します。元taskと一回限りのoperator retryがどちらも応答契約に違反した場合、ConclusionまたはDeliberationのcontract repairを使用できます。通常は元モデルと異なる明示モデル、`_provider_contract_repair_1` の決定論的task ID、専用のPENDING/CONSUMED認可、独立reservationを使います。GeminiがHTTP 400 `INVALID_ARGUMENT`でrequest schemaを拒否し、原因となるwire schema変換が名前付きrevisionで修正済みの場合だけ、同じ設定モデルを一回使用できます。この同一モデル修復はschema revision一致を必須とし、model compatibility bindingは作りません。正常なupstream checkpointは再利用し、同じtaskの再々送にはしません。
+
+Gemini sync / Batchへ送るSchemaはcanonical strict schemaから独立したwire viewです。Pydanticの型、ID enum、全objectのclosed/required規則を維持したまま、Provider grammarには不要な`title`、文字列長・pattern、配列件数制約をwire viewから除き、応答後のPydantic validationで再検査します。1つの`anyOf`が8 branchを超えるSchemaはHTTP送信前にFail Closedします。長いPlaywright台本ではparagraph別unionを無制限展開せず、保存済みIDのglobal allowlistをSchemaに残し、paragraph-localなClaim/Evidence/Source相関は既存の決定論的Validatorが検査します。自由形式objectの許容、未知ID、strict object closureの緩和には使いません。
 
 異なるmodelによるcontract repair結果がPydantic出力検証まで成功した場合、その事実を`storage/data/provider_model_compatibility/`へappend-onlyの互換性bindingとして保存します。bindingはprovider、Agent、output schema、元の非互換modelの完全一致時だけ将来の新しいlogical taskへ適用されます。明示model指定はbindingより優先され、環境設定のmodelが変更された場合は古いbindingを適用しません。既存workflowの旧repair成功は、保存済みPMP result、CONSUMED authorization、reservationを照合して復元します。`--doctor`は有効なbindingを表示します。
 
@@ -220,9 +222,9 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | Resume | 正常な上流Revision結果を受け取って再分析 | `--researcher-resume`、`--deliberation-resume`、`--conclusion-resume`、`--playwright-resume` |
 | Recover | 保存済みcheckpointを照合し、完了済み処理を再利用 | `--producer-recover`、`--researcher-recover`、`--deliberation-recover`、`--conclusion-recover`、`--playwright-recover` |
 | Provider Retry | 課金済みの可能性がある一時障害を、保存済み認可と別task identityで一度だけ再送 | 各層の`--*-provider-retry` |
-| Revision | 保存済みQuality Findingに対する明示的一サイクル | `--producer-revise`、`--researcher-revise` + `--researcher-revision-execute`、`--conclusion-revise`、`--playwright-revise` |
+| Revision | 保存済みQuality Findingに対する明示的一サイクル | `--producer-revise`、`--researcher-revise` + `--researcher-revision-execute`、`--deliberation-revise`、`--conclusion-revise`、`--playwright-revise` |
 | Deterministic Integrity Repair | 保存済みResearch Reportのallowlist対象relation不整合を外部call 0件で修復 | `--researcher-integrity-repair` |
-| Contract/Capability Repair | 同一model retryでは直らないProvider契約・能力不一致を、異なる明示modelで一度だけ修復 | `--conclusion-contract-repair`、`--playwright-capability-repair` |
+| Contract/Capability Repair | 明示retryでも解消しないProvider契約・能力不一致を監査可能な一回限りidentityで修復 | `--deliberation-contract-repair`、`--conclusion-contract-repair`、`--playwright-capability-repair`。応答契約は異なるmodel、名前付きrequest-schema revisionだけ同一model可 |
 | Targeted Researcher Repair | 保存済みRetrievalを再利用する旧失敗専用の一回限り修復 | `--researcher-runtime-model-repair`、`--researcher-runtime-output-repair`、`--researcher-runtime-adapter-repair`、`--researcher-runtime-identity-repair`、`--researcher-runtime-provenance-repair` |
 
 `--researcher-retrieval-reconstruct`だけは新しい検索を行うため、Retrieval 0件のRecoveryには使用しません。`--researcher-task <workflow_id> <task_id>`は保存済みroutingで単一Taskを実行する低レベル運用コマンドです。通常運用では`--status`が示す層コマンドを優先してください。全引数は`py main.py --help`、バージョンは`--version`、完全状態は`--json`、開発者向けTracebackは`--verbose`で確認できます。
@@ -255,6 +257,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --producer-recover <WORKFLOW_ID>` | 最初の未完了checkpointから再開し、完了済み成果物とRetrievalを再利用 | checkpoint依存 |
 | `py main.py --producer-revise <WORKFLOW_ID> [--reason "..."] --safe-mode` | 保存済みQuality FindingのProducer内部Revisionを明示承認し、対象agent以降を一サイクルだけ再実行 | 対象checkpoint依存。Revision専用reservationを使用 |
 | `py main.py --producer-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | 保存済みRetrievalでGeneral Opinion Reasoningを一回だけ明示再送し、Research Planner前で停止 | LLM最大1、Retrieval 0 |
+| `py main.py --producer-retrieval-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | terminalなBatch検索失敗後、同期Retrieval用の新しい一回限りidentityを承認し、General Opinionだけを復旧 | Retrieval最大1、Reasoning最大1。完了済みTopic工程は再利用 |
 | `py main.py --producer-output-repair <WORKFLOW_ID> --provider openrouter --safe-mode` | 消費済みretryが既知のmetadata hydration契約で失敗した場合に、別task identityで一回修復 | LLM最大1、Retrieval 0 |
 
 ### CLI Researcher
@@ -287,6 +290,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --deliberation-resume <WORKFLOW_ID>` | Researcherの追加Evidence受領後にpending revisionを再分析 | LLMあり |
 | `py main.py --deliberation-recover <WORKFLOW_ID>` | checkpointを照合し、最後の未完了段階から障害復旧 | checkpoint依存 |
 | `py main.py --deliberation-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | RetryableなManagerまたはQuality Reviewer taskを一回だけ明示再送 | LLM最大1 |
+| `py main.py --deliberation-contract-repair <WORKFLOW_ID> <REPAIR_MODEL_ID> --provider openrouter --safe-mode` | 元taskと明示retryがともにProvider契約で失敗した場合、監査可能な新task identityで一回だけ修復 | LLM最大1。通常は異なるmodel、名前付きSchema修復時だけ同一model可 |
 | `py main.py --deliberation-revise <WORKFLOW_ID> --provider openrouter --safe-mode` | 保存済みの内部Revision、またはConclusionから受信したRevision Requestを明示承認して最小依存閉包だけ再実行 | 対象checkpoint依存 |
 
 ### CLI Conclusion
@@ -298,7 +302,7 @@ Mock E2Eの完走は制御系・Schema・保存・層間接続が動くことを
 | `py main.py --conclusion-recover <WORKFLOW_ID>` | 保存済みResult PMPとcheckpointを照合し、未完了stageまたは既知Candidate Coverage failureから復旧 | checkpoint依存 |
 | `py main.py --conclusion-provider-retry <WORKFLOW_ID> --provider openrouter --safe-mode` | Retryable/応答契約failureの未完了taskを一回だけ明示再送 | LLM最大1 |
 | `py main.py --conclusion-revise <WORKFLOW_ID> [--reason "..."] --provider openrouter --safe-mode` | 保存済み内部Revision、またはPlaywrightから受信したRevision Requestを明示承認。意味変更時は新しいHuman Selection待ちで停止 | 対象checkpoint依存 |
-| `py main.py --conclusion-contract-repair <WORKFLOW_ID> <REPAIR_MODEL_ID> --provider openrouter --safe-mode` | 元taskと一回retryがともに契約違反の場合、異なる明示modelで一回修復 | LLM最大1 |
+| `py main.py --conclusion-contract-repair <WORKFLOW_ID> <REPAIR_MODEL_ID> --provider openrouter --safe-mode` | 元taskと一回retryがともに契約違反の場合、監査可能な新task identityで一回修復 | LLM最大1。応答契約は異なるmodel、名前付きSchema修復時だけ同一model可 |
 | `py main.py --conclusion-select <WORKFLOW_ID> <CANDIDATE_ID>` | 1候補をHuman Selectionとして確定し、Playwright Handoffを保存 | 0 |
 | `py main.py --conclusion-integrate <WORKFLOW_ID> <CANDIDATE_ID_1> <CANDIDATE_ID_2> [...]` | 2件以上の候補から統合案を再生成・再評価 | LLMあり |
 

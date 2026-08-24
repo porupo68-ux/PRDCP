@@ -31,11 +31,13 @@ class ProviderContractRepairStatus(str, Enum):
 
 
 class ProviderContractRepairAuthorization(BaseModel):
-    """One-shot authorization to move a failed task to a different model.
+    """One-shot authorization to repair a repeated provider contract failure.
 
     A contract repair is deliberately not a retry of the same logical task. It
     is allowed only after the original call and its one operator retry both
-    produced a contract-invalid billed response.
+    produced a contract-invalid billed response. Response-contract failures
+    require a distinct model. A request-schema failure may use the same model
+    only when tied to a named wire-schema revision.
     """
 
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
@@ -53,6 +55,11 @@ class ProviderContractRepairAuthorization(BaseModel):
     failed_model_id: str = Field(min_length=1)
     retry_failed_model_id: str | None = None
     repair_model_id: str = Field(min_length=1)
+    repair_kind: str = Field(
+        default="distinct_model",
+        pattern=r"^(distinct_model|same_model_schema)$",
+    )
+    repair_contract_revision: str | None = None
     authorized_by: str = Field(min_length=1)
     status: ProviderContractRepairStatus
     authorized_at: datetime
@@ -92,6 +99,7 @@ class ProviderContractRepairAuthorizationStore:
         repair_model_id: str,
         retry_failed_model_id: str | None = None,
         source_error_class: str = "ProviderResponseContractError",
+        repair_contract_revision: str | None = None,
         authorized_by: str = "cli.operator",
     ) -> ProviderContractRepairAuthorization:
         self._validate_component(provider_id, "provider_id")
@@ -109,17 +117,28 @@ class ProviderContractRepairAuthorizationStore:
         ):
             raise ValueError("Provider contract repair model ID is invalid")
         effective_retry_model_id = retry_failed_model_id or failed_model_id
-        if repair_model_id in {failed_model_id, effective_retry_model_id}:
-            raise ValueError(
-                "Provider contract repair must use a different model "
-                "(a third distinct model)"
-            )
         if source_error_class not in {
             "ProviderResponseContractError",
             "ProviderRequestSchemaError",
             "NonRetryableAgentError",
         }:
             raise ValueError("Provider contract repair source failure is unsupported")
+        same_model_schema_repair = repair_model_id in {
+            failed_model_id,
+            effective_retry_model_id,
+        }
+        if same_model_schema_repair:
+            if (
+                source_error_class != "ProviderRequestSchemaError"
+                or not repair_contract_revision
+            ):
+                raise ValueError(
+                    "Provider contract repair must use a different model unless "
+                    "repairing an identified request-schema revision"
+                )
+            repair_kind = "same_model_schema"
+        else:
+            repair_kind = "distinct_model"
 
         retry_store = ProviderRetryAuthorizationStore(self.data_dir)
         retry_authorization = retry_store.for_original_task(
@@ -176,6 +195,8 @@ class ProviderContractRepairAuthorizationStore:
                 retry_failed_model_id=effective_retry_model_id,
                 repair_model_id=repair_model_id,
                 source_error_class=source_error_class,
+                repair_kind=repair_kind,
+                repair_contract_revision=repair_contract_revision,
             )
             if existing.status == ProviderContractRepairStatus.PENDING.value:
                 return existing
@@ -197,6 +218,8 @@ class ProviderContractRepairAuthorizationStore:
             failed_model_id=failed_model_id,
             retry_failed_model_id=effective_retry_model_id,
             repair_model_id=repair_model_id,
+            repair_kind=repair_kind,
+            repair_contract_revision=repair_contract_revision,
             authorized_by=authorized_by,
             status=ProviderContractRepairStatus.PENDING,
             authorized_at=utc_now(),

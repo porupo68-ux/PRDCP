@@ -36,6 +36,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     operation.add_argument(
+        "--producer-retrieval-retry",
+        metavar="WORKFLOW_ID",
+        help=(
+            "After a terminal Batch web-search failure, authorize one new "
+            "synchronous Retrieval identity and rerun only General Opinion"
+        ),
+    )
+    operation.add_argument(
         "--producer-output-repair",
         metavar="WORKFLOW_ID",
         help=(
@@ -177,6 +185,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "途中切断で停止したDeliberation ManagerまたはQuality Reviewerを、"
             "Demo Safe Modeのまま一度だけ明示的に再送する"
+        ),
+    )
+    operation.add_argument(
+        "--deliberation-contract-repair",
+        nargs=2,
+        metavar=("WORKFLOW_ID", "REPAIR_MODEL_ID"),
+        help=(
+            "元のDeliberation taskと明示的一回retryがともにProvider契約で"
+            "拒否された場合、異なるmodelで監査可能な修復taskを一回だけ実行する"
         ),
     )
     operation.add_argument("--conclusion", metavar="WORKFLOW_ID", help="保存済みDeliberation ResultからConclusionを実行する")

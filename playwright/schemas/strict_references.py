@@ -4,6 +4,14 @@ from copy import deepcopy
 from typing import Any
 
 
+# Per-item cross-field correlation is useful for small responses, but copying
+# a complete object branch once per paragraph makes Gemini's controlled-
+# generation grammar grow linearly with script length. The global ID enums are
+# still present and PlaywrightValidator enforces the exact paragraph-local
+# relationship before Final Gate/Delivery.
+MAX_STRICT_CORRELATED_VARIANTS = 8
+
+
 def unique_strings(values: list[Any]) -> list[str]:
     return list(
         dict.fromkeys(
@@ -100,7 +108,13 @@ def bind_array_item_variants(
     array_field: str,
     variants: list[dict[str, dict[str, list[str]]]],
 ) -> dict[str, Any]:
-    """Constrain each array object to one request-specific reference branch."""
+    """Constrain bounded arrays to request-specific reference branches.
+
+    For a long script, retain the globally bound item schema instead of
+    expanding one structurally identical object per paragraph. This preserves
+    the finite ID domain while the deterministic Playwright validator remains
+    authoritative for cross-field paragraph correlation.
+    """
 
     targets: list[dict[str, Any]] = []
 
@@ -141,6 +155,9 @@ def bind_array_item_variants(
         raise ValueError(f"strict schema field {array_field} has no object items")
     if not variants:
         target["maxItems"] = 0
+        return schema
+
+    if len(variants) > MAX_STRICT_CORRELATED_VARIANTS:
         return schema
 
     template = resolve(items)

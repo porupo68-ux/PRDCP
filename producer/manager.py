@@ -46,10 +46,18 @@ from common.provider_output_repair import (
     ProviderOutputRepairAuthorization,
     ProviderOutputRepairAuthorizationStore,
 )
+from common.retrieval_provider_retry import (
+    RETRIEVAL_PROVIDER_RETRY_SUFFIX,
+    RetrievalProviderRetryAuthorization,
+    RetrievalProviderRetryAuthorizationStore,
+    RetrievalProviderRetryStatus,
+)
 from common.validation import PMPValidator
 from common.role_definitions import RoleDefinitionExtractor, RoleDefinitionLoader
 from producer.registry import ProducerRegistry
 from producer.schemas.review import QualityReviewOutput
+from producer.schemas.general_opinion import GeneralOpinionInput
+from producer.agents.general_opinion_analyst import general_opinion_retrieval_plan
 from producer.state import ProducerWorkflowState, RevisionRecord, utc_now
 from producer.workflow import AGENT_ORDER, DISPLAY_NAMES
 from retrieval.models import RetrievedContext, RetrievalStrategy
@@ -93,7 +101,155 @@ class ProducerManager:
         self.provider_output_repair_store = ProviderOutputRepairAuthorizationStore(
             repository.data_dir
         )
+        self.retrieval_provider_retry_store = (
+            RetrievalProviderRetryAuthorizationStore(repository.data_dir)
+        )
         self.revision_exchange = RevisionExchangeRepository(repository.data_dir)
+
+    def authorize_retrieval_provider_retry(
+        self,
+        workflow_id: str,
+    ) -> RetrievalProviderRetryAuthorization:
+        """Authorize one synchronous replacement for a terminal Batch search."""
+
+        if not self.demo_safe_mode:
+            raise ValueError(
+                "Producer Retrieval retry is available only while Demo Safe Mode is enabled"
+            )
+        state = self.repository.load(workflow_id)
+        if state.status != WorkflowStatus.FAILED.value:
+            raise ValueError("Producer must be FAILED before a Retrieval provider retry")
+        start_index = self._recovery_start_index(state)
+        agent_id = AGENT_ORDER[start_index]
+        if agent_id != "producer.general_opinion_analyst":
+            raise ValueError("Retrieval provider retry is limited to General Opinion")
+        error_response = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.sender_agent_id == agent_id
+                and message.receiver_agent_id == self.agent_id
+                and message.message_type == MessageType.ERROR.value
+            ),
+            None,
+        )
+        if error_response is None:
+            raise ValueError("No persisted General Opinion Retrieval failure was found")
+        request = next(
+            (
+                message
+                for message in reversed(state.message_history)
+                if message.message_id == error_response.parent_message_id
+            ),
+            None,
+        )
+        error_message = str(error_response.payload.get("message") or "")
+        failed_model_id = str(error_response.payload.get("model_id") or "")
+        if (
+            request is None
+            or request.sender_agent_id != self.agent_id
+            or request.receiver_agent_id != agent_id
+            or request.message_type != MessageType.TASK.value
+            or error_response.payload.get("provider") != "openrouter"
+            or error_response.payload.get("error_class") != "NonRetryableAgentError"
+            or not error_message.startswith(
+                "OPENROUTER_BATCH_FAILED: terminal status="
+            )
+            or not failed_model_id.lower().endswith(":batch")
+        ):
+            raise ValueError(
+                "Persisted Producer failure is not a correlated terminal Batch Retrieval failure"
+            )
+        agent = self.registry.get(agent_id)
+        coordinator = agent.retrieval_coordinator
+        if coordinator is None:
+            raise ValueError("General Opinion has no Retrieval coordinator")
+        retrieval_provider = coordinator.provider
+        retrieval_provider_id = getattr(retrieval_provider, "provider_id", None)
+        runtime_model_id = getattr(retrieval_provider, "model", None)
+        if not isinstance(retrieval_provider_id, str) or not isinstance(
+            runtime_model_id, str
+        ):
+            raise ValueError("Retrieval provider/model identity is unavailable")
+        canonical = GeneralOpinionInput.model_validate(
+            {
+                "selected_topic": state.selected_topic,
+                "revision_context": (
+                    state.revision_history[-1].model_dump(mode="json")
+                    if state.revision_history
+                    else None
+                ),
+            }
+        )
+        original_task_id, query = general_opinion_retrieval_plan(canonical)
+        original_retrieval_id = coordinator.retrieval_identity(
+            workflow_id=workflow_id,
+            task_id=original_task_id,
+            agent_id=agent_id,
+            strategy=RetrievalStrategy.GENERAL_OPINION,
+        )
+        retry_task_id = f"{original_task_id}{RETRIEVAL_PROVIDER_RETRY_SUFFIX}"
+        retry_retrieval_id = coordinator.retrieval_identity(
+            workflow_id=workflow_id,
+            task_id=retry_task_id,
+            agent_id=agent_id,
+            strategy=RetrievalStrategy.GENERAL_OPINION,
+        )
+        return self.retrieval_provider_retry_store.authorize_once(
+            workflow_id=workflow_id,
+            retrieval_provider_id=retrieval_provider_id,
+            agent_id=agent_id,
+            original_task_id=original_task_id,
+            original_retrieval_id=original_retrieval_id,
+            retry_retrieval_id=retry_retrieval_id,
+            source_error_message_id=error_response.message_id,
+            source_error_class="NonRetryableAgentError",
+            failed_model_id=failed_model_id,
+            runtime_model_id=runtime_model_id,
+            retrieval_strategy=RetrievalStrategy.GENERAL_OPINION.value,
+            query_sha256=hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            max_results=5,
+        )
+
+    async def retry_retrieval_provider(
+        self,
+        workflow_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProducerWorkflowState:
+        """Run only the failed General Opinion checkpoint with one new search identity."""
+
+        authorization = self.authorize_retrieval_provider_retry(workflow_id)
+        if authorization.status == RetrievalProviderRetryStatus.CONSUMED.value:
+            raise ValueError(
+                "The one-time Retrieval provider retry was already consumed"
+            )
+        await self._emit(
+            progress_callback,
+            "One-shot synchronous Retrieval retry authorized: "
+            + authorization.retry_task_id,
+        )
+        state = self.repository.load(workflow_id)
+        start_index = self._recovery_start_index(state)
+        state.error = None
+        state.completed_at = None
+        self.repository.save(state)
+        provider_task_id = (
+            "producer.general_opinion_analyst.retrieval-retry."
+            + authorization.authorization_id.replace("-", "")[:12]
+        )
+        return await self._run_from(
+            state,
+            start_index,
+            progress_callback,
+            provider_task_id_overrides={
+                "producer.general_opinion_analyst": provider_task_id
+            },
+            retrieval_task_id_overrides={
+                "producer.general_opinion_analyst": authorization.retry_task_id
+            },
+            stop_after_index=start_index,
+        )
 
     def authorize_provider_retry(
         self,
@@ -101,9 +257,9 @@ class ProducerManager:
     ) -> ProviderRetryAuthorization:
         """Authorize one repaired General Opinion reasoning request.
 
-        Cycle 030 migrates the already-persisted generic HTTP 400 into the
-        precise request-schema failure classification only after correlating
-        the PMP error, original request, agent, endpoint and reservation.
+        The saved error must match either the historical Gemini schema failure
+        or the batch-model/synchronous-endpoint transport mismatch.  Both are
+        code-level request-contract failures, not ambiguous generation retries.
         """
 
         if not self.demo_safe_mode:
@@ -115,10 +271,6 @@ class ProducerManager:
             raise ValueError("Producer must be FAILED before an operator provider retry")
         next_index = self._recovery_start_index(state)
         agent_id = AGENT_ORDER[next_index]
-        if agent_id != "producer.general_opinion_analyst":
-            raise ValueError(
-                "Cycle 030 provider retry is limited to the failed General Opinion checkpoint"
-            )
         error_response = next(
             (
                 message
@@ -140,29 +292,70 @@ class ProducerManager:
             None,
         )
         error_message = str(error_response.payload.get("message") or "")
+        failed_model_id = str(error_response.payload.get("model_id") or "")
+        agent = self.registry.get(agent_id)
+        provider_id = getattr(agent.provider, "provider_id", None)
+        if not isinstance(provider_id, str):
+            raise ValueError("Producer agent provider has no stable logical provider ID")
+        original_task_id = str(error_response.payload.get("task_id") or agent_id)
+        original_reservation = self.provider_retry_store.reservation_path(
+            provider_id=provider_id,
+            workflow_id=workflow_id,
+            task_id=original_task_id,
+        )
+        schema_rejection = (
+            agent_id == "producer.general_opinion_analyst"
+            and
+            error_response.payload.get("http_status") == 400
+            and "INVALID_ARGUMENT" in error_message
+        )
+        batch_transport_rejection = (
+            error_response.payload.get("http_status") == 404
+            and failed_model_id.lower().endswith(":batch")
+            and "only available through the Batch API" in error_message
+        )
+        can_retry_failed_invocation = getattr(
+            agent.provider,
+            "can_retry_failed_invocation",
+            None,
+        )
+        batch_terminal_rejection = (
+            error_response.payload.get("error_class") == "NonRetryableAgentError"
+            and failed_model_id.lower().endswith(":batch")
+            and error_message.startswith(
+                "OPENROUTER_BATCH_FAILED: terminal status="
+            )
+            and callable(can_retry_failed_invocation)
+            and can_retry_failed_invocation(
+                reservation_path=original_reservation,
+                model_id=failed_model_id,
+            )
+        )
         if (
             request is None
             or request.sender_agent_id != self.agent_id
             or request.receiver_agent_id != agent_id
             or request.message_type != MessageType.TASK.value
             or error_response.payload.get("provider") != "openrouter"
-            or error_response.payload.get("http_status") != 400
-            or "INVALID_ARGUMENT" not in error_message
+            or not (
+                schema_rejection
+                or batch_transport_rejection
+                or batch_terminal_rejection
+            )
         ):
             raise ValueError(
-                "Persisted General Opinion failure is not the correlated Gemini "
-                "request-schema rejection"
+                "Persisted Producer failure is not a correlated request-contract "
+                "rejection"
             )
-        provider_id = getattr(self.registry.get(agent_id).provider, "provider_id", None)
-        if not isinstance(provider_id, str):
-            raise ValueError("General Opinion provider has no stable logical provider ID")
-        original_task_id = str(error_response.payload.get("task_id") or agent_id)
         return self.provider_retry_store.authorize_once(
             workflow_id=workflow_id,
             provider_id=provider_id,
             agent_id=agent_id,
             original_task_id=original_task_id,
             source_error_message_id=error_response.message_id,
+            # Manager-level correlation classifies this as a repaired request
+            # contract failure even when the transport surfaced a generic
+            # NonRetryableAgentError after asynchronous Batch validation.
             source_error_class="ProviderRequestSchemaError",
         )
 
@@ -172,12 +365,12 @@ class ProducerManager:
         *,
         progress_callback: ProgressCallback | None = None,
     ) -> ProducerWorkflowState:
-        """Run exactly the failed reasoning checkpoint, never downstream agents."""
+        """Run exactly the failed Producer checkpoint, never downstream agents."""
 
         authorization = self.authorize_provider_retry(workflow_id)
         await self._emit(
             progress_callback,
-            "Operator one-time General Opinion retry authorized: "
+            "Operator one-time Producer retry authorized: "
             + authorization.retry_task_id,
         )
         return await self.recover(
@@ -392,10 +585,20 @@ class ProducerManager:
             ):
                 task_overrides[agent_id] = authorization.retry_task_id
             elif original_reservation.exists():
-                raise ValueError(
-                    "Producer recovery found a prior Provider reservation for the "
-                    f"incomplete checkpoint {agent_id}; use --producer-provider-retry"
+                can_resume = getattr(
+                    self.registry.get(agent_id).provider,
+                    "can_resume_invocation",
+                    None,
                 )
+                model_id = self.registry.get(agent_id).model
+                if not callable(can_resume) or not can_resume(
+                    reservation_path=original_reservation,
+                    model_id=model_id,
+                ):
+                    raise ValueError(
+                        "Producer recovery found a prior Provider reservation for the "
+                        f"incomplete checkpoint {agent_id}; use --producer-provider-retry"
+                    )
         state.error = None
         state.completed_at = None
         self.repository.save(state)
